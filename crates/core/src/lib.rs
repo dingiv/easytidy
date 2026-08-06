@@ -21,6 +21,7 @@ pub mod flavor;
 pub mod models;
 pub mod podman;
 pub mod systemd;
+pub mod userenv;
 
 /// 解析 server 二进制路径（宿主侧）。
 ///

@@ -23,6 +23,10 @@ pub struct PtyOpen {
     pub cols: u16,
     /// 终端行数
     pub rows: u16,
+    /// 以 root 运行（默认 false：用户映射生效时经 su 以容器用户运行；
+    /// setup/包管理场景传 true 跳过 su）
+    #[serde(default)]
+    pub as_root: bool,
 }
 
 /// PtyOpen 响应：返回分配的 stream_id
@@ -353,6 +357,7 @@ mod tests {
             cwd: "/home/user".to_string(),
             cols: 80,
             rows: 24,
+            as_root: false,
         };
 
         let json = serde_json::to_string(&op).expect("serialize failed");

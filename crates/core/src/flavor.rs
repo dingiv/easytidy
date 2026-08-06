@@ -8,7 +8,7 @@
 //!
 //! 清单存放：`$XDG_CONFIG_HOME/easytidy/flavors/<name>.toml`
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,11 @@ pub struct Flavor {
     /// 额外路径映射
     #[serde(default)]
     pub mounts: Vec<MountConfig>,
+    /// 用户一致性映射（distrobox 式：映射宿主用户目录 + 容器用户与宿主一致）。
+    /// 默认开启；`gui = true` 时强制开启。显式 `false` 且非 GUI 时关闭
+    /// （容器内以 root 运行，行为与旧版一致）。
+    #[serde(default)]
+    pub user_home: Option<bool>,
     /// 网络配置（默认 host 模式）
     #[serde(default = "default_network")]
     pub network: NetworkConfig,
@@ -94,6 +99,11 @@ impl Flavor {
     /// GUI 透传（gui = true），配方参考 docs/11-gui-container.md（宿主实测验证）：
     /// - env：DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / XDG_RUNTIME_DIR（取宿主值）
     /// - 挂载：`/tmp/.X11-unix`（X11 socket）、`$XDG_RUNTIME_DIR`（Wayland/dbus/XAUTHORITY）
+    /// - 字体/图标透传（只读）：`/usr/share/fonts`、`$HOME/.local/share/fonts`、
+    ///   `/usr/share/icons`、`$HOME/.local/share/icons`（容器内 GUI 应用中文渲染
+    ///   与图标主题需要宿主字体；distrobox 同类挂载）
+    /// - 用户一致性映射（distrobox 式）：gui=true 强制 `user_home=true`，
+    ///   由 create_with_config 映射 `$HOME` + 注入 EASYTIDY_USER_*（见 models::ContainerConfig）
     /// - GPU 透传（--gpus=all + NVIDIA_* env）与 apparmor=unconfined 属 P1（需宿主
     ///   nvidia-container-toolkit），此处仅做纯显示透传，GUI 应用以软件渲染可用。
     pub fn build_config(&self, name: &str) -> Result<ContainerConfig> {
@@ -122,6 +132,30 @@ impl Flavor {
                     read_only: false,
                 });
             }
+            // 字体/图标透传（只读）：bind mount 要求宿主路径已存在（create_with_config
+            // 校验），故仅在宿主存在时挂载——$HOME/.local/share/{fonts,icons} 未建目录
+            // 的宿主自动跳过。
+            for p in ["/usr/share/fonts", "/usr/share/icons"] {
+                if Path::new(p).exists() {
+                    mounts.push(MountConfig {
+                        host_path: p.to_string(),
+                        container_path: p.to_string(),
+                        read_only: true,
+                    });
+                }
+            }
+            if let Ok(home) = std::env::var("HOME") {
+                for sub in [".local/share/fonts", ".local/share/icons"] {
+                    let p = format!("{home}/{sub}");
+                    if Path::new(&p).exists() {
+                        mounts.push(MountConfig {
+                            host_path: p.clone(),
+                            container_path: p,
+                            read_only: true,
+                        });
+                    }
+                }
+            }
         }
 
         Ok(ContainerConfig {
@@ -133,6 +167,9 @@ impl Flavor {
             mounts,
             network: self.network.clone(),
             env,
+            // gui=true 恒开用户一致性映射（GUI 应用需以宿主用户身份读写宿主挂载目录）；
+            // 非 GUI flavor 默认开启、可显式 user_home=false 关闭
+            user_home: self.gui || self.user_home.unwrap_or(true),
         })
     }
 }

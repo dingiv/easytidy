@@ -640,6 +640,7 @@ async fn pty_open(
         cwd: "/".to_string(),
         cols,
         rows,
+        as_root: false,
     };
 
     // 在此连接上发送 pty.open 并接收响应

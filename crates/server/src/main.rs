@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -100,6 +100,279 @@ impl Clone for ServerState {
 /// Configuration file path
 const CONFIG_PATH: &str = "/run/easytidy/config.json";
 
+/// 用户映射（容器内用户 = 宿主用户，distrobox 式）。
+///
+/// 由宿主侧 `create_with_config`（user_home=true）经 `EASYTIDY_USER_*` 注入；
+/// server 启动时创建同名/同 uid/gid 用户，PTY 与 entry 经 `su` 以该用户拉起应用
+/// ——避免容器内 root 读写宿主挂载目录的权限问题。
+#[derive(Debug, Clone)]
+struct UserMap {
+    name: String,
+    uid: u32,
+    gid: u32,
+    home: String,
+}
+
+/// 容器内用户固定名（与宿主用户名不同，符合"名字不同、uid 相同"语义）。
+const CONTAINER_USER: &str = "node";
+
+/// 用户映射全局态：`setup_user_mapping` 成功后才写入。
+/// `user_map()` 返回 `None` 表示映射未生效（PTY/entry 回退 root /bin/sh，与旧版一致）。
+static USER_MAP: OnceLock<UserMap> = OnceLock::new();
+
+/// 当前生效的用户映射。
+fn user_map() -> Option<&'static UserMap> {
+    USER_MAP.get()
+}
+
+/// 从环境变量读取用户映射（EASYTIDY_USER_UID/GID，缺失返回 None）。
+///
+/// 容器内用户固定名为 `node`（与宿主用户名不同），home 为容器内
+/// `/home/node`（用户add -m 创建，应用数据存容器层）——rootless podman 的
+/// userns 偏移（容器 uid N → 宿主 100000+N）使"uid 对齐"仅为名义一致；
+/// 宿主挂载 home 的写操作经免密 sudo 完成（见 setup_user_mapping 第 4 步）。
+fn user_map_from_env() -> Option<UserMap> {
+    let uid = std::env::var("EASYTIDY_USER_UID").ok()?.parse().ok()?;
+    let gid = std::env::var("EASYTIDY_USER_GID").ok()?.parse().ok()?;
+    Some(UserMap {
+        name: CONTAINER_USER.to_string(),
+        uid,
+        gid,
+        home: format!("/home/{CONTAINER_USER}"),
+    })
+}
+
+/// 启动期用户映射 setup（main 初始化后、listen 前调用）。
+///
+/// 1. 组：`getent group <gid>` 未命中则 `groupadd -g <gid> <name>`（缺失回退
+///    `addgroup -g <gid> <name>`，alpine/busybox 系）
+/// 2. 用户（容器内固定名 `node`，uid/gid 取宿主值，三种情形）：
+///    - uid 未占用：`useradd -m -u <uid> -g <gid> -s <shell> node`（容器内 home
+///      `/home/node`，应用数据存容器层；缺失回退 adduser，alpine 系）
+///    - uid 已存在且同名：无需操作
+///    - uid 被镜像默认用户占用（如 ubuntu 镜像 uid 1000 = `ubuntu`）：`usermod -l`
+///      改名 + `-d /home/node` + `-g <gid>` 对齐（仅 debian 系有 usermod）
+/// 3. 容器内 home（/home/node）存在性 + 属主（容器内目录，chown 安全）
+/// 4. ⚠️ 绝不 chown 宿主挂载的 home：会改写宿主文件属主、致宿主用户失权
+///    （2026-08-06 实测事故）
+/// 5. 免密 sudo：`/etc/sudoers.d/easytidy-node`（宿主 home 写操作/包管理经此提升）
+///
+/// rootless 说明：userns 偏移（容器 uid N → 宿主 100000+N）使"uid 对齐"为名义一致；
+/// 应用常态化权限 = 容器内 node 用户权限；宿主挂载目录读可达、写经免密 sudo。
+///
+/// 返回用户映射是否生效（env 齐全且用户创建成功）；失败回退 root 运行。
+async fn setup_user_mapping() -> bool {
+    let Some(user) = user_map_from_env() else {
+        debug!("未收到 EASYTIDY_USER_* 环境变量，跳过用户映射（root 容器）");
+        return false;
+    };
+
+    // 1. 确保组存在
+    if !group_gid_exists(user.gid).await {
+        let gid = user.gid.to_string();
+        let group_ok = if command_available("groupadd") {
+            run_cmd(&["groupadd", "-g", &gid, &user.name]).await
+        } else if command_available("addgroup") {
+            run_cmd(&["addgroup", "-g", &gid, &user.name]).await
+        } else {
+            warn!("容器内缺少 groupadd/addgroup，无法创建组 {}（gid {}）", user.name, gid);
+            false
+        };
+        if !group_ok {
+            warn!("组创建未成功（可能已存在），继续：{}（gid {}）", user.name, gid);
+        }
+    }
+
+    // 2. 确保用户存在（同名/同 uid/gid）
+    match username_for_uid(user.uid).await {
+        // uid 未占用 → 创建（debian 系 useradd；alpine/busybox 系 adduser）
+        None => {
+            let uid = user.uid.to_string();
+            let gid = user.gid.to_string();
+            let shell = user_shell_path();
+            let user_ok = if command_available("useradd") {
+                // -m：容器内 home（/home/node），应用数据存容器层（重启/重建保留）；
+                // 宿主挂载 home 只读可达，写操作经免密 sudo
+                run_cmd(&["useradd", "-m", "-u", &uid, "-g", &gid, "-s", shell, &user.name]).await
+            } else if command_available("adduser") {
+                run_cmd(&[
+                    "adduser", "-D", "-u", &uid, "-G", &user.name, "-s", shell, "-h", &user.home,
+                    &user.name,
+                ])
+                .await
+            } else {
+                warn!("容器内缺少 useradd/adduser，无法创建用户 {}", user.name);
+                false
+            };
+            if !user_ok {
+                warn!("用户创建失败，回退 root 运行：{}", user.name);
+                return false;
+            }
+        }
+        // uid 已存在且同名 → 无需操作
+        Some(existing) if existing == user.name => {}
+        // uid 被镜像默认用户占用（ubuntu 镜像 uid 1000 = ubuntu）→ usermod 改名对齐
+        Some(existing) => {
+            if !command_available("usermod") {
+                warn!(
+                    "uid {} 已被镜像用户 {} 占用且容器内无 usermod，无法对齐，回退 root 运行",
+                    user.uid, existing
+                );
+                return false;
+            }
+            let gid = user.gid.to_string();
+            let renamed = run_cmd(&["usermod", "-l", &user.name, &existing]).await;
+            let home_ok = renamed && run_cmd(&["usermod", "-d", &user.home, &user.name]).await;
+            let gid_ok = home_ok && run_cmd(&["usermod", "-g", &gid, &user.name]).await;
+            if !gid_ok {
+                warn!(
+                    "usermod 对齐用户失败（{} → {}），回退 root 运行",
+                    existing, user.name
+                );
+                return false;
+            }
+            info!(
+                "镜像默认用户 {} 已重命名为 {}（uid {}）",
+                existing, user.name, user.uid
+            );
+        }
+    }
+
+    // 3. 确保容器内 home 存在并归用户所有（容器内目录，非宿主挂载，chown 安全）
+    if !Path::new(&user.home).exists() {
+        run_cmd(&["mkdir", "-p", &user.home]).await;
+    }
+    let uid_gid = format!("{}:{}", user.uid, user.gid);
+    run_cmd(&["chown", &uid_gid, &user.home]).await;
+
+    // 4. ⚠️ 绝不 chown 宿主挂载的 home！
+    //    宿主 home 是 bind mount，chown 会改写宿主机文件属主，导致宿主用户失去访问权
+    //    （2026-08-06 实测事故：宿主环境崩溃）。权限一致性靠 uid/gid 对齐实现——
+    //    容器用户与宿主用户同 uid/gid，天然拥有相同权限，无需也不能动属主。
+
+    // 5. 免密 sudo：容器用户提升权限的通道（宿主 home 写操作、包管理等）。
+    //    直接写 /etc/sudoers.d（root 写文件不依赖 sudo 二进制是否已装；
+    //    flavor setup 可能在 server 启动后才安装 sudo——文件先就位，装好即生效）。
+    //    alpine/busybox 系无 sudo：文件写了无害，装 sudo 后自然生效。
+    {
+        let sudoers = format!("/etc/sudoers.d/easytidy-{}", user.name);
+        let rule = format!("{} ALL=(ALL) NOPASSWD: ALL\n", user.name);
+        // 基础镜像装 sudo 前可能没有 /etc/sudoers.d（apt 装 sudo 才创建）——先建目录
+        let _ = std::fs::create_dir_all("/etc/sudoers.d");
+        let write_result = std::fs::write(&sudoers, rule);
+        let chmod_ok = write_result.is_ok() && run_cmd(&["chmod", "440", &sudoers]).await;
+        if chmod_ok {
+            info!("免密 sudo 已配置：{}", user.name);
+        } else if let Err(e) = write_result {
+            warn!("免密 sudo 配置失败（写 {} 出错：{e}）", sudoers);
+        } else {
+            warn!("免密 sudo 配置失败（chmod 440 失败：{}）", sudoers);
+        }
+    }
+
+    // 6. 校验 + 记录
+    if !user_exists(&user).await {
+        warn!("用户映射校验失败（用户未创建成功），回退 root 运行：{}", user.name);
+        return false;
+    }
+
+    info!("用户映射：{}({}:{}) home={}", user.name, user.uid, user.gid, user.home);
+    let _ = USER_MAP.set(user);
+    true
+}
+
+/// 探测 PATH 中是否存在可执行命令（区分镜像系：debian/ubuntu 用 useradd/groupadd，
+/// alpine/busybox 用 adduser/addgroup）。
+fn command_available(cmd: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
+    })
+}
+
+/// 容器内可用 shell：/bin/bash 优先（ubuntu 系），缺失回退 /bin/sh（alpine/busybox）。
+fn user_shell_path() -> &'static str {
+    if Path::new("/bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    }
+}
+
+/// 运行命令（无输出捕获，返回成功与否）。
+async fn run_cmd(args: &[&str]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+    match TokioCommand::new(args[0]).args(&args[1..]).status().await {
+        Ok(s) => s.success(),
+        Err(e) => {
+            warn!("执行命令失败（{} {}）：{e}", args[0], args.join(" "));
+            false
+        }
+    }
+}
+
+/// `getent <database> <key>` 查询（glibc 与 busybox 系均支持）。
+async fn run_getent(database: &str, key: &str) -> bool {
+    command_available("getent") && run_cmd(&["getent", database, key]).await
+}
+
+/// 组 gid 是否已存在（getent 优先；容器无 getent 时解析 /etc/group 兜底）。
+async fn group_gid_exists(gid: u32) -> bool {
+    if run_getent("group", &gid.to_string()).await {
+        return true;
+    }
+    std::fs::read_to_string("/etc/group").ok().is_some_and(|content| {
+        content.lines().any(|line| {
+            let f: Vec<&str> = line.split(':').collect();
+            f.len() >= 3 && f[2].parse::<u32>().ok() == Some(gid)
+        })
+    })
+}
+
+/// 用户（uid + name）是否已存在：/etc/passwd 直接解析（不依赖 getent）。
+async fn user_exists(user: &UserMap) -> bool {
+    username_for_uid(user.uid).await.as_deref() == Some(user.name.as_str())
+}
+
+/// /etc/passwd 中 uid 对应的用户名（不依赖 getent，容器无 getent 时兜底）。
+async fn username_for_uid(uid: u32) -> Option<String> {
+    let content = std::fs::read_to_string("/etc/passwd").ok()?;
+    content.lines().find_map(|line| {
+        let f: Vec<&str> = line.split(':').collect();
+        if f.len() >= 3 && f[2].parse::<u32>().ok() == Some(uid) {
+            Some(f[0].to_string())
+        } else {
+            None
+        }
+    })
+}
+
+/// POSIX shell 单引号转义：参数包在单引号内，内部 `'` 用 `'\''` 序列
+/// （闭合-转义-重开），保证 `su -c '<cmd>'` 内命令原样传给用户 shell 解析。
+fn shell_escape_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// 构建 `su -c` 的完整命令串：cmd + argv[1..] 逐个单引号转义后空格拼接
+/// （argv 与 cmd 同构：CLI/GUI 均约定 argv[0] == cmd）。
+fn build_su_command(cmd: &str, argv: &[String]) -> String {
+    let mut parts = Vec::with_capacity(argv.len() + 1);
+    parts.push(shell_escape_single_quote(cmd));
+    parts.extend(argv.iter().skip(1).map(|a| shell_escape_single_quote(a)));
+    parts.join(" ")
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse arguments
@@ -131,6 +404,13 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         child_reaper_task(reaper_state).await;
     });
+
+    // 用户一致性映射（distrobox 式）：容器内用户 = 宿主用户（同名/同 uid/gid）。
+    // 宿主侧 create_with_config 在 user_home=true 时注入 EASYTIDY_USER_*；
+    // 成功则 PTY/entry 经 su 以该用户运行；失败（env 缺失/工具缺失）回退 root，
+    // 行为与旧版一致。server 仍以 root 运行——root 才有权创建用户/装包，
+    // 应用层经 su 降权。
+    setup_user_mapping().await;
 
     // Setup signal handler for graceful shutdown
     let shutdown_flag = state.shutting_down.clone();
@@ -497,13 +777,44 @@ async fn handle_pty_open(
         .openpty(pty_size)
         .context("Failed to open PTY")?;
 
-    let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
-    let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
+    // 用户映射生效且非 as_root 时经 su 降权到容器内用户 node（distrobox 式）：
+    // - cmd 为空：`su - <name>`（登录 shell，HOME/环境由 su 设置）
+    // - cmd 非空：`su <name> -c '<shell 转义后的完整命令>'`（cmd + argv[1..] 单引号转义拼接）
+    // as_root=true（setup/包管理）：直接以容器 root 运行（rootless 下 = 宿主用户权）
+    // 映射未生效（env 缺失/用户创建失败）：维持现状（/bin/sh root）。
+    let mut cmd_builder = if req.as_root {
+        let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
+        let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
 
-    let mut cmd_builder = CommandBuilder::new(cmd);
-    for arg in &argv[1..] {
-        cmd_builder.arg(arg);
-    }
+        let mut b = CommandBuilder::new(cmd);
+        for arg in &argv[1..] {
+            b.arg(arg);
+        }
+        b
+    } else if let Some(user) = user_map() {
+        if req.cmd.is_empty() {
+            let mut b = CommandBuilder::new("su");
+            b.arg("-");
+            b.arg(&user.name);
+            b
+        } else {
+            let full = build_su_command(&req.cmd, &req.argv);
+            let mut b = CommandBuilder::new("su");
+            b.arg("-c");
+            b.arg(full);
+            b.arg(&user.name);
+            b
+        }
+    } else {
+        let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
+        let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
+
+        let mut b = CommandBuilder::new(cmd);
+        for arg in &argv[1..] {
+            b.arg(arg);
+        }
+        b
+    };
 
     // Set environment variables
     for (k, v) in &req.env {
@@ -1097,12 +1408,19 @@ async fn handle_lifecycle_entry_launch(
         .context("Failed to parse LifecycleEntryLaunch")?;
 
     // TODO: Look up entry config and spawn the entry process
-    // For now, just spawn a simple shell
+    // For now, just spawn a simple shell；用户映射生效时同样经 su 拉起
     info!("Entry launch requested: {}", req.entry_id);
 
-    let mut child = TokioCommand::new("/bin/sh")
-        .spawn()
-        .context("Failed to spawn entry")?;
+    let mut child = if let Some(user) = user_map() {
+        TokioCommand::new("su")
+            .args(["-", &user.name])
+            .spawn()
+            .context("Failed to spawn entry (su)")?
+    } else {
+        TokioCommand::new("/bin/sh")
+            .spawn()
+            .context("Failed to spawn entry")?
+    };
 
     let pid = child.id().unwrap();
 
@@ -1173,20 +1491,34 @@ async fn handle_lifecycle_shutdown(
 async fn launch_entry_command(state: &Arc<ServerState>, entry_cmd: String) -> Result<()> {
     info!("Launching entry command: {}", entry_cmd);
 
-    let parts: Vec<&str> = entry_cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        return Err(anyhow!("Empty entry command"));
-    }
+    // 用户映射生效时经 su 以容器内宿主用户拉起（entry_cmd 为整条 shell 命令串，
+    // 单引号转义后交给 su -c 内的用户 shell 解析）；否则维持旧行为（root 直接 spawn）。
+    let mut child = if let Some(user) = user_map() {
+        let full = shell_escape_single_quote(&entry_cmd);
+        TokioCommand::new("su")
+            .arg("-c")
+            .arg(full)
+            .arg(&user.name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn entry command (su)")?
+    } else {
+        let parts: Vec<&str> = entry_cmd.split_whitespace().collect();
+        if parts.is_empty() {
+            return Err(anyhow!("Empty entry command"));
+        }
 
-    let cmd = parts[0];
-    let args = &parts[1..];
+        let cmd = parts[0];
+        let args = &parts[1..];
 
-    let mut child = TokioCommand::new(cmd)
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("Failed to spawn entry command")?;
+        TokioCommand::new(cmd)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn entry command")?
+    };
 
     let pid = child.id().unwrap();
 
@@ -1410,6 +1742,50 @@ Icon=test-icon
         assert_eq!(app.exec, "test-app --option");
         assert_eq!(app.comment, Some("A test application".to_string()));
         assert_eq!(app.icon_path, Some("test-icon".to_string()));
+    }
+
+    /// 单引号转义：普通 / 含单引号 / 空串 / 含空白与变量 / unicode
+    #[test]
+    fn test_shell_escape_single_quote() {
+        assert_eq!(shell_escape_single_quote("whoami"), "'whoami'");
+        assert_eq!(shell_escape_single_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_escape_single_quote(""), "''");
+        assert_eq!(shell_escape_single_quote("echo $HOME"), "'echo $HOME'");
+        assert_eq!(shell_escape_single_quote("中文"), "'中文'");
+    }
+
+    /// su -c 完整命令拼接：cmd + argv[1..]（argv[0] == cmd 时与整体 argv 拼接等价）
+    #[test]
+    fn test_build_su_command() {
+        // CLI 形态：easytidy run --container n -- sh -c 'echo $HOME'
+        assert_eq!(
+            build_su_command(
+                "sh",
+                &["sh".to_string(), "-c".to_string(), "echo $HOME".to_string()]
+            ),
+            "'sh' '-c' 'echo $HOME'"
+        );
+        // 单命令无参
+        assert_eq!(build_su_command("whoami", &[]), "'whoami'");
+        // 命令内含单引号（如 grep 'a b'）
+        assert_eq!(
+            build_su_command(
+                "bash",
+                &["bash".to_string(), "-c".to_string(), "echo 'a b'".to_string()]
+            ),
+            "'bash' '-c' 'echo '\\''a b'\\'''"
+        );
+    }
+
+    /// 环境变量解析：缺失任一 EASYTIDY_USER_* → None
+    #[test]
+    fn test_user_map_from_env_missing() {
+        // 测试进程通常无 EASYTIDY_USER_*；即便宿主注入也逐项移除（并行测试安全：
+        // 其他用例不读这些变量）
+        for key in ["EASYTIDY_USER_NAME", "EASYTIDY_USER_UID", "EASYTIDY_USER_GID", "EASYTIDY_USER_HOME"] {
+            std::env::remove_var(key);
+        }
+        assert!(user_map_from_env().is_none());
     }
 
     /// Test config get/set

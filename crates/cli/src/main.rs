@@ -123,6 +123,10 @@ enum Commands {
         #[arg(long)]
         container: String,
 
+        /// 以 root 运行（默认以容器内用户 node 运行；setup/包管理场景用）
+        #[arg(long)]
+        root: bool,
+
         /// 要执行的命令及参数（如：-- /bin/bash -l）
         #[arg(required = false)]
         command: Vec<String>,
@@ -178,8 +182,8 @@ async fn main() -> Result<()> {
             cmd_build_server()?;
             Ok(())
         }
-        Commands::Run { container, command } => {
-            let code = cmd_run(container, command).await?;
+        Commands::Run { container, root, command } => {
+            let code = cmd_run(container, command, root).await?;
             std::process::exit(code);
         }
         _ => {
@@ -403,7 +407,8 @@ async fn cmd_flavor_apply(
     for (i, cmd) in flavor.setup.iter().enumerate() {
         println!("[setup {}/{}] {}", i + 1, flavor.setup.len(), cmd);
         let full = format!("export DEBIAN_FRONTEND=noninteractive TZ=UTC; {cmd}");
-        let code = cmd_run(name.clone(), vec!["bash".to_string(), "-c".to_string(), full.clone()])
+        // setup 以 root 运行（容器内 root = 宿主用户；apt/装包需要）
+        let code = cmd_run(name.clone(), vec!["bash".to_string(), "-c".to_string(), full.clone()], true)
             .await?;
         if code != 0 {
             bail!("setup 命令失败（退出码 {code}）：{cmd}");
@@ -481,7 +486,7 @@ async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
 /// 3. hello 握手
 /// 4. pty.open（获取 stream_id）
 /// 5. 循环：stdin → Raw 帧 → stdout，SIGWINCH → pty.resize，pty.exited → 退出
-async fn cmd_run(container: String, command: Vec<String>) -> Result<i32> {
+async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Result<i32> {
     info!("运行容器内命令：container={}, cmd={:?}", container, command);
 
     // 1. 确保容器运行中
@@ -585,6 +590,7 @@ async fn cmd_run(container: String, command: Vec<String>) -> Result<i32> {
         cwd: cwd.clone(),
         cols,
         rows,
+        as_root,
     };
 
     let pty_open_msg = Message {

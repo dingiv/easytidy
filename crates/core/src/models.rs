@@ -81,11 +81,16 @@ fn default_network() -> NetworkConfig {
     NetworkConfig::default()
 }
 
+/// `ContainerConfig.user_home` 的 serde 默认值（旧配置文件无该字段 → 默认开启映射）。
+fn default_true() -> bool {
+    true
+}
+
 /// 容器配置（easytidy 自有元数据，存于宿主共享配置文件）。
 ///
-/// `mounts` / `network` 为 serde 默认值：旧配置文件（无新字段）加载后
-/// 得到空挂载列表 + Host 网络模式。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// `mounts` / `network` / `user_home` 为 serde 默认值：旧配置文件（无新字段）加载后
+/// 得到空挂载列表 + Host 网络模式 + 用户一致性映射开启。
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerConfig {
     pub name: String,
     pub image: String,
@@ -104,6 +109,32 @@ pub struct ContainerConfig {
     /// 容器环境变量（"KEY=VALUE" 列表，GUI 透传时含宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY）
     #[serde(default)]
     pub env: Vec<String>,
+    /// 用户一致性映射（distrobox 式）：默认映射宿主用户目录（`$HOME` → `$HOME` rw）+
+    /// 经 `EASYTIDY_USER_*` 告知容器内 server 创建同名/同 uid/gid 用户，
+    /// 应用以该用户运行而非 root——避免容器内 root 读写宿主挂载目录的权限问题。
+    ///
+    /// 与 GUI 透传的关系：`gui=true` 的 flavor 强制开启（GUI 应用写宿主挂载目录、
+    /// 读宿主字体/图标都需要正确属主）；非 GUI 容器可显式 `user_home = false` 关闭
+    /// （容器内以 root 运行，行为与旧版一致）。
+    #[serde(default = "default_true")]
+    pub user_home: bool,
+}
+
+impl Default for ContainerConfig {
+    /// 与 serde 默认保持一致：`user_home` 默认 true（用户一致性映射开启）。
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            image: String::new(),
+            entry: None,
+            silent_boot: false,
+            persistent: false,
+            mounts: Vec::new(),
+            network: NetworkConfig::default(),
+            env: Vec::new(),
+            user_home: true,
+        }
+    }
 }
 
 /// 容器配置视图（`Podman::inspect_config` 投影：当前生效的 mounts / 网络）。
@@ -166,6 +197,33 @@ persistent = true
     }
 
     #[test]
+    fn test_user_home_serde_default_true() {
+        // 旧配置文件（无 user_home 字段）→ 默认 true（用户一致性映射开启）
+        let toml_str = r#"
+name = "legacy"
+image = "alpine:latest"
+silent_boot = false
+persistent = true
+"#;
+        let config: ContainerConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.user_home, "旧配置缺失 user_home 字段应默认 true");
+
+        // 显式 false → 关闭映射（非 GUI 容器可选项）
+        let toml_str = r#"
+name = "no-home"
+image = "alpine:latest"
+silent_boot = false
+persistent = true
+user_home = false
+"#;
+        let config: ContainerConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.user_home);
+
+        // Rust 侧 Default 与 serde 默认一致（struct literal 走 ..Default::default() 的入口同语义）
+        assert!(ContainerConfig::default().user_home);
+    }
+
+    #[test]
     fn test_container_config_roundtrip() {
         let config = ContainerConfig {
             name: "app".to_string(),
@@ -187,6 +245,7 @@ persistent = true
                 }],
             },
             env: vec!["DISPLAY=:0".to_string()],
+            user_home: true,
         };
 
         // TOML 往返（configfile 格式）

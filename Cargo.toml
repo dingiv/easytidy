@@ -31,6 +31,7 @@ fs2 = "0.4"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
+libc = "0.2"
 
 [profile.release]
 lto = true

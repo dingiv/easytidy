@@ -162,6 +162,9 @@ impl Podman {
     /// - 标签: manager=easytidy + easytidy.name=<name>
     /// - 网络: `Host` → `network_mode = "host"`（端口映射无意义，忽略并告警）；
     ///   `Mapped` → 不设 network_mode（podman 默认 bridge）+ ExposedPorts + PortBindings
+    /// - 用户一致性映射（`config.user_home`，distrobox 式）：`$HOME` → `$HOME`（rw）
+    ///   与注入 `EASYTIDY_USER_NAME/UID/GID/HOME`，容器内 server 据此创建同名用户并
+    ///   经 su 拉起应用（见 crates/server）；`host_user()` 失败时跳过并告警
     ///
     /// 镜像不存在则先拉取。
     pub async fn create_with_config(
@@ -226,6 +229,36 @@ impl Podman {
             });
         }
 
+        // 用户一致性映射（distrobox 式，config.user_home）：映射宿主用户目录 +
+        // 注入 EASYTIDY_USER_*（容器内 server 据此创建同名/同 uid/gid 用户，
+        // 应用经 su 以该用户运行而非 root）。
+        //
+        // host_user() 失败（无法解析用户名/home）时仅告警并跳过——容器仍以 root
+        // 运行，行为与旧版一致。
+        let mut env = config.env.clone();
+        if config.user_home {
+            if let Some(user) = crate::userenv::host_user() {
+                if !mount_has_target(&mounts, &user.home) && Path::new(&user.home).exists() {
+                    mounts.push(Mount {
+                        typ: Some(MountTypeEnum::BIND),
+                        source: Some(user.home.clone()),
+                        target: Some(user.home.clone()),
+                        read_only: Some(false),
+                        ..Default::default()
+                    });
+                }
+                // 容器内用户固定名 node（server 侧），仅需 uid/gid 对齐宿主
+                env.push(format!("EASYTIDY_USER_UID={}", user.uid));
+                env.push(format!("EASYTIDY_USER_GID={}", user.gid));
+            } else {
+                tracing::warn!(
+                    "容器 {}：user_home=true 但无法探测宿主用户（host_user() 失败），\
+                     跳过用户映射，容器内以 root 运行",
+                    name
+                );
+            }
+        }
+
         // 构建 HostConfig
         let mut host_config = HostConfig {
             init: Some(true), // catatonit = PID 1
@@ -285,8 +318,9 @@ impl Podman {
                 "--socket".to_string(),
                 "/run/easytidy/server.sock".to_string(),
             ]),
-            // 用户环境变量（如 GUI 透传的 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY）
-            env: if config.env.is_empty() { None } else { Some(config.env.clone()) },
+            // 用户环境变量（GUI 透传的 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY +
+            // 用户映射的 EASYTIDY_USER_*）
+            env: if env.is_empty() { None } else { Some(env) },
             labels: Some(labels),
             host_config: Some(host_config),
             exposed_ports,
@@ -583,6 +617,11 @@ impl Podman {
         tracing::info!("镜像 {} 拉取成功", image);
         Ok(())
     }
+}
+
+/// 挂载列表是否已包含目标路径（避免与用户配置/引擎挂载重复目标）。
+fn mount_has_target(mounts: &[bollard::models::Mount], target: &str) -> bool {
+    mounts.iter().any(|m| m.target.as_deref() == Some(target))
 }
 
 /// 校验 bind mount 配置（bind 类型要求宿主路径已存在）。
