@@ -14,6 +14,7 @@ bollard = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+tower-service = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
 tempfile = { workspace = true }

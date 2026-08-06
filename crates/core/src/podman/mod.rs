@@ -179,6 +179,8 @@ impl Podman {
         use std::collections::HashMap;
 
         // 检查镜像是否存在，不存在则拉取
+
+        // TODO: 不要在此处拉取镜像, 直接抛错
         if !self.image_exists(image).await? {
             tracing::info!("镜像 {} 不存在，开始拉取...", image);
             self.pull_image(image).await?;
@@ -310,6 +312,42 @@ impl Podman {
         }
         host_config.port_bindings = port_bindings;
 
+        // 用户一致性映射（user_home=true）→ keep-id 必须走 libpod 端点
+        // （Docker compat 端点不支持 userns.keep-id，实测；见 libpod.rs）。
+        // keep-id 使容器内 uid 与宿主 uid 真对齐：node 用户即宿主用户，
+        // 宿主 home / /run/user/1000 自然可达（GUI 窗口可用）。
+        if config.user_home {
+            let libpod = crate::libpod::Libpod::new().await?;
+            // mounts / port_bindings 已在 host_config 中（早于本分支 move），从 host_config 取
+            let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
+                .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
+            let port_bindings_json = match &host_config.port_bindings {
+                Some(pb) => Some(serde_json::to_value(pb)
+                    .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?),
+                None => None,
+            };
+            let body = crate::libpod::keep_id_create_body(
+                name,
+                image,
+                vec![
+                    "/usr/bin/easytidy-server".to_string(),
+                    "--socket".to_string(),
+                    "/run/easytidy/server.sock".to_string(),
+                ],
+                env.clone(),
+                labels.clone(),
+                mounts_json.as_array().cloned().unwrap_or_default(),
+                host_config.network_mode.clone(),
+                exposed_ports.clone(),
+                port_bindings_json,
+                Some(
+                    std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
+                ),
+            );
+            let id = libpod.create_container(name, body).await?;
+            tracing::info!("容器 {} 创建成功（ID: {}，keep-id）", name, id);
+            return Ok(id);
+        }
         // 构建容器配置
         let config_body = Config {
             image: Some(image.to_string()),
@@ -331,7 +369,6 @@ impl Podman {
             name: name.to_string(),
             ..Default::default()
         };
-
         let result = self.docker.create_container(
             Some(opts),
             config_body,
