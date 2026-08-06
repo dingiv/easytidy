@@ -9,3 +9,11 @@
 
 /// 宿主导出 .desktop 的 Exec 前缀（passthrough 机制）
 pub const EXEC_PREFIX: &str = "easytidy --container";
+
+pub mod configfile;
+pub mod desktop;
+pub mod error;
+pub mod events;
+pub mod models;
+pub mod podman;
+pub mod systemd;

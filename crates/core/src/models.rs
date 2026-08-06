@@ -29,3 +29,18 @@ pub struct ContainerConfig {
     /// 是否常驻（catatonit + server 生命周期）
     pub persistent: bool,
 }
+
+/// 容器事件（从 podman /events 流映射）。
+///
+/// 仅包含我们关心的事件类型；客户端侧过滤（见 docs/08-requirements.md #23712）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum EngineEvent {
+    /// 容器创建（create）
+    ContainerCreated { container_id: String, name: String },
+    /// 容器启动（start）
+    ContainerStarted { container_id: String, name: String },
+    /// 容器停止（die - podman 用 "died"）
+    ContainerDied { container_id: String, name: String, exit_code: i64 },
+    /// 容器删除（die）
+    ContainerRemoved { container_id: String, name: String },
+}

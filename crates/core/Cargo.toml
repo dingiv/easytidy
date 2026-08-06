@@ -20,3 +20,4 @@ tempfile = { workspace = true }
 dirs = { workspace = true }
 fs2 = { workspace = true }
 chrono = { workspace = true }
+toml = { workspace = true }
