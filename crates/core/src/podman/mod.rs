@@ -13,7 +13,10 @@
 use std::path::{Path, PathBuf};
 use bollard::Docker;
 use crate::error::{Error, Result};
-use crate::models::ContainerSummary;
+use crate::models::{
+    ContainerConfig, ContainerConfigView, ContainerSummary, MountConfig, NetworkConfig,
+    NetworkMode, PortMapping,
+};
 
 /// Podman 客户端封装。
 pub struct Podman {
@@ -118,28 +121,58 @@ impl Podman {
         })
     }
 
-    /// 创建容器。
+    /// 创建容器（默认配置，保持既有语义）。
     ///
-    /// 参数：
-    /// - name: 容器名
-    /// - image: 镜像（如 "docker.io/library/alpine:latest"）
-    /// - server_bin_path: server 二进制路径（宿主绝对路径，将 ro bind-mount 进容器）
+    /// 既有语义：podman 默认 bridge 网络、无端口映射（即 `NetworkMode::Mapped`
+    /// 且无端口 → 不设 `network_mode`、无 ExposedPorts/PortBindings，与旧行为逐字节一致）。
     ///
-    /// 配置：
-    /// - HostConfig.init = true（catatonit = PID 1）
-    /// - Cmd = [<server-bin>, "--socket", "/run/easytidy/server.sock"]
-    /// - Bind mounts: server 二进制（ro）+ socket 目录（rw）
-    /// - 标签: manager=easytidy + easytidy.name=<name>
-    ///
-    /// 镜如不存在则先拉取。
+    /// 新代码请使用 [`Podman::create_with_config`]（cli/GUI 均走新入口）。
     pub async fn create(
         &self,
         name: &str,
         image: &str,
         server_bin_path: &Path,
     ) -> Result<String> {
+        let config = ContainerConfig {
+            name: name.to_string(),
+            image: image.to_string(),
+            // 保持既有语义：默认 bridge 网络 + 无端口映射
+            network: NetworkConfig {
+                mode: NetworkMode::Mapped,
+                ports: Vec::new(),
+            },
+            ..Default::default()
+        };
+        self.create_with_config(name, image, server_bin_path, &config)
+            .await
+    }
+
+    /// 创建容器并应用完整配置（mounts / 网络映射）。
+    ///
+    /// 参数：
+    /// - name: 容器名
+    /// - image: 镜像（如 "docker.io/library/alpine:latest"）
+    /// - server_bin_path: server 二进制路径（宿主绝对路径，将 ro bind-mount 进容器）
+    /// - config: 容器配置（mounts + 网络模式/端口映射）
+    ///
+    /// 在 `create()` 的既有基础之上追加（rebuild 保留同一套基础）：
+    /// - HostConfig.init = true（catatonit = PID 1）
+    /// - Cmd = [<server-bin>, "--socket", "/run/easytidy/server.sock"]
+    /// - Bind mounts: server 二进制（ro）+ socket 目录（rw）+ config.mounts（宿主路径须已存在）
+    /// - 标签: manager=easytidy + easytidy.name=<name>
+    /// - 网络: `Host` → `network_mode = "host"`（端口映射无意义，忽略并告警）；
+    ///   `Mapped` → 不设 network_mode（podman 默认 bridge）+ ExposedPorts + PortBindings
+    ///
+    /// 镜像不存在则先拉取。
+    pub async fn create_with_config(
+        &self,
+        name: &str,
+        image: &str,
+        server_bin_path: &Path,
+        config: &ContainerConfig,
+    ) -> Result<String> {
         use bollard::container::{CreateContainerOptions, Config};
-        use bollard::models::{HostConfig, Mount, MountTypeEnum};
+        use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
 
         // 检查镜像是否存在，不存在则拉取
@@ -163,8 +196,8 @@ impl Podman {
         labels.insert("manager".to_string(), "easytidy".to_string());
         labels.insert("easytidy.name".to_string(), name.to_string());
 
-        // 构建挂载配置
-        let mounts = vec![
+        // 构建挂载：server 二进制 + socket 目录 + 用户配置的 bind mounts
+        let mut mounts = vec![
             // Server 二进制（只读）
             Mount {
                 typ: Some(MountTypeEnum::BIND),
@@ -182,16 +215,70 @@ impl Podman {
                 ..Default::default()
             },
         ];
+        for m in &config.mounts {
+            validate_mount(m)?;
+            mounts.push(Mount {
+                typ: Some(MountTypeEnum::BIND),
+                source: Some(m.host_path.clone()),
+                target: Some(m.container_path.clone()),
+                read_only: Some(m.read_only),
+                ..Default::default()
+            });
+        }
 
         // 构建 HostConfig
-        let host_config = HostConfig {
+        let mut host_config = HostConfig {
             init: Some(true), // catatonit = PID 1
             mounts: Some(mounts),
             ..Default::default()
         };
 
+        // 网络配置（host ⇄ bridge+端口映射 切换）
+        let mut exposed_ports: Option<HashMap<String, HashMap<(), ()>>> = None;
+        let mut port_bindings: Option<HashMap<String, Option<Vec<PortBinding>>>> = None;
+        match config.network.mode {
+            NetworkMode::Host => {
+                host_config.network_mode = Some("host".to_string());
+                if !config.network.ports.is_empty() {
+                    tracing::warn!(
+                        "容器 {} 网络模式为 host，端口映射不生效（已忽略）：{:?}",
+                        name,
+                        config.network.ports
+                    );
+                }
+            }
+            NetworkMode::Mapped => {
+                // 不设 network_mode → podman 默认 bridge
+                if !config.network.ports.is_empty() {
+                    let mut exposed = HashMap::new();
+                    let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+                    for p in &config.network.ports {
+                        let protocol = if p.protocol.is_empty() { "tcp" } else { p.protocol.as_str() };
+                        if p.container_port == 0 || p.host_port == 0 {
+                            return Err(Error::Config(format!(
+                                "端口映射无效（{}:{} -> {}:{}）：端口不能为 0",
+                                p.host_port, p.container_port, p.container_port, protocol
+                            )));
+                        }
+                        let key = format!("{}/{}", p.container_port, protocol);
+                        exposed.insert(key.clone(), HashMap::new());
+                        bindings.insert(
+                            key,
+                            Some(vec![PortBinding {
+                                host_ip: None,
+                                host_port: Some(p.host_port.to_string()),
+                            }]),
+                        );
+                    }
+                    exposed_ports = Some(exposed);
+                    port_bindings = Some(bindings);
+                }
+            }
+        }
+        host_config.port_bindings = port_bindings;
+
         // 构建容器配置
-        let config = Config {
+        let config_body = Config {
             image: Some(image.to_string()),
             cmd: Some(vec![
                 "/usr/bin/easytidy-server".to_string(),
@@ -200,6 +287,7 @@ impl Podman {
             ]),
             labels: Some(labels),
             host_config: Some(host_config),
+            exposed_ports,
             ..Default::default()
         };
 
@@ -210,12 +298,188 @@ impl Podman {
 
         let result = self.docker.create_container(
             Some(opts),
-            config,
+            config_body,
         ).await.map_err(|e| Error::Connect(format!("创建容器失败：{e}")))?;
 
         let id = result.id;
         tracing::info!("容器 {} 创建成功（ID: {}）", name, id);
         Ok(id)
+    }
+
+    /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
+    ///
+    /// 流程：
+    /// 1. `commit_container` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
+    ///    （仅容器层；bind mount 不入 commit —— 正是所需）
+    /// 2. stop（若运行中）→ remove（force）
+    /// 3. `create_with_config`（同名，commit 的镜像 + 新配置，保留 Init/server-mount/labels）
+    /// 4. start
+    /// 5. 返回新容器 ID
+    ///
+    /// 错误处理：任一步失败给出中文可读错误；create 成功但 start 失败时
+    /// 尽力删除新容器，不留下孤儿容器。调用方负责在成功后把 `config`
+    /// 回写 configfile（GUI apply / CLI rebuild 均执行）。
+    pub async fn rebuild(&self, name: &str, config: &ContainerConfig) -> Result<String> {
+        let server_bin = crate::server_binary_path()?;
+
+        // 1. commit 当前容器层（bind mount 不入镜像）
+        let tag = Self::rebuild_image_tag(name);
+        let image_ref = format!("localhost/easytidy-rebuild:{tag}");
+        self.commit_container(name, &image_ref).await?;
+
+        // 2. stop（若运行中）
+        if self.is_running(name).await? {
+            self.stop(name).await?;
+        }
+
+        // 3. remove（force）
+        self.remove(name, true).await?;
+
+        // 4. create（同名；失败时旧容器已删除，错误信息附带可恢复的镜像引用）
+        let id = self
+            .create_with_config(name, &image_ref, &server_bin, config)
+            .await
+            .map_err(|e| {
+                Error::Connect(format!(
+                    "重建失败：创建新容器未成功（旧容器已删除，可从镜像 {image_ref} 恢复）：{e}"
+                ))
+            })?;
+
+        // 5. start；失败则尽力清理新容器（不留下孤儿）
+        if let Err(e) = self.start(name).await {
+            let _ = self.remove(name, true).await;
+            return Err(Error::Connect(format!(
+                "重建失败：新容器创建成功但启动失败（已尽力清理）：{e}"
+            )));
+        }
+
+        Ok(id)
+    }
+
+    /// 检查容器当前生效的 mounts 与网络配置（GUI "当前生效" 状态）。
+    ///
+    /// 数据来源（等价 `podman inspect`）：
+    /// - mounts: 顶层 `Mounts`（MountPoint 列表，podman 实际生效的挂载；
+    ///   注意 podman 不回显 `HostConfig.Mounts`——create 时的 mounts 被归一化进
+    ///   `HostConfig.Binds`，生效列表见顶层 `Mounts`）
+    /// - 网络模式: `HostConfig.NetworkMode`（"host" → Host，其余如 "bridge"/"pasta" → Mapped）
+    /// - 端口: `NetworkSettings.Ports`（实际生效的端口绑定）
+    pub async fn inspect_config(&self, name: &str) -> Result<ContainerConfigView> {
+        let info = self
+            .docker
+            .inspect_container(name, None)
+            .await
+            .map_err(|e| Error::Connect(format!("检查容器配置失败：{e}")))?;
+
+        // mounts（仅 bind 类型；MountPoint.RW = true 表示可写）
+        let mut mounts = Vec::new();
+        if let Some(mount_list) = info.mounts.clone() {
+            for m in mount_list {
+                if m.typ != Some(bollard::models::MountPointTypeEnum::BIND) {
+                    continue;
+                }
+                mounts.push(MountConfig {
+                    host_path: m.source.unwrap_or_default(),
+                    container_path: m.destination.unwrap_or_default(),
+                    read_only: !m.rw.unwrap_or(true),
+                });
+            }
+        }
+
+        // 网络模式（"host" → Host，其余按 Mapped 展示）
+        let host_network = info
+            .host_config
+            .as_ref()
+            .and_then(|h| h.network_mode.as_deref())
+            .is_some_and(|m| m == "host");
+
+        // 端口映射（NetworkSettings.Ports：key = "<container_port>/<protocol>"）
+        let mut ports = Vec::new();
+        if let Some(port_map) = info.network_settings.as_ref().and_then(|n| n.ports.clone()) {
+            for (key, bindings) in port_map {
+                let Some((port, protocol)) = key.split_once('/') else {
+                    continue;
+                };
+                let Ok(container_port) = port.parse::<u16>() else {
+                    continue;
+                };
+                let host_port = bindings
+                    .as_ref()
+                    .and_then(|b| b.first())
+                    .and_then(|b| b.host_port.as_ref())
+                    .and_then(|p| p.parse::<u16>().ok())
+                    .unwrap_or(0);
+                ports.push(PortMapping {
+                    host_port,
+                    container_port,
+                    protocol: protocol.to_string(),
+                });
+            }
+            ports.sort_by_key(|p| p.container_port);
+        }
+
+        Ok(ContainerConfigView {
+            mounts,
+            network: NetworkConfig {
+                mode: if host_network {
+                    NetworkMode::Host
+                } else {
+                    NetworkMode::Mapped
+                },
+                ports,
+            },
+        })
+    }
+
+    /// 查询容器是否运行中。
+    async fn is_running(&self, name_or_id: &str) -> Result<bool> {
+        let info = self
+            .docker
+            .inspect_container(name_or_id, None)
+            .await
+            .map_err(|e| Error::Connect(format!("检查容器状态失败：{e}")))?;
+        Ok(info.state.and_then(|s| s.running).unwrap_or(false))
+    }
+
+    /// 提交容器当前层为镜像（bind mount 不入 commit）。
+    async fn commit_container(&self, name: &str, image_ref: &str) -> Result<()> {
+        use bollard::container::Config;
+        use bollard::image::CommitContainerOptions;
+
+        let (repo, tag) = image_ref
+            .rsplit_once(':')
+            .unwrap_or((image_ref, "latest"));
+        let options = CommitContainerOptions {
+            container: name.to_string(),
+            repo: repo.to_string(),
+            tag: tag.to_string(),
+            comment: "easytidy rebuild snapshot".to_string(),
+            author: "easytidy".to_string(),
+            pause: true,
+            changes: None,
+        };
+        let config = Config::<String>::default();
+        self.docker
+            .commit_container(options, config)
+            .await
+            .map_err(|e| Error::Connect(format!("提交容器快照失败（重建中止，容器未变更）：{e}")))?;
+        Ok(())
+    }
+
+    /// 生成重建镜像 tag（容器名净化 + 时间戳，保证唯一）。
+    fn rebuild_image_tag(name: &str) -> String {
+        let ts = chrono::Utc::now().format("%Y%m%d%H%M%S%3f");
+        let safe: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        format!("{safe}-{ts}")
     }
 
     /// 启动容器（按名或 ID）。
@@ -317,4 +581,25 @@ impl Podman {
         tracing::info!("镜像 {} 拉取成功", image);
         Ok(())
     }
+}
+
+/// 校验 bind mount 配置（bind 类型要求宿主路径已存在）。
+fn validate_mount(m: &MountConfig) -> Result<()> {
+    if m.host_path.is_empty() {
+        return Err(Error::Config(
+            "挂载配置缺少宿主路径（host_path 为空）".to_string(),
+        ));
+    }
+    if m.container_path.is_empty() {
+        return Err(Error::Config(
+            "挂载配置缺少容器内路径（container_path 为空）".to_string(),
+        ));
+    }
+    if !Path::new(&m.host_path).exists() {
+        return Err(Error::Config(format!(
+            "挂载路径不存在：{}（bind mount 的宿主路径必须已存在，请先创建该目录/文件）",
+            m.host_path
+        )));
+    }
+    Ok(())
 }

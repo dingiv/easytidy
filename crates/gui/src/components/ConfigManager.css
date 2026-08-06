@@ -1,0 +1,113 @@
+/* Config Manager —— 右侧 tab 面板内容，铺满可用高度，内部滚动 */
+.config-manager {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.config-manager-title {
+  margin: 0 !important;
+}
+
+.config-manager-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+}
+
+.spin-block {
+  height: 120px;
+}
+
+/* Tabs 占满剩余高度，内容区滚动 */
+.config-manager-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.config-manager-tabs .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.config-manager-tabs .ant-tabs-content,
+.config-manager-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+.config-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 新增行（挂载 / 端口） */
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.add-row .ant-input {
+  flex: 1;
+  min-width: 160px;
+}
+
+.add-row .ant-input-number {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* 路径 / 端口单元格等宽字体 */
+.path-cell,
+.port-cell {
+  font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono CJK SC", monospace;
+  font-size: 0.85rem;
+}
+
+.proto-cell {
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.mode-hint {
+  margin-top: 4px;
+}
+
+/* 容器 tab 字段 */
+.config-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 680px;
+}
+
+.config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-field > label {
+  font-size: 0.85rem;
+  color: #a6adc8;
+}
+
+.section-hint {
+  color: #6c7086;
+  font-size: 0.8rem;
+}

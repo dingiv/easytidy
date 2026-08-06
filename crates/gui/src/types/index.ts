@@ -41,15 +41,42 @@ export interface PassthroughState {
   auto_start_enabled: boolean;
 }
 
-/// Container configuration from config_get
+/// Mount config for the container config manager
+export interface MountConfig {
+  host_path: string;
+  container_path: string;
+  read_only: boolean;
+}
+
+/// Network mode: host networking, or bridge with port mappings
+export type NetworkMode = 'host' | 'mapped';
+
+export interface PortMapping {
+  host_port: number;
+  container_port: number;
+  protocol: 'tcp' | 'udp';
+}
+
+export interface ContainerNetworkConfig {
+  mode: NetworkMode;
+  ports: PortMapping[];
+}
+
+/// Container configuration from get_container_config / apply_container_config
 export interface ContainerConfig {
-  mounts: Array<{ source: string; target: string }>;
-  network: {
-    mode: 'bridge' | 'host' | 'none';
-    port_mappings?: Array<{ container_port: number; host_port: number }>;
-  };
-  entry_app?: string;
+  name: string;
+  image: string;
+  entry: string | null;
   silent_boot: boolean;
+  persistent: boolean;
+  mounts: MountConfig[];
+  network: ContainerNetworkConfig;
+}
+
+/// Result of get_container_config: saved config vs config actually effective in podman
+export interface ContainerConfigResult {
+  config: ContainerConfig;
+  effective: ContainerConfig;
 }
 
 /// PTY event from pty_open

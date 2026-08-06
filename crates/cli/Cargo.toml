@@ -24,3 +24,7 @@ crossterm = "0.28"
 signal-hook = "0.3"
 libc = "0.2"
 bytes = "1"
+
+[dev-dependencies]
+bollard = { workspace = true }
+tempfile = { workspace = true }

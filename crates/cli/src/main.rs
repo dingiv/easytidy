@@ -6,8 +6,9 @@
 //! - start: 启动容器
 //! - stop: 停止容器
 //! - restart: 重启容器
+//! - rebuild: 重建容器（应用 mounts/网络映射配置变更，M4 前置）
 //! - rm: 删除容器
-//! - inspect: 检查容器详情
+//! - inspect: 检查容器详情（含 mounts/网络）
 //! - run: 头less 容器内应用运行（M2 新增）
 //! - build-server: 构建并安装 musl server 二进制（M2 新增）
 
@@ -25,7 +26,7 @@ use futures::{StreamExt, SinkExt};
 
 use easytidy_core::podman::Podman;
 use easytidy_core::configfile::ConfigFile;
-use easytidy_core::models::ContainerConfig;
+use easytidy_core::models::{ContainerConfig, NetworkMode};
 use easytidy_protocol::{Frame, FrameCodec, Message, MsgKind, PROTOCOL_VERSION};
 use easytidy_protocol::{Handshake, HandshakeAck};
 use easytidy_protocol::ops::{PtyOpen, PtyOpenResp, PtyResize, PtyExited};
@@ -87,6 +88,13 @@ enum Commands {
     /// 重启容器
     Restart {
         /// 容器名或 ID
+        #[arg(long)]
+        container: String,
+    },
+
+    /// 重建容器（应用配置变更：mounts/网络映射；创建后不可变 → 必须重建）
+    Rebuild {
+        /// 容器名
         #[arg(long)]
         container: String,
     },
@@ -173,6 +181,7 @@ async fn main() -> Result<()> {
                 Commands::Start { container } => cmd_start(podman, container).await,
                 Commands::Stop { container } => cmd_stop(podman, container).await,
                 Commands::Restart { container } => cmd_restart(podman, container).await,
+                Commands::Rebuild { container } => cmd_rebuild(podman, container).await,
                 Commands::Rm { container, force } => cmd_rm(podman, container, force).await,
                 Commands::Inspect { container } => cmd_inspect(podman, container).await,
                 Commands::Boot { config: _ } => {
@@ -224,22 +233,24 @@ async fn cmd_create(
 
     info!("使用 server 二进制：{}", server_bin.display());
 
-    // 创建容器
-    match podman.create(&name, &image, &server_bin).await {
+    // 容器配置（网络默认 Host 模式，产品语义；distrobox 同款）
+    let container_config = ContainerConfig {
+        name: name.clone(),
+        image: image.clone(),
+        entry: None,
+        silent_boot: false,
+        persistent: true,
+        ..Default::default()
+    };
+
+    // 创建容器（走新入口，应用完整配置）
+    match podman.create_with_config(&name, &image, &server_bin, &container_config).await {
         Ok(id) => {
             println!("容器 {} 创建成功（ID: {}）", name, id);
 
             // 注册到配置文件
             let config_path = ConfigFile::default_path()?;
             let config_file = ConfigFile::with_path(config_path);
-
-            let container_config = ContainerConfig {
-                name: name.clone(),
-                image: image.clone(),
-                entry: None,
-                silent_boot: false,
-                persistent: true,
-            };
 
             if let Err(e) = config_file.register_container(container_config) {
                 error!("注册容器配置失败：{}", e);
@@ -252,6 +263,28 @@ async fn cmd_create(
             Err(e.into())
         }
     }
+}
+
+/// 重建容器（M4 前置：mount/网络映射配置变更后生效）。
+///
+/// 从 configfile 读取容器配置 → `Podman::rebuild`（commit 当前层 → 删旧 → 同名重建 → 启动）→
+/// 打印新 ID。改配置的途径：直接编辑 `~/.config/easytidy/config.toml` 或后续 GUI。
+async fn cmd_rebuild(podman: Podman, container: String) -> Result<()> {
+    info!("重建容器：{}", container);
+
+    // 从 configfile 读取容器配置
+    let config_path = ConfigFile::default_path()?;
+    let config_file = ConfigFile::with_path(config_path);
+    let Some(config) = config_file.get_container(&container)? else {
+        bail!("容器配置不存在：{container}（请先 create，或在 config.toml 中编辑 mounts/network 配置）");
+    };
+
+    let new_id = podman.rebuild(&container, &config).await?;
+    println!("容器 {} 重建成功（新 ID: {}）", container, new_id);
+
+    // 回写配置（保持 configfile 与容器一致）
+    config_file.register_container(config)?;
+    Ok(())
 }
 
 /// 启动容器。
@@ -302,7 +335,8 @@ async fn cmd_rm(podman: Podman, container: String, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// 检查容器详情（M1：复用 list_containers 投影；M2 起补完整 inspect）。
+/// 检查容器详情（M1：复用 list_containers 投影；M2 起补完整 inspect；
+/// M4 前置：追加当前生效的 mounts / 网络配置）。
 async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
     info!("检查容器：{}", container);
 
@@ -316,6 +350,38 @@ async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
     println!("image:   {}", c.image);
     println!("status:  {}", c.status);
     println!("managed: {}", if c.managed { "yes ✓" } else { "no" });
+
+    // 当前生效的 mounts / 网络（来自 podman inspect）
+    match podman.inspect_config(&container).await {
+        Ok(view) => {
+            println!();
+            println!("mounts:");
+            if view.mounts.is_empty() {
+                println!("  (none)");
+            }
+            for m in &view.mounts {
+                println!("  {} -> {} ({})", m.host_path, m.container_path,
+                    if m.read_only { "ro" } else { "rw" });
+            }
+
+            let mode = match view.network.mode {
+                NetworkMode::Host => "host",
+                NetworkMode::Mapped => "mapped",
+            };
+            println!();
+            println!("network:");
+            println!("  mode:  {}", mode);
+            if view.network.ports.is_empty() {
+                println!("  ports: (none)");
+            }
+            for p in &view.network.ports {
+                println!("  {} -> {}/{}", p.host_port, p.container_port, p.protocol);
+            }
+        }
+        Err(e) => {
+            println!("（获取 mounts/网络失败：{}）", e);
+        }
+    }
 
     Ok(())
 }

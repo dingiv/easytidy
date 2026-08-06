@@ -342,6 +342,7 @@ name = "easytidy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bollard",
  "bytes",
  "clap",
  "crossterm",
@@ -352,6 +353,7 @@ dependencies = [
  "serde",
  "serde_json",
  "signal-hook",
+ "tempfile",
  "tokio",
  "tokio-util",
  "tracing",

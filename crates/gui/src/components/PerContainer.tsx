@@ -39,7 +39,7 @@ export function PerContainer({ containerName }: PerContainerProps) {
       <main className="main-content">
         {/* Left sidebar: File browser */}
         <aside className="sidebar-left">
-          <div className="panel-header">File Browser</div>
+          {/* <div className="panel-header">File Browser</div> */}
           <FileBrowser />
         </aside>
 
@@ -79,7 +79,7 @@ export function PerContainer({ containerName }: PerContainerProps) {
             )}
             {activeTab === 'config' && (
               <div className="tab-pane">
-                <ConfigManager />
+                <ConfigManager containerName={containerName} />
               </div>
             )}
           </div>

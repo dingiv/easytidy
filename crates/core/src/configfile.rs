@@ -141,8 +141,14 @@ impl ConfigFile {
                 .map_err(|e| Error::Config(format!("创建配置目录失败：{e}")))?;
         }
 
-        // 打开文件（不存在则创建）
-        let file = File::create(&self.path)
+        // 打开文件（不存在则创建）。
+        // 注意：不能用 File::create（会先截断文件再拿锁）——并发 load() 可能读到
+        // 半截文件；内容写入走临时文件 + rename，这里只需写句柄来承载 flock。
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false) // 关键：先拿锁再替换，绝不截断现有文件
+            .open(&self.path)
             .map_err(|e| Error::Config(format!("创建配置文件失败：{e}")))?;
 
         // flock exclusive lock（写锁，阻塞等待）
@@ -287,6 +293,7 @@ mod tests {
             entry: Some("/bin/sh".to_string()),
             silent_boot: true,
             persistent: true,
+            ..Default::default()
         };
         config_file.register_container(container.clone()).unwrap();
 
@@ -305,6 +312,34 @@ mod tests {
         config_file.unregister_container("test-container").unwrap();
         let loaded = config_file.get_container("test-container").unwrap();
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn test_old_format_container_defaults() {
+        // 旧配置文件（无 mounts/network 字段）→ 加载后新字段取默认值
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("old-format.toml");
+        let config_file = ConfigFile::with_path(config_path.clone());
+
+        fs::write(
+            &config_path,
+            r#"schema_version = 1
+
+[containers.legacy]
+name = "legacy"
+image = "alpine:latest"
+entry = "/bin/sh"
+silent_boot = false
+persistent = true
+"#,
+        ).unwrap();
+
+        let loaded = config_file.load().unwrap();
+        let c = loaded.containers.get("legacy").expect("旧格式容器应可加载");
+        assert_eq!(c.image, "alpine:latest");
+        assert!(c.mounts.is_empty(), "旧格式无 mounts → 默认空");
+        assert_eq!(c.network.mode, crate::models::NetworkMode::Host);
+        assert!(c.network.ports.is_empty(), "旧格式无端口 → 默认空");
     }
 
     #[test]
