@@ -1,0 +1,195 @@
+:root {
+  font-family: "Noto Sans CJK SC", "PingFang SC", system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  overflow: hidden;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* 菜单栏 */
+.menu-bar {
+  display: flex;
+  align-items: center;
+  padding: 0.5rem 1rem;
+  background: #181825;
+  border-bottom: 1px solid #45475a;
+}
+
+.menu-title {
+  font-weight: bold;
+  font-size: 1.1rem;
+  margin-right: 2rem;
+}
+
+.menu-items {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.menu-item {
+  background: transparent;
+  border: none;
+  color: #cdd6f4;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.menu-item:hover {
+  background: #313244;
+}
+
+/* 主内容区 */
+.main-content {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* 左侧边栏 */
+.sidebar-left {
+  width: 250px;
+  background: #11111b;
+  border-right: 1px solid #45475a;
+  display: flex;
+  flex-direction: column;
+}
+
+.panel-header {
+  padding: 0.8rem 1rem;
+  background: #181825;
+  border-bottom: 1px solid #45475a;
+  font-weight: bold;
+  font-size: 0.95rem;
+}
+
+.file-browser-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  text-align: center;
+}
+
+/* 主面板 */
+.main-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 中心化模式视图 */
+.centralized-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem;
+  overflow: auto;
+}
+
+.container-list-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  margin-bottom: 1rem;
+}
+
+.primary-button {
+  background: #89b4fa;
+  color: #1e1e2e;
+  border: none;
+  padding: 0.6rem 1.2rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.95rem;
+  font-weight: bold;
+}
+
+.primary-button:hover {
+  background: #b4befe;
+}
+
+/* Per-container 模式视图 */
+.container-view {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 标签页导航 */
+.tab-nav {
+  display: flex;
+  background: #181825;
+  border-bottom: 1px solid #45475a;
+}
+
+.tab-nav button {
+  background: transparent;
+  border: none;
+  color: #9399b2;
+  padding: 0.8rem 1.2rem;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.tab-nav button:hover {
+  color: #cdd6f4;
+  background: #313244;
+}
+
+.tab-nav button.tab-active {
+  color: #cdd6f4;
+  border-bottom-color: #89b4fa;
+}
+
+/* 标签页内容 */
+.tab-content {
+  flex: 1;
+  overflow: auto;
+}
+
+.tab-pane {
+  height: 100%;
+  padding: 1rem;
+}
+
+.terminal-placeholder,
+.passthrough-placeholder,
+.config-placeholder {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.hint {
+  color: #9399b2;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
