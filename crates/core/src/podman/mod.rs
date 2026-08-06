@@ -285,6 +285,8 @@ impl Podman {
                 "--socket".to_string(),
                 "/run/easytidy/server.sock".to_string(),
             ]),
+            // 用户环境变量（如 GUI 透传的 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY）
+            env: if config.env.is_empty() { None } else { Some(config.env.clone()) },
             labels: Some(labels),
             host_config: Some(host_config),
             exposed_ports,

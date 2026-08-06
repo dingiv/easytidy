@@ -101,6 +101,9 @@ pub struct ContainerConfig {
     /// 网络配置（默认 Host 模式）
     #[serde(default = "default_network")]
     pub network: NetworkConfig,
+    /// 容器环境变量（"KEY=VALUE" 列表，GUI 透传时含宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY）
+    #[serde(default)]
+    pub env: Vec<String>,
 }
 
 /// 容器配置视图（`Podman::inspect_config` 投影：当前生效的 mounts / 网络）。
@@ -183,6 +186,7 @@ persistent = true
                     protocol: "tcp".to_string(),
                 }],
             },
+            env: vec!["DISPLAY=:0".to_string()],
         };
 
         // TOML 往返（configfile 格式）

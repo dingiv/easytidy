@@ -17,6 +17,7 @@ pub mod configfile;
 pub mod desktop;
 pub mod error;
 pub mod events;
+pub mod flavor;
 pub mod models;
 pub mod podman;
 pub mod systemd;

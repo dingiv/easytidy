@@ -137,6 +137,27 @@ enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+
+    /// 配置 flavor：按模板创建预配置容器（镜像 + setup 安装 + entry 应用）
+    Flavor {
+        #[command(subcommand)]
+        cmd: FlavorCmd,
+    },
+}
+
+/// flavor 子命令
+#[derive(Subcommand)]
+enum FlavorCmd {
+    /// 列出可用 flavor
+    List,
+    /// 应用 flavor：创建容器 → 执行 setup → 注册配置（GUI 透传自动注入宿主显示环境）
+    Apply {
+        /// flavor 名
+        flavor: String,
+        /// 容器名（默认 = flavor 名）
+        #[arg(long)]
+        container: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -158,7 +179,8 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Run { container, command } => {
-            cmd_run(container, command).await
+            let code = cmd_run(container, command).await?;
+            std::process::exit(code);
         }
         _ => {
             // 需要 podman 连接的命令
@@ -184,10 +206,16 @@ async fn main() -> Result<()> {
                 Commands::Rebuild { container } => cmd_rebuild(podman, container).await,
                 Commands::Rm { container, force } => cmd_rm(podman, container, force).await,
                 Commands::Inspect { container } => cmd_inspect(podman, container).await,
-                Commands::Boot { config: _ } => {
+                        Commands::Boot { config: _ } => {
                     info!("静默启动（stub）：M1 占位，待 M2 实现");
                     Ok(())
                 }
+                Commands::Flavor { cmd } => match cmd {
+                    FlavorCmd::List => cmd_flavor_list(),
+                    FlavorCmd::Apply { flavor, container } => {
+                        cmd_flavor_apply(podman, flavor, container).await
+                    }
+                },
                 _ => Ok(()), // 已经在上面处理
             }
         }
@@ -335,6 +363,65 @@ async fn cmd_rm(podman: Podman, container: String, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// 列出可用 flavor。
+fn cmd_flavor_list() -> Result<()> {
+    let flavors = easytidy_core::flavor::Flavor::list()?;
+    if flavors.is_empty() {
+        println!("没有可用 flavor（{}）", easytidy_core::flavor::Flavor::flavors_dir()?.display());
+        return Ok(());
+    }
+    println!("可用 flavor：");
+    for f in flavors {
+        println!("  {f}");
+    }
+    Ok(())
+}
+
+/// 应用 flavor：创建容器 → 启动 → 经 server 无头执行 setup → 注册配置。
+async fn cmd_flavor_apply(
+    podman: Podman,
+    flavor_name: String,
+    container: Option<String>,
+) -> Result<()> {
+    let flavor = easytidy_core::flavor::Flavor::load(&flavor_name)?;
+    let name = container.unwrap_or_else(|| flavor_name.clone());
+
+    info!("应用 flavor {flavor_name}：镜像 {}，容器 {name}", flavor.image);
+
+    // 展开配置（GUI 透传自动注入宿主显示环境）
+    let config = flavor.build_config(&name)?;
+
+    let server_bin = easytidy_core::server_binary_path()?;
+    let id = podman.create_with_config(&name, &flavor.image, &server_bin, &config).await?;
+    println!("容器 {name} 创建成功（ID: {}）", &id[..12.min(id.len())]);
+
+    podman.start(&name).await?;
+    println!("容器 {name} 已启动，开始执行 setup（{} 条命令）...", flavor.setup.len());
+
+    // 经 server PTY 无头执行每条 setup 命令（run 在非 TTY 下自动跳过 raw mode）。
+    // 无头安装必须非交互：注入 DEBIAN_FRONTEND=noninteractive 防 debconf 卡死。
+    for (i, cmd) in flavor.setup.iter().enumerate() {
+        println!("[setup {}/{}] {}", i + 1, flavor.setup.len(), cmd);
+        let full = format!("export DEBIAN_FRONTEND=noninteractive TZ=UTC; {cmd}");
+        let code = cmd_run(name.clone(), vec!["bash".to_string(), "-c".to_string(), full.clone()])
+            .await?;
+        if code != 0 {
+            bail!("setup 命令失败（退出码 {code}）：{cmd}");
+        }
+    }
+
+    // 注册配置（entry 应用 + GUI 透传 env/mounts 落盘，供后续 run/passthrough 使用）
+    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+    config_file.register_container(config)?;
+
+    println!("✅ flavor {flavor_name} 已应用。启动容器内应用：");
+    println!("   easytidy run --container {name} -- {entry}{args}",
+        entry = flavor.entry.clone().unwrap_or_else(|| "（无 entry，可指定任意命令）".into()),
+        args = flavor.entry_args.join(" "));
+
+    Ok(())
+}
+
 /// 检查容器详情（M1：复用 list_containers 投影；M2 起补完整 inspect；
 /// M4 前置：追加当前生效的 mounts / 网络配置）。
 async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
@@ -394,7 +481,7 @@ async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
 /// 3. hello 握手
 /// 4. pty.open（获取 stream_id）
 /// 5. 循环：stdin → Raw 帧 → stdout，SIGWINCH → pty.resize，pty.exited → 退出
-async fn cmd_run(container: String, command: Vec<String>) -> Result<()> {
+async fn cmd_run(container: String, command: Vec<String>) -> Result<i32> {
     info!("运行容器内命令：container={}, cmd={:?}", container, command);
 
     // 1. 确保容器运行中
@@ -527,9 +614,12 @@ async fn cmd_run(container: String, command: Vec<String>) -> Result<()> {
     debug!("PTY 打开成功：stream_id={}", stream_id);
 
     // 5. 进入主循环
-    // 设置终端为 raw 模式
-    terminal::enable_raw_mode()
-        .context("设置终端 raw 模式失败")?;
+    // 设置终端为 raw 模式（非 TTY（如管道/无头 setup）时跳过，仍可流式 I/O）
+    let mut raw_enabled = false;
+    match terminal::enable_raw_mode() {
+        Ok(()) => raw_enabled = true,
+        Err(e) => debug!("非 TTY 场景，跳过 raw 模式：{}", e),
+    }
 
     // 设置退出标志（用于异步关闭）
     let running = std::sync::Arc::new(AtomicBool::new(true));
@@ -667,14 +757,16 @@ async fn cmd_run(container: String, command: Vec<String>) -> Result<()> {
     let code = exit_code.await?.unwrap_or(0);
     running.store(false, Ordering::Relaxed);
 
-    // 清理
-    terminal::disable_raw_mode()
-        .context("恢复终端模式失败")?;
+    // 清理（仅当之前成功进入 raw 模式）
+    if raw_enabled {
+        terminal::disable_raw_mode()
+            .context("恢复终端模式失败")?;
+    }
 
     // 恢复终端并打印换行
     println!();
 
-    std::process::exit(code);
+    Ok(code)
 }
 
 /// 构建并安装 musl server 二进制。

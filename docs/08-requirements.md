@@ -131,3 +131,16 @@ server 职责（3 项）：
 
 - 【D1】GUI 壳最终确认：Tauri（CJK spike 通过）vs gtk4-rs + VTE（spike 失败）
 - 【新】entry 退出语义：默认容器不停止（server 常驻）；可选"随 entry 退出"模式是否首版提供
+
+## 配置 flavor 概念（2026-08-06 修正）
+
+**哲学**：flavor = "如何启动一个**能够拉起 GUI 应用**的容器配置"，即 **GUI 透传底座**（显示环境注入 + entry 应用）。flavor **不含特定应用的安装步骤**——应用及依赖由使用者手动安装（经 `easytidy run --container <n> -- bash -c '<install>'`，即 run 机制本身是安装的执行通道）。应用安装/分发属后续"应用定义/商店"范畴（M5）。
+
+**GUI 透传配方**（参考 docs/11-gui-container.md，宿主实测验证）：
+- env：DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / XDG_RUNTIME_DIR（取宿主值）
+- 挂载：`/tmp/.X11-unix`（X11 socket）、`$XDG_RUNTIME_DIR`（Wayland/dbus/XAUTHORITY）
+- P1 待做：GPU 透传（`--gpus=all` + NVIDIA_* env，需宿主 nvidia-container-toolkit）、apparmor=unconfined、`--pid=host`
+
+**无头安装纪律**：setup 必须以非交互执行（`DEBIAN_FRONTEND=noninteractive` + `TZ=UTC`）——tzdata 等 debconf 提示会卡死无头安装（实测教训）。
+
+**flavor 清单**：`$XDG_CONFIG_HOME/easytidy/flavors/<name>.toml`；`easytidy flavor list/apply`。
