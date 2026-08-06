@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>easytidy CJK/IME Spike</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="container">
+      <h1>easytidy CJK/IME Spike</h1>
+      <button id="devtools-btn">🔧 打开 DevTools（看 Console 报错）</button>
+      <p class="hint">
+        目标 A/B/C 三个输入目标，逐项测试中文输入法（fcitx5 / ibus）。
+        预期：候选窗跟随光标；合成文本即时可见（无需窗口 resize）；提交无幻影按键。
+      </p>
+
+      <section class="card">
+        <h2>A. &lt;textarea&gt;</h2>
+        <textarea id="target-textarea" rows="4" cols="60" placeholder="在此输入中文"></textarea>
+      </section>
+
+      <section class="card">
+        <h2>B. contenteditable</h2>
+        <div id="target-contenteditable" contenteditable="true" class="editable">
+          在此输入中文
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>C. xterm.js（本地回显，模拟终端）</h2>
+        <p class="hint">
+          测试：合成期间不应吞掉/触发幻影 Enter；提交的文本应完整进入 shell 回显。
+        </p>
+        <div id="terminal"></div>
+      </section>
+
+      <section class="card">
+        <h2>D. 环境信息</h2>
+        <pre id="env-info">加载中…</pre>
+      </section>
+    </main>
+  </body>
+</html>

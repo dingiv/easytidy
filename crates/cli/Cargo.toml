@@ -1,0 +1,18 @@
+[package]
+name = "easytidy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "easytidy"
+path = "src/main.rs"
+
+[dependencies]
+easytidy-core = { path = "../core" }
+easytidy-protocol = { path = "../protocol" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
