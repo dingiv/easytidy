@@ -178,12 +178,11 @@ impl Podman {
         use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
 
-        // 检查镜像是否存在，不存在则拉取
-
-        // TODO: 不要在此处拉取镜像, 直接抛错
+        // 检查镜像是否存在，不存在则直接报错（不自动拉取——拉取是显式用户动作）
         if !self.image_exists(image).await? {
-            tracing::info!("镜像 {} 不存在，开始拉取...", image);
-            self.pull_image(image).await?;
+            return Err(Error::Config(format!(
+                "镜像不存在：{image}\n请先拉取镜像（如：podman pull {image}）"
+            )));
         }
 
         // 创建宿主 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>）
