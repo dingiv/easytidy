@@ -1,16 +1,17 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Breadcrumb, Spin, Empty } from 'antd';
-import { FolderOutlined, FileOutlined } from '@ant-design/icons';
+import { Breadcrumb, Spin, Empty, Button } from 'antd';
+import { FolderOutlined, FileOutlined, ArrowLeftOutlined } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import type { FsEntry } from '../types';
+import './FileBrowser.css'
 
 /** 路径 → 面包屑层级（每级可点击跳转） */
 function pathToCrumbs(path: string): { label: string; key: string }[] {
-  if (path === '/' || path === '') return [{ label: '/', key: '/' }];
+  if (path === '/' || path === '') return [{ label: '(root)', key: '/' }];
   const parts = path.split('/').filter(Boolean);
   return [
-    { label: '/', key: '/' },
+    { label: '(root)', key: '/' },
     ...parts.map((p, i) => ({
       label: p,
       key: `/${parts.slice(0, i + 1).join('/')}`,
@@ -19,7 +20,7 @@ function pathToCrumbs(path: string): { label: string; key: string }[] {
 }
 
 export function FileBrowser() {
-  const { currentPath, navigate } = useFileBrowserStore();
+  const { currentPath, navigate, navigateToParent } = useFileBrowserStore();
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -69,11 +70,12 @@ export function FileBrowser() {
 
   return (
     <div className="file-browser">
-      {/* 面包屑：每级可点击导航 */}
-      <Breadcrumb
-        items={crumbs.map((c) => ({
-          title: (
-            <a
+      {/* 导航行：返回根目录 + 返回上一级 + 面包屑（每级可点击） */}
+      <div className="file-browser-breadcrumb">
+        <Breadcrumb
+          items={crumbs.map((c) => ({
+            title: (
+              <a
               href="#"
               onClick={(e) => {
                 e.preventDefault();
@@ -81,13 +83,21 @@ export function FileBrowser() {
                 navigate(c.key);
               }}
               style={{ fontWeight: c.key === currentPath ? 600 : 'normal' }}
-            >
-              {c.label}
-            </a>
-          ),
-        }))}
-        style={{ marginBottom: 8 }}
-      />
+              >
+                {c.label}
+              </a>
+            ),
+          }))}
+        />
+          <Button
+            size="small"
+            type="text"
+            icon={<ArrowLeftOutlined />}
+            disabled={currentPath === '/'}
+            onClick={navigateToParent}
+            title="返回上一级"
+          />
+      </div>
 
       {error && <div className="error-message">{error}</div>}
 

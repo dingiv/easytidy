@@ -21,7 +21,7 @@ export function PerContainer({ containerName }: PerContainerProps) {
   };
 
   return (
-    <div className="per-container">
+    <div className="per-container app">
       {/* Menu bar */}
       <header className="menu-bar">
         <div className="menu-title">easytidy - {containerName}</div>

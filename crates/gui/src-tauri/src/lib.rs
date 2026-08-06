@@ -20,7 +20,7 @@ use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
@@ -468,23 +468,11 @@ async fn ensure_session_connected(session: &GuiSession) -> Result<()> {
 }
 
 /// 发送 JSON 请求并接收响应
-async fn send_json_request(
+/// 在共享 session socket 上发一次请求并等待响应。
+async fn try_send_json_request(
     session: &GuiSession,
-    op: String,
-    payload: serde_json::Value,
+    msg: &Message,
 ) -> Result<Message> {
-    ensure_session_connected(session).await?;
-
-    let msg_id = session.next_msg_id.fetch_add(1, Ordering::SeqCst);
-
-    let msg = Message {
-        id: msg_id,
-        kind: MsgKind::Req,
-        op,
-        payload,
-        err: None,
-    };
-
     let mut socket_guard = session.socket.lock().await;
     let socket = socket_guard.as_mut().context("Socket 未初始化")?;
 
@@ -505,6 +493,37 @@ async fn send_json_request(
             }
         }
         Frame::Raw { .. } => Err(anyhow::anyhow!("响应应为 JSON 帧")),
+    }
+}
+
+/// 发送 JSON 请求并接收响应。
+///
+/// server 对无 PTY 的连接有 30s 空闲超时；共享 socket 空闲超时后可能已被
+/// server 断开 —— 失败时丢弃旧连接、重连一次重试（幂等请求场景足够）。
+async fn send_json_request(
+    session: &GuiSession,
+    op: String,
+    payload: serde_json::Value,
+) -> Result<Message> {
+    ensure_session_connected(session).await?;
+
+    let msg = Message {
+        id: session.next_msg_id.fetch_add(1, Ordering::SeqCst),
+        kind: MsgKind::Req,
+        op,
+        payload,
+        err: None,
+    };
+
+    match try_send_json_request(session, &msg).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            warn!("共享 socket 请求失败，重连重试：{}", e);
+            // 丢弃旧连接（可能已被 server 空闲超时断开）
+            session.socket.lock().await.take();
+            ensure_session_connected(session).await?;
+            try_send_json_request(session, &msg).await
+        }
     }
 }
 
@@ -667,11 +686,14 @@ async fn pty_resize(
 ) -> Result<(), String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    let sink = {
+    // 流已关闭时静默忽略（resize 可能在退出竞态中触发）
+    let maybe_sink = {
         let active = sess.active_ptys.lock().await;
         active.get(&stream_id).cloned()
-    }
-    .ok_or_else(|| format!("PTY 流 {} 不存在", stream_id))?;
+    };
+    let Some(sink) = maybe_sink else {
+        return Ok(());
+    };
 
     let resize = PtyResize {
         stream_id,
@@ -700,11 +722,14 @@ async fn pty_close(
 ) -> Result<(), String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    let sink = {
+    // 流已关闭时静默忽略
+    let maybe_sink = {
         let active = sess.active_ptys.lock().await;
         active.get(&stream_id).cloned()
-    }
-    .ok_or_else(|| format!("PTY 流 {} 不存在", stream_id))?;
+    };
+    let Some(sink) = maybe_sink else {
+        return Ok(());
+    };
 
     let close = PtyClose {
         stream_id,
