@@ -234,6 +234,14 @@ async fn main() -> Result<()> {
     }
 }
 
+/// 拉取镜像（显式动作；create 不再自动拉取）。
+async fn cmd_pull(podman: Podman, image: String) -> Result<()> {
+    info!("拉取镜像：{}", image);
+    podman.pull_image(&image).await?;
+    println!("镜像 {} 拉取成功", image);
+    Ok(())
+}
+
 /// 列出所有容器（打印表格）。
 async fn cmd_list(podman: Podman) -> Result<()> {
     let containers = podman.list_containers().await?;
