@@ -314,8 +314,8 @@ impl Podman {
 
         // 用户一致性映射（user_home=true）→ keep-id 必须走 libpod 端点
         // （Docker compat 端点不支持 userns.keep-id，实测；见 libpod.rs）。
-        // keep-id 使容器内 uid 与宿主 uid 真对齐：node 用户即宿主用户，
-        // 宿主 home / /run/user/1000 自然可达（GUI 窗口可用）。
+        // keep-id 使容器内 uid 1000（node 用户）= 宿主当前登录用户：
+        // 宿主 home 读写 / /run/user/1000（显示 socket）自然可达（GUI 窗口可用）。
         if config.user_home {
             let libpod = crate::libpod::Libpod::new().await?;
             // mounts / port_bindings 已在 host_config 中（早于本分支 move），从 host_config 取

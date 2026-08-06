@@ -5,11 +5,17 @@
 //! libpod 端点可用：`POST /libpod/containers/create` 的
 //! `namespaces.userns.nsmode = "keep-id"`。
 //!
-//! keep-id 语义（rootless）：容器 uid 0 与容器 uid 1000（宿主 uid 值）都映射到
-//! 宿主用户——容器内 node 用户（uid 1000）即宿主用户：可读写宿主挂载 home、
-//! 可访问宿主 /run/user/1000（Wayland/dbus/XAUTHORITY）——GUI 应用窗口、
-//! 宿主 home 写全部自然打通。代价：容器内 root 无权写镜像自带的 root 属主
-//! 文件（映射到宿主 subuid），apt/装包需在镜像层或另议（文档化）。
+//! keep-id 语义（rootless，实测文件属主/访问行为，2026-08-07）：
+//! - **容器内 uid 1000（node 用户）= 宿主当前登录用户（uid 1000）**：
+//!   读写宿主挂载 home 直接可用（无需 sudo，宿主侧属主正确）、
+//!   可访问宿主 /run/user/1000（Wayland/dbus/XAUTHORITY）——GUI 窗口、
+//!   宿主 home 读写全部自然打通，且拥有的是宿主用户权限而非 root
+//! - 容器内 uid 0（root）= 装包身份：能写容器系统文件（apt/sudo 可用）；
+//!   对宿主 home 的写文件以 subuid(100000) 属主呈现（尽量经 sudo 或
+//!   node 身份操作宿主文件）
+//! - 免密 sudo（/etc/sudoers.d/easytidy-node）作为提升通道
+//! - 注意：/proc/self/uid_map 的字面映射（1000→0）不代表实际文件属主
+//!   行为——以 keep-id 层的真实身份为准（实测文件属主 = 宿主用户）
 
 use std::path::PathBuf;
 use std::task::{Context, Poll};
