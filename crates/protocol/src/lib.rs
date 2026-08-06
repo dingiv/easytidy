@@ -12,3 +12,11 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const FRAME_JSON: u8 = 0x01;
 /// 帧判别符：原始流数据（PTY I/O，stream_id u32 BE + 字节）
 pub const FRAME_RAW: u8 = 0x02;
+
+pub mod frame;
+pub mod message;
+pub mod ops;
+
+pub use frame::{Frame, encode_frame, decode_frame};
+pub use message::{Message, MsgKind, RpcError, Handshake, HandshakeAck};
+pub use ops::*;
