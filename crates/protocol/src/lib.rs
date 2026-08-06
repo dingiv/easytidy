@@ -17,6 +17,6 @@ pub mod frame;
 pub mod message;
 pub mod ops;
 
-pub use frame::{Frame, encode_frame, decode_frame};
+pub use frame::{Frame, encode_frame, decode_frame, FrameCodec};
 pub use message::{Message, MsgKind, RpcError, Handshake, HandshakeAck};
 pub use ops::*;
