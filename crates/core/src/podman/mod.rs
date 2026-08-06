@@ -378,6 +378,17 @@ impl Podman {
         Ok(id)
     }
 
+    /// 环境快照：commit 当前容器层为快照镜像（`easytidy/snapshot/<name>-<tag>`）。
+    ///
+    /// 仅容器文件系统层（bind mount 不入快照）；快照是独立资产，
+    /// 删除环境不删快照（可被 fork 复用）。见 docs/13-mutable-env-paradigm.md。
+    pub async fn snapshot(&self, name: &str, tag: &str) -> Result<String> {
+        let image_ref = format!("easytidy/snapshot/{name}-{tag}");
+        self.commit_container(name, &image_ref).await?;
+        tracing::info!("环境 {} 快照完成：{}", name, image_ref);
+        Ok(image_ref)
+    }
+
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
     ///
     /// 流程：

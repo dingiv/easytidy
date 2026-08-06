@@ -149,11 +149,64 @@ enum Commands {
         config: Option<PathBuf>,
     },
 
+    /// 环境语义操作（docs/13-mutable-env-paradigm.md：新/删/快照/fork/运行/关闭）
+    Env {
+        #[command(subcommand)]
+        cmd: EnvCmd,
+    },
+
     /// 配置 flavor：按模板创建预配置容器（镜像 + setup 安装 + entry 应用）
     Flavor {
         #[command(subcommand)]
         cmd: FlavorCmd,
     },
+}
+
+/// 环境语义子命令
+#[derive(Subcommand)]
+enum EnvCmd {
+    /// 新环境：创建干净环境开始操作
+    New {
+        /// 环境名
+        #[arg(long)]
+        name: String,
+        /// flavor 名（可选：按模板创建，含 GUI 透传/用户映射）
+        #[arg(long)]
+        flavor: Option<String>,
+        /// 镜像（无 flavor 时）
+        #[arg(long)]
+        image: Option<String>,
+    },
+    /// 删除环境（删干净：容器+配置+桌面图标+socket）
+    Rm {
+        /// 环境名
+        name: String,
+    },
+    /// 快照：为当前环境创建保险（commit 容器层）
+    Snapshot {
+        /// 环境名
+        name: String,
+        /// 快照标签（默认=时间戳）
+        #[arg(long)]
+        tag: Option<String>,
+    },
+    /// fork：从快照派生新环境（继承配置）
+    Fork {
+        /// 源环境名
+        name: String,
+        /// 快照标签（env snapshot 产生的）
+        #[arg(long)]
+        snapshot: String,
+        /// 新环境名
+        #[arg(long)]
+        new_name: String,
+    },
+    /// 运行环境（细粒度控制，与创建/销毁分离）
+    Start { name: String },
+    /// 关闭环境（保留，可随时恢复）
+    Stop { name: String },
+    /// 环境列表
+    List,
 }
 
 /// flavor 子命令
@@ -222,6 +275,17 @@ async fn main() -> Result<()> {
                     info!("静默启动（stub）：M1 占位，待 M2 实现");
                     Ok(())
                 }
+                Commands::Env { cmd } => match cmd {
+                    EnvCmd::New { name, flavor, image } => cmd_env_new(podman, name, flavor, image).await,
+                    EnvCmd::Rm { name } => cmd_env_rm(podman, name).await,
+                    EnvCmd::Snapshot { name, tag } => cmd_env_snapshot(podman, name, tag).await,
+                    EnvCmd::Fork { name, snapshot, new_name } => {
+                        cmd_env_fork(podman, name, snapshot, new_name).await
+                    }
+                    EnvCmd::Start { name } => cmd_env_start(podman, name).await,
+                    EnvCmd::Stop { name } => cmd_env_stop(podman, name).await,
+                    EnvCmd::List => cmd_env_list(podman).await,
+                },
                 Commands::Flavor { cmd } => match cmd {
                     FlavorCmd::List => cmd_flavor_list(),
                     FlavorCmd::Apply { flavor, container } => {
@@ -381,6 +445,110 @@ async fn cmd_rm(podman: Podman, container: String, force: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// 新环境：flavor 模板或指定镜像创建干净环境。
+async fn cmd_env_new(podman: Podman, name: String, flavor: Option<String>, image: Option<String>) -> Result<()> {
+    match flavor {
+        Some(f) => cmd_flavor_apply(podman, f, Some(name)).await,
+        None => {
+            let Some(image) = image else {
+                bail!("env new 需要 --flavor <f> 或 --image <img>");
+            };
+            let server_bin = easytidy_core::server_binary_path()?;
+            let config = ContainerConfig {
+                name: name.clone(),
+                image: image.clone(),
+                ..Default::default()
+            };
+            let id = podman.create_with_config(&name, &image, &server_bin, &config).await?;
+            podman.start(&name).await?;
+            let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+            config_file.register_container(config)?;
+            println!("新环境 {name} 已创建并运行（ID: {}）", &id[..12.min(id.len())]);
+            Ok(())
+        }
+    }
+}
+
+/// 删除环境：容器 + 配置 + 桌面图标 + socket 目录全清理（快照为资产保留并提示）。
+async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
+    podman.remove(&name, true).await?;
+    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+    if let Err(e) = config_file.unregister_container(&name) {
+        error!("注销配置失败：{}", e);
+    }
+    if let Err(e) = easytidy_core::desktop::uninstall_desktop_entry(&name) {
+        debug!("清理桌面图标失败（忽略）：{e}");
+    }
+    // 清理 socket 目录
+    if let Ok(sock) = easytidy_core::host_socket_path(&name) {
+        if let Some(dir) = sock.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+    println!("环境 {name} 已删除（无残留）");
+    println!("  提示：该环境的快照（easytidy/snapshot/{name}-*）为独立资产，已保留，可用 env fork 复用");
+    Ok(())
+}
+
+/// 快照：commit 当前容器层（仅文件系统层，bind mount 不入快照）。
+async fn cmd_env_snapshot(podman: Podman, name: String, tag: Option<String>) -> Result<()> {
+    let tag = tag.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "now".to_string())
+    });
+    let image_ref = podman.snapshot(&name, &tag).await?;
+    println!("环境 {name} 快照完成：{image_ref}");
+    println!("  回滚/复用：easytidy env fork {name} --snapshot {tag} --name <新名>");
+    Ok(())
+}
+
+/// fork：从快照镜像派生新环境，继承源环境配置（mounts/网络/用户映射/GUI 透传）。
+async fn cmd_env_fork(
+    podman: Podman,
+    name: String,
+    snapshot: String,
+    new_name: String,
+) -> Result<()> {
+    // 读源环境配置
+    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+    let mut config = config_file
+        .get_container(&name)?
+        .ok_or_else(|| anyhow::anyhow!("源环境 {name} 不在注册表（先 create/flavor apply）"))?;
+
+    // 快照镜像：easytidy/snapshot/<name>-<snapshot>
+    let image_ref = format!("easytidy/snapshot/{name}-{snapshot}");
+    config.name = new_name.clone();
+    config.image = image_ref.clone();
+
+    let server_bin = easytidy_core::server_binary_path()?;
+    let id = podman.create_with_config(&new_name, &image_ref, &server_bin, &config).await?;
+    podman.start(&new_name).await?;
+    config_file.register_container(config)?;
+    println!("新环境 {new_name} 已从快照 {snapshot} fork 并运行（ID: {}）", &id[..12.min(id.len())]);
+    Ok(())
+}
+
+/// 运行环境。
+async fn cmd_env_start(podman: Podman, name: String) -> Result<()> {
+    podman.start(&name).await?;
+    println!("环境 {name} 已运行");
+    Ok(())
+}
+
+/// 关闭环境（保留，可随时恢复）。
+async fn cmd_env_stop(podman: Podman, name: String) -> Result<()> {
+    podman.stop(&name).await?;
+    println!("环境 {name} 已关闭（保留）");
+    Ok(())
+}
+
+/// 环境列表。
+async fn cmd_env_list(podman: Podman) -> Result<()> {
+    cmd_list(podman).await
 }
 
 /// 列出可用 flavor。
