@@ -132,30 +132,39 @@ impl Flavor {
                     read_only: false,
                 });
             }
-            // 字体/图标透传（只读）：bind mount 要求宿主路径已存在（create_with_config
-            // 校验），故仅在宿主存在时挂载——$HOME/.local/share/{fonts,icons} 未建目录
-            // 的宿主自动跳过。
-            for p in ["/usr/share/fonts", "/usr/share/icons"] {
-                if Path::new(p).exists() {
+            // 字体/图标透传（只读）。⚠️ 不能直接覆盖容器自身 /usr/share/fonts 或
+            // /usr/share/icons——图标/字体包的 dpkg postinst 会写入这两个目录
+            // （update-icon-caches / fc-cache），只读挂载导致安装失败（实测）。
+            // 因此挂到非冲突路径 /usr/share/easytidy-host/，由 fontconfig local.conf
+            // （server 启动时写）+ XDG_DATA_DIRS 接入。
+            // 用户级目录（~/.local/share/*）无此问题（postinst 不写），可原地挂。
+            let mut env_extra = Vec::new();
+            for (host, container) in [
+                ("/usr/share/fonts", "/usr/share/easytidy-host/fonts"),
+                ("/usr/share/icons", "/usr/share/easytidy-host/icons"),
+            ] {
+                if Path::new(host).exists() {
                     mounts.push(MountConfig {
-                        host_path: p.to_string(),
-                        container_path: p.to_string(),
+                        host_path: host.to_string(),
+                        container_path: container.to_string(),
                         read_only: true,
                     });
                 }
             }
+            env_extra.push("XDG_DATA_DIRS=/usr/share/easytidy-host".to_string());
             if let Ok(home) = std::env::var("HOME") {
                 for sub in [".local/share/fonts", ".local/share/icons"] {
                     let p = format!("{home}/{sub}");
                     if Path::new(&p).exists() {
                         mounts.push(MountConfig {
                             host_path: p.clone(),
-                            container_path: p,
+                            container_path: format!("/usr/share/easytidy-host/{sub}"),
                             read_only: true,
                         });
                     }
                 }
             }
+            env.extend(env_extra);
         }
 
         Ok(ContainerConfig {

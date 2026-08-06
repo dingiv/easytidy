@@ -121,6 +121,11 @@ const CONTAINER_USER: &str = "node";
 static USER_MAP: OnceLock<UserMap> = OnceLock::new();
 
 /// 当前生效的用户映射。
+///
+/// 默认 shell/应用的常规身份恒为容器内 node 用户（uid/gid 对齐宿主，名字不同）。
+/// 注：rootless podman 下容器 uid 1000 → 宿主 subuid（100000+），名义对齐；
+/// 宿主 /run/user/1000 等显示 socket 对 node 用户只读不可达——GUI 应用如需
+/// 宿主显示权限，可用 `run --root`（容器 root = 宿主用户身份）或免密 sudo。
 fn user_map() -> Option<&'static UserMap> {
     USER_MAP.get()
 }
@@ -281,6 +286,36 @@ async fn setup_user_mapping() -> bool {
     true
 }
 
+/// 宿主字体接入 fontconfig。
+///
+/// flavor `gui=true` 把宿主 `/usr/share/fonts` 与 `~/.local/share/fonts` 只读挂载到
+/// `/usr/share/easytidy-host/`（非覆盖容器自身目录，避免破坏字体/图标包安装）。
+/// 此处写 `/etc/fonts/local.conf` 把这些目录接入 fontconfig（容器需有 fontconfig，
+/// 否则跳过——多数发行版镜像自带）。
+fn setup_fontconfig() {
+    const HOST_ROOT: &str = "/usr/share/easytidy-host";
+    if !Path::new(HOST_ROOT).exists() {
+        return;
+    }
+    if !Path::new("/etc/fonts").is_dir() {
+        info!("容器无 /etc/fonts（未装 fontconfig），跳过宿主字体接入");
+        return;
+    }
+    let conf = format!(
+        r#"<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>{HOST_ROOT}/fonts</dir>
+  <dir>{HOST_ROOT}/.local/share/fonts</dir>
+</fontconfig>
+"#
+    );
+    match std::fs::write("/etc/fonts/local.conf", conf) {
+        Ok(()) => info!("宿主字体已接入 fontconfig（{HOST_ROOT}）"),
+        Err(e) => warn!("写入 /etc/fonts/local.conf 失败：{e}"),
+    }
+}
+
 /// 探测 PATH 中是否存在可执行命令（区分镜像系：debian/ubuntu 用 useradd/groupadd，
 /// alpine/busybox 用 adduser/addgroup）。
 fn command_available(cmd: &str) -> bool {
@@ -411,6 +446,11 @@ async fn main() -> Result<()> {
     // 行为与旧版一致。server 仍以 root 运行——root 才有权创建用户/装包，
     // 应用层经 su 降权。
     setup_user_mapping().await;
+
+    // 宿主字体接入 fontconfig（flavor gui=true 把宿主字体挂到 /usr/share/easytidy-host，
+    // 写 local.conf 让 fontconfig 找到——不能覆盖容器自身 /usr/share/fonts，
+    // 否则字体/图标包 postinst 写入失败导致 dpkg 安装中断，实测）
+    setup_fontconfig();
 
     // Setup signal handler for graceful shutdown
     let shutdown_flag = state.shutting_down.clone();
@@ -920,19 +960,45 @@ fn pty_reader_thread(
     // Try to reap child to get exit code
     // Note: portable_pty::ExitStatus doesn't expose code() method directly
     // For v0, we use success=0, error=-1
+    // su -c 场景存在"子命令退出 → master EOF → su 尚未退出"的竞态：EOF 后先
+    // 短暂等待子进程自然退出（否则 kill 会吞掉输出/退出码，实测快速命令丢输出）
     let exit_code = match child.try_wait() {
         Ok(Some(status)) => {
             if status.success() { 0 } else { -1 }
         }
         Ok(None) => {
-            // Child still running, try to kill and reap
-            info!("PTY child still running at EOF, killing");
-            let _ = child.kill();
-            match child.wait() {
-                Ok(status) => {
+            // EOF 后给子进程一个自然退出的宽限窗口
+            let mut grace = std::time::Duration::from_millis(300);
+            let exit = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) => {
+                        if grace.is_zero() {
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        grace = grace.saturating_sub(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        error!("Failed to wait for PTY child: {}", e);
+                        break None;
+                    }
+                }
+            };
+            match exit {
+                Some(status) => {
                     if status.success() { 0 } else { -1 }
                 }
-                Err(_) => -1,
+                None => {
+                    info!("PTY child still running at EOF, killing");
+                    let _ = child.kill();
+                    match child.wait() {
+                        Ok(status) => {
+                            if status.success() { 0 } else { -1 }
+                        }
+                        Err(_) => -1,
+                    }
+                }
             }
         }
         Err(e) => {
