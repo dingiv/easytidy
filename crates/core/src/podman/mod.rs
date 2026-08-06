@@ -628,7 +628,7 @@ impl Podman {
     }
 
     /// 拉取镜像。
-    async fn pull_image(&self, image: &str) -> Result<()> {
+    pub async fn pull_image(&self, image: &str) -> Result<()> {
         use bollard::image::CreateImageOptions;
         use futures::StreamExt;
 

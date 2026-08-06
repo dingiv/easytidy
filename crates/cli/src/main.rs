@@ -52,6 +52,13 @@ enum Commands {
     /// 列出所有容器
     List,
 
+    /// 拉取镜像（显式动作；create 不再自动拉取）
+    Pull {
+        /// 镜像名（如 docker.io/library/ubuntu:24.04）
+        #[arg(long)]
+        image: String,
+    },
+
     /// 创建新容器
     Create {
         /// 镜像名（如 docker.io/library/alpine:latest）
@@ -201,6 +208,7 @@ async fn main() -> Result<()> {
 
             match cli.command {
                 Commands::List => cmd_list(podman).await,
+                Commands::Pull { image } => cmd_pull(podman, image).await,
                 Commands::Create { image, name, home, volume } => {
                     cmd_create(podman, image, name, home, volume).await
                 }
