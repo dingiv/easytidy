@@ -24,7 +24,7 @@ use easytidy_protocol::{
     CfgSet, CfgSetResp, Frame, FsEntry, FsEntryType,
     FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp,
     Handshake, HandshakeAck, LifecycleEntryLaunch, Message, MsgKind,
-    PROTOCOL_VERSION, PtyClose, PtyOpen, PtyOpenResp, PtyResize, RpcError, ShutdownAck,
+    PROTOCOL_VERSION, PtyClose, PtyExited, PtyOpen, PtyOpenResp, PtyResize, RpcError, ShutdownAck,
 };
 use futures::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -238,6 +238,9 @@ async fn handle_connection(
     // Track handshake completion
     let handshake_done = Arc::new(AtomicBool::new(false));
 
+    // 本连接打开的 PTY 流：有活跃 PTY 时跳过空闲超时（交互 shell 会长时间无输入）
+    let mut conn_ptys: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
     // Main connection loop
     loop {
         if state.shutting_down.load(Ordering::SeqCst) {
@@ -245,15 +248,25 @@ async fn handle_connection(
             break;
         }
 
+        // 空闲超时：无 PTY 的连接 30s，有 PTY 的放宽到 1h（PTY 存活即视为活跃）
+        let idle = if conn_ptys.is_empty() {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(3600)
+        };
+
         // Wait for either incoming frame from socket or outgoing event
         tokio::select! {
             // Incoming frame from socket
-            frame_result = timeout(Duration::from_secs(30), framed.next()) => {
+            frame_result = timeout(idle, framed.next()) => {
                 match frame_result {
                     Ok(Some(Ok(frame))) => {
                         match frame {
                             Frame::Json(msg) => {
                                 let event_tx_clone = event_tx.clone();
+                                // 提前克隆：msg 会被 move 进 handle_message
+                                let req_op = msg.op.clone();
+                                let req_payload = msg.payload.clone();
                                 let response = handle_message(
                                     msg,
                                     &state,
@@ -262,6 +275,22 @@ async fn handle_connection(
                                 ).await?;
 
                                 if let Some(resp) = response {
+                                    // pty.open 响应 → 登记本连接的 PTY；pty.close 请求 → 注销
+                                    if let Frame::Json(ref rmsg) = resp {
+                                        if rmsg.op == "pty.open" && rmsg.kind == MsgKind::Resp {
+                                            if let Ok(open) =
+                                                serde_json::from_value::<PtyOpenResp>(rmsg.payload.clone())
+                                            {
+                                                conn_ptys.insert(open.stream_id);
+                                            }
+                                        } else if req_op == "pty.close" && rmsg.kind == MsgKind::Resp {
+                                            if let Ok(close) =
+                                                serde_json::from_value::<PtyClose>(req_payload.clone())
+                                            {
+                                                conn_ptys.remove(&close.stream_id);
+                                            }
+                                        }
+                                    }
                                     framed.send(resp).await?;
                                 }
                             }
@@ -280,13 +309,21 @@ async fn handle_connection(
                         break;
                     }
                     Err(_) => {
-                        warn!("Connection timeout (30s idle)");
+                        warn!("Connection timeout (idle)");
                         break;
                     }
                 }
             }
             // Outgoing frame to send to client
             Some(frame) = event_rx.recv() => {
+                // pty.exited 事件 → 注销本连接的 PTY
+                if let Frame::Json(ref msg) = frame {
+                    if msg.op == "pty.exited" {
+                        if let Ok(ev) = serde_json::from_value::<PtyExited>(msg.payload.clone()) {
+                            conn_ptys.remove(&ev.stream_id);
+                        }
+                    }
+                }
                 framed.send(frame).await?;
             }
         }
