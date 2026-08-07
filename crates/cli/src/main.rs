@@ -797,6 +797,8 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         cols,
         rows,
         as_root,
+        // CLI 执行命令 = 独立会话（不接线常驻终端）
+        attach: false,
     };
 
     let pty_open_msg = Message {

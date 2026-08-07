@@ -174,6 +174,47 @@ pub struct FsWrite {
     pub path: String,
     /// 写入数据（Base64 编码）
     pub data_b64: String,
+    /// 写入偏移（分块上传续写用；None = 全量覆盖创建）
+    #[serde(default)]
+    pub offset: Option<u64>,
+}
+
+/// 查询 server 服务信息（HTTP 静态托管端口等）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerInfo;
+
+/// ServerInfo 响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerInfoResp {
+    /// HTTP 静态文件服务端口（0 = 未启用）
+    pub http_port: u16,
+}
+
+/// 容器内创建目录（文件夹拖入上传时递归建目录;create_dir_all 幂等）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FsMkdir {
+    /// 目录路径
+    pub path: String,
+}
+
+/// FsMkdir 响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FsMkdirResp;
+
+/// 容器内复制文件（复制/粘贴菜单;server 直接 fs::copy,大文件无 IPC 负担）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FsCopy {
+    /// 源路径
+    pub src: String,
+    /// 目标路径
+    pub dst: String,
+}
+
+/// FsCopy 响应：复制结果
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FsCopyResp {
+    /// 复制的字节数
+    pub bytes_copied: u64,
 }
 
 /// FsWrite 响应：写入字节数
@@ -522,6 +563,35 @@ mod tests {
         let json = serde_json::to_string(&op).expect("serialize failed");
         let decoded: CfgSet = serde_json::from_str(&json).expect("deserialize failed");
 
+        assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_fs_write_offset_serde() {
+        // 旧格式（无 offset）→ None（全量覆盖）
+        let old: FsWrite =
+            serde_json::from_str(r#"{"path":"/tmp/a","data_b64":"aGk="}"#).unwrap();
+        assert_eq!(old.offset, None);
+        // 新格式带 offset（分块续写）
+        let op = FsWrite {
+            path: "/tmp/a".to_string(),
+            data_b64: "aGk=".to_string(),
+            offset: Some(4096),
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let decoded: FsWrite = serde_json::from_str(&json).unwrap();
+        assert_eq!(op, decoded);
+        assert_eq!(decoded.offset, Some(4096));
+    }
+
+    #[test]
+    fn test_fs_copy_serde() {
+        let op = FsCopy {
+            src: "/tmp/a".to_string(),
+            dst: "/tmp/b".to_string(),
+        };
+        let json = serde_json::to_string(&op).unwrap();
+        let decoded: FsCopy = serde_json::from_str(&json).unwrap();
         assert_eq!(op, decoded);
     }
 

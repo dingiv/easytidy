@@ -916,3 +916,32 @@ button:disabled {
 .per-left {
   position: relative;
 }
+
+/* 文件浏览器：取消文字选中 + 选中态 */
+.file-browser {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.file-entry.selected {
+  background: #89b4fa22;
+  border-left: 3px solid #89b4fa;
+  padding-left: calc(1rem - 3px);
+}
+
+/* 图片预览面板 */
+.image-viewer {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  background: #11111b;
+  padding: 1rem;
+}
+
+.image-viewer img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}

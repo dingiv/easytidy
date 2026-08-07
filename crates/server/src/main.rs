@@ -23,8 +23,8 @@ use easytidy_protocol::{
     AppGetIcon, AppGetIconResp, AppInfo, AppsLaunch, AppsLaunchResp,
     AppsLaunchResult, AppsListResp, CfgGetResp,
     CfgSet, CfgSetResp, Frame, FsEntry, FsEntryType,
-    FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp,
-    Handshake, HandshakeAck, LifecycleEntryLaunch, Message, MsgKind,
+    FsCopy, FsCopyResp, FsMkdir, FsMkdirResp, FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp,
+    Handshake, HandshakeAck, LifecycleEntryLaunch, Message, MsgKind, ServerInfoResp,
     PROTOCOL_VERSION, PtyClose, PtyCwd, PtyCwdResp, PtyExited, PtyOpen, PtyOpenResp, PtyResize, RpcError, ShutdownAck,
 };
 use futures::{SinkExt, StreamExt};
@@ -94,6 +94,136 @@ struct PtySession {
     spawn_pid: u32,
     /// 最近一次 cwd（事件驱动检测：输入回车时比较，变化才推送 cwdChanged）
     last_cwd: std::sync::Mutex<Option<String>>,
+}
+
+/// HTTP 静态文件服务端口（server.info 查询;0 = 未启用）
+static HTTP_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
+/// 启动 HTTP 静态文件服务（GET /fs/<url-encoded-path> → 读容器文件返回）。
+///
+/// 用途：GUI 图片预览（<img src="http://127.0.0.1:<port>/fs/<path>">）与
+/// 大文件下载。动态端口（bind 0）避免冲突；host 网络下 GUI 直连 localhost。
+/// 最小 HTTP/1.1 实现（只处理 GET /fs/），无第三方依赖。
+async fn start_http_server() -> u16 {
+    let Ok(listener) = tokio::net::TcpListener::bind("0.0.0.0:0").await else {
+        return 0;
+    };
+    let Ok(addr) = listener.local_addr() else {
+        return 0;
+    };
+    let port = addr.port();
+    HTTP_PORT.store(port, std::sync::atomic::Ordering::SeqCst);
+    info!("HTTP 静态服务已启动：127.0.0.1:{port}");
+
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            tokio::spawn(async move {
+                if let Err(e) = handle_http_request(stream).await {
+                    debug!("HTTP 请求处理失败：{e}");
+                }
+            });
+        }
+    });
+    port
+}
+
+/// 处理单个 HTTP 请求（GET /fs/<path>）
+async fn handle_http_request(stream: tokio::net::TcpStream) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let mut reader = BufReader::new(stream);
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .await
+        .context("读取请求行失败")?;
+    let parts: Vec<&str> = request_line.split_whitespace().collect();
+    if parts.len() < 2 || parts[0] != "GET" {
+        return Ok(());
+    }
+    let target = parts[1];
+    let Some(rest) = target.strip_prefix("/fs/") else {
+        // 非 /fs/ 路径：404
+        let mut w = reader.into_inner();
+        let _ = w
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+        return Ok(());
+    };
+    // 忽略请求头
+    loop {
+        let mut line = String::new();
+        let n = reader.read_line(&mut line).await?;
+        if n == 0 || line.trim().is_empty() {
+            break;
+        }
+    }
+    let mut writer = reader.into_inner();
+
+    // percent-decode（最小实现：%XX 解码）
+    let bytes = rest.as_bytes();
+    let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("00");
+            if let Ok(v) = u8::from_str_radix(hex, 16) {
+                decoded.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    let path = String::from_utf8_lossy(&decoded).to_string();
+
+    match tokio::fs::read(&path).await {
+        Ok(data) => {
+            let mime = mime_for_path(&path);
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                data.len()
+            );
+            let _ = writer.write_all(header.as_bytes()).await;
+            let _ = writer.write_all(&data).await;
+            let _ = writer.flush().await;
+        }
+        Err(_) => {
+            let _ = writer
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await;
+        }
+    }
+    Ok(())
+}
+
+/// 按扩展名推断 MIME（图片预览为主）
+fn mime_for_path(path: &str) -> &'static str {
+    let ext = path
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "txt" | "md" | "log" | "conf" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "pdf" => "application/pdf",
+        _ => "application/octet-stream",
+    }
 }
 
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
@@ -574,6 +704,9 @@ async fn run_server(
 
     info!("Listening on {}", socket_path.display());
 
+    // HTTP 静态文件服务（图片预览/大文件下载;动态端口经 server.info 查询）
+    start_http_server().await;
+
     // Launch entry command if provided
     if let Some(entry_cmd) = entry_cmd {
         if let Err(e) = launch_entry_command(&state, entry_cmd).await {
@@ -843,6 +976,12 @@ async fn handle_message(
         (MsgKind::Req, "fs.write") => {
             Ok(Some(handle_fs_write(msg).await?))
         }
+        (MsgKind::Req, "fs.copy") => {
+            Ok(Some(handle_fs_copy(msg).await?))
+        }
+        (MsgKind::Req, "fs.mkdir") => {
+            Ok(Some(handle_fs_mkdir(msg).await?))
+        }
         (MsgKind::Req, "apps.list") => {
             Ok(Some(handle_apps_list(msg).await?))
         }
@@ -851,6 +990,9 @@ async fn handle_message(
         }
         (MsgKind::Req, "apps.launch") => {
             Ok(Some(handle_apps_launch(msg, state).await?))
+        }
+        (MsgKind::Req, "server.info") => {
+            Ok(Some(handle_server_info(msg).await?))
         }
         (MsgKind::Req, "config.get") => {
             Ok(Some(handle_config_get(msg).await?))
@@ -1647,17 +1789,37 @@ async fn handle_fs_read(msg: Message) -> Result<Frame> {
 
     let path = Path::new(&req.path);
 
-    let data = fs::read(path)
-        .with_context(|| format!("Failed to read file: {}", req.path))?;
+    // ⚠️ 大文件分块读（导出到宿主）：offset 时 seek 读取而非全量读后切片
+    //（旧实现全量 fs::read 再切片——分块循环会重复读整个文件）
+    let offset = req.offset.unwrap_or(0);
+    let data = if offset > 0 {
+        use std::io::{Read as _, Seek, SeekFrom};
+        let mut file = fs::File::open(path)
+            .with_context(|| format!("Failed to open file: {}", req.path))?;
+        file.seek(SeekFrom::Start(offset))
+            .with_context(|| format!("Failed to seek: {}", req.path))?;
+        let mut buf = Vec::new();
+        let len = req.len.unwrap_or(0) as usize;
+        if len > 0 {
+            buf.resize(len, 0);
+            let n = file
+                .read(&mut buf)
+                .with_context(|| format!("Failed to read: {}", req.path))?;
+            buf.truncate(n);
+        } else {
+            file.read_to_end(&mut buf)
+                .with_context(|| format!("Failed to read: {}", req.path))?;
+        }
+        buf
+    } else {
+        let data = fs::read(path)
+            .with_context(|| format!("Failed to read file: {}", req.path))?;
+        let len = req.len.unwrap_or(data.len() as u64) as usize;
+        let end = std::cmp::min(len, data.len());
+        data[..end].to_vec()
+    };
 
-    let offset = req.offset.unwrap_or(0) as usize;
-    let default_len = if data.len() > offset { data.len() - offset } else { 0 };
-    let len = req.len.unwrap_or(default_len as u64) as usize;
-
-    let end = std::cmp::min(offset + len, data.len());
-    let slice = &data[offset..end];
-
-    let data_b64 = base64::engine::general_purpose::STANDARD.encode(slice);
+    let data_b64 = base64::engine::general_purpose::STANDARD.encode(data);
 
     Ok(Frame::Json(Message {
         id: msg.id,
@@ -1675,16 +1837,81 @@ async fn handle_fs_write(msg: Message) -> Result<Frame> {
 
     let data = base64::engine::general_purpose::STANDARD.decode(&req.data_b64)
         .context("Failed to decode base64 data")?;
+    let bytes = data.len() as u64;
 
-    fs::write(&req.path, data)
-        .with_context(|| format!("Failed to write file: {}", req.path))?;
+    match req.offset {
+        // 分块上传续写（宿主→容器拖入的大文件分块写）
+        Some(offset) => {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .open(&req.path)
+                .with_context(|| format!("Failed to open file for write: {}", req.path))?;
+            file.seek(SeekFrom::Start(offset))
+                .with_context(|| format!("Failed to seek: {}", req.path))?;
+            file.write_all(&data)
+                .with_context(|| format!("Failed to write chunk: {}", req.path))?;
+        }
+        None => {
+            fs::write(&req.path, &data)
+                .with_context(|| format!("Failed to write file: {}", req.path))?;
+        }
+    }
 
     Ok(Frame::Json(Message {
         id: msg.id,
         kind: MsgKind::Resp,
         op: "fs.write".to_string(),
         payload: serde_json::to_value(FsWriteResp {
-            bytes_written: req.data_b64.len() as u64 * 3 / 4, // Approximate
+            bytes_written: bytes,
+        })?,
+        err: None,
+    }))
+}
+
+/// Handle fs.mkdir（文件夹拖入上传时递归建目录）
+async fn handle_fs_mkdir(msg: Message) -> Result<Frame> {
+    let req: FsMkdir = serde_json::from_value(msg.payload)
+        .context("Failed to parse FsMkdir")?;
+
+    fs::create_dir_all(&req.path)
+        .with_context(|| format!("Failed to create directory: {}", req.path))?;
+
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "fs.mkdir".to_string(),
+        payload: serde_json::to_value(FsMkdirResp)?,
+        err: None,
+    }))
+}
+
+/// Handle fs.copy（容器内文件复制：右键复制/粘贴菜单，server 直接 fs::copy）
+async fn handle_fs_copy(msg: Message) -> Result<Frame> {
+    let req: FsCopy = serde_json::from_value(msg.payload)
+        .context("Failed to parse FsCopy")?;
+
+    let bytes = fs::copy(&req.src, &req.dst)
+        .with_context(|| format!("Failed to copy {} → {}", req.src, req.dst))?;
+
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "fs.copy".to_string(),
+        payload: serde_json::to_value(FsCopyResp { bytes_copied: bytes })?,
+        err: None,
+    }))
+}
+
+/// Handle server.info（HTTP 静态托管端口等）
+async fn handle_server_info(msg: Message) -> Result<Frame> {
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "server.info".to_string(),
+        payload: serde_json::to_value(ServerInfoResp {
+            http_port: HTTP_PORT.load(std::sync::atomic::Ordering::SeqCst),
         })?,
         err: None,
     }))

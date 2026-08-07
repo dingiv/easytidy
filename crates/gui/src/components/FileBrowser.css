@@ -49,3 +49,36 @@
 .file-browser-head >* {
   margin: 0 0.5ch;
 }
+/* 拖入进度条（header 下方） */
+.import-progress {
+  padding: 0.5rem 0.75rem;
+  border-bottom: 1px solid #313244;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.import-progress-file {
+  font-size: 0.75rem;
+  color: #a6adc8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* CodeMirror 编辑器容器 */
+.file-editor-cm {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.file-editor-cm .cm-editor {
+  height: 100%;
+  font-size: 0.85rem;
+}
+
+.file-editor-cm .cm-scroller {
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+  line-height: 1.6;
+}

@@ -1,10 +1,23 @@
-// 纯文本编辑器（面板视图）：fs_read 读容器内文件 → textarea 编辑 → 保存回写。
-// 传输经 server fs.read/fs.write（base64；UTF-8 安全编解码）。
+// 文本编辑器面板（CodeMirror 6）:fs_read 读容器内文件 → 编辑 → 保存回写。
+//
+// CodeMirror 6 替换原始 textarea：撤销/重做（Ctrl+Z / Ctrl+Shift+Z）、
+// 语法高亮（按扩展名）、多光标内建；React 受控 textarea 会破坏浏览器
+// 撤销栈（每次 setState 覆盖 value），CodeMirror 自管文档模型无此问题。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { App as AntApp, Button, Space, Spin, Typography } from 'antd';
 import { SaveOutlined, CloseOutlined } from '@ant-design/icons';
+import CodeMirror from '@uiw/react-codemirror';
+import { javascript } from '@codemirror/lang-javascript';
+import { json } from '@codemirror/lang-json';
+import { python } from '@codemirror/lang-python';
+import { rust } from '@codemirror/lang-rust';
+import { markdown } from '@codemirror/lang-markdown';
+import { css } from '@codemirror/lang-css';
+import { html } from '@codemirror/lang-html';
+import { sql } from '@codemirror/lang-sql';
+import { yaml } from '@codemirror/lang-yaml';
 
 interface FileEditorProps {
   path: string;
@@ -26,6 +39,40 @@ function b64ToText(b64: string): string {
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
   return new TextDecoder().decode(bytes);
+}
+
+/** 按扩展名选择 CodeMirror 语言（未匹配 = null，纯文本无高亮） */
+function langForPath(path: string) {
+  const ext = path.split('.').pop()?.toLowerCase() ?? '';
+  switch (ext) {
+    case 'js':
+    case 'jsx':
+    case 'ts':
+    case 'tsx':
+      return javascript({ jsx: ext === 'jsx' || ext === 'tsx' });
+    case 'json':
+    case 'json5':
+      return json();
+    case 'py':
+      return python();
+    case 'rs':
+      return rust();
+    case 'md':
+      return markdown();
+    case 'css':
+    case 'scss':
+      return css();
+    case 'html':
+    case 'htm':
+      return html();
+    case 'sql':
+      return sql();
+    case 'yaml':
+    case 'yml':
+      return yaml();
+    default:
+      return undefined;
+  }
 }
 
 export function FileEditor({ path, onClose, onSaved }: FileEditorProps) {
@@ -118,12 +165,22 @@ export function FileEditor({ path, onClose, onSaved }: FileEditorProps) {
           {loadError}
         </div>
       ) : (
-        <textarea
-          className="file-editor-textarea"
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          spellCheck={false}
-        />
+        <div className="file-editor-cm">
+          <CodeMirror
+            value={text}
+            onChange={(v) => setText(v)}
+            extensions={[langForPath(path)].filter((e): e is NonNullable<typeof e> => e !== undefined)}
+            theme="dark"
+            height="100%"
+            basicSetup={{
+              lineNumbers: true,
+              foldGutter: true,
+              highlightActiveLine: true,
+              highlightActiveLineGutter: true,
+              autocompletion: false,
+            }}
+          />
+        </div>
       )}
     </div>
   );

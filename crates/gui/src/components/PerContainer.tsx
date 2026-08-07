@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Dropdown, Tooltip } from 'antd';
+import { App as AntApp, Dropdown, Tooltip } from 'antd';
 import {
   CloseOutlined,
   CodeOutlined,
@@ -24,6 +24,7 @@ import { useUiStore } from '../stores/uiStore';
 import { Terminal } from './Terminal';
 import { FileBrowser } from './FileBrowser';
 import { FileEditor } from './FileEditor';
+import { ImageViewer } from './ImageViewer';
 import { PassthroughManager } from './PassthroughManager';
 import { ConfigManager } from './ConfigManager';
 
@@ -34,17 +35,17 @@ interface PerContainerProps {
 /** 打开的面板 */
 interface Pane {
   id: string;
-  kind: 'terminal' | 'passthrough' | 'config' | 'editor';
+  kind: 'terminal' | 'passthrough' | 'config' | 'editor' | 'image';
   title: string;
   /** 终端身份（root 终端独立会话） */
   asRoot?: boolean;
-  /** 编辑器面板：文件路径 */
+  /** 编辑器/图片面板：文件路径 */
   path?: string;
 }
 
 const AUTO_COLLOPSE_WIDTH = 150
 
-export function PerContainer({ containerName }: PerContainerProps) {
+function PerContainerInner({ containerName }: PerContainerProps) {
   const [panes, setPanes] = useState<Pane[]>(() => [
     // 默认打开一个 node 终端
     { id: useUiStore.getState().nextPaneId(), kind: 'terminal', title: '终端', asRoot: false },
@@ -164,8 +165,18 @@ export function PerContainer({ containerName }: PerContainerProps) {
 
   /** 打开文本编辑器面板（文件浏览器双击回调）：同文件已开则聚焦，否则新建 */
   const openEditor = (path: string) => {
+    openFilePane('editor', path);
+  };
+
+  /** 打开图片预览面板（右键预览）：同文件已开则聚焦，否则新建 */
+  const openImage = (path: string) => {
+    openFilePane('image', path);
+  };
+
+  /** 打开文件类面板（editor/image）的通用逻辑 */
+  const openFilePane = (kind: 'editor' | 'image', path: string) => {
     setPanes((prev) => {
-      const existing = prev.find((p) => p.kind === 'editor' && p.path === path);
+      const existing = prev.find((p) => p.kind === kind && p.path === path);
       if (existing) {
         setActivePaneId(existing.id);
         return prev;
@@ -173,7 +184,7 @@ export function PerContainer({ containerName }: PerContainerProps) {
       const name = path.split('/').filter(Boolean).pop() ?? path;
       const pane: Pane = {
         id: useUiStore.getState().nextPaneId(),
-        kind: 'editor',
+        kind,
         title: name,
         path,
       };
@@ -198,6 +209,7 @@ export function PerContainer({ containerName }: PerContainerProps) {
                 {/* 双击文本文件 → 在右侧面板打开编辑器；跟随终端开关 */}
                 <FileBrowser
                   onOpenFile={openEditor}
+                  onPreviewImage={openImage}
                   followTerminal={followTerminal}
                   onToggleFollow={() => setFollowTerminal((f) => !f)}
                 />
@@ -303,6 +315,7 @@ export function PerContainer({ containerName }: PerContainerProps) {
                     onSaved={() => closePane(p.id)}
                   />
                 )}
+                {p.kind === 'image' && p.path && <ImageViewer path={p.path} />}
               </div>
             ))}
             {panes.length === 0 && (
@@ -314,5 +327,14 @@ export function PerContainer({ containerName }: PerContainerProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** antd App 包裹：让子组件（FileBrowser 等）的 message/notification 可用 */
+export function PerContainer(props: PerContainerProps) {
+  return (
+    <AntApp>
+      <PerContainerInner {...props} />
+    </AntApp>
   );
 }
