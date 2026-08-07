@@ -1126,6 +1126,31 @@ async fn pty_ping(
     Ok(())
 }
 
+/// 查询 PTY 会话主进程的实时工作目录（文件浏览器"跟随终端"）。
+/// 经共享 socket 发 pty.cwd（不占 PTY 专用连接）。
+#[tauri::command]
+async fn pty_cwd(
+    session: tauri::State<'_, Option<GuiSession>>,
+    stream_id: u32,
+) -> Result<String, String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    let req = easytidy_protocol::ops::PtyCwd { stream_id };
+    let resp = send_json_request(
+        sess,
+        "pty.cwd".to_string(),
+        serde_json::to_value(req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    let cwd_resp: easytidy_protocol::ops::PtyCwdResp = serde_json::from_value(resp.payload)
+        .map_err(|e| format!("解析 pty.cwd 响应失败：{e}"))?;
+    Ok(cwd_resp.cwd)
+}
+
 // ============================================================================
 // 文件系统命令
 // ============================================================================
@@ -1672,6 +1697,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             pty_resize,
             pty_close,
             pty_ping,
+            pty_cwd,
             // 单容器模式 - 文件系统
             fs_list,
             fs_read,

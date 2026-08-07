@@ -6,7 +6,7 @@
 // - 内容区：所有打开的面板常驻渲染（display 切换）——终端会话不因切换丢失；
 //   关闭面板才卸载（终端流经模块级缓存 + server attach 保持，重开回放）
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Dropdown, Tooltip } from 'antd';
 import {
@@ -18,6 +18,8 @@ import {
   MenuUnfoldOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
+import { useFileBrowserStore } from '../stores/fileBrowserStore';
+import { useTerminalStore } from '../stores/terminalStore';
 import { useUiStore } from '../stores/uiStore';
 import { Terminal } from './Terminal';
 import { FileBrowser } from './FileBrowser';
@@ -78,6 +80,32 @@ export function PerContainer({ containerName }: PerContainerProps) {
     document.addEventListener('mouseup', dragEnd);
     e.preventDefault();
   };
+
+  // 文件浏览器"跟随终端"：启用后每秒查询激活终端的 pwd → 导航文件浏览器
+  const [followTerminal, setFollowTerminal] = useState(false);
+  const followRef = useRef({ activeId, panes });
+  followRef.current = { activeId, panes };
+  useEffect(() => {
+    if (!followTerminal) return;
+    const timer = setInterval(async () => {
+      const { activeId: aid, panes: ps } = followRef.current;
+      const activePane = ps.find((p) => p.id === aid);
+      if (!activePane || activePane.kind !== 'terminal') return;
+      const streamId = useTerminalStore
+        .getState()
+        .getStream(activePane.asRoot ?? false).streamId;
+      if (streamId === null) return;
+      try {
+        const cwd = await invoke<string>('pty_cwd', { streamId });
+        if (cwd && cwd !== useFileBrowserStore.getState().currentPath) {
+          useFileBrowserStore.getState().navigate(cwd);
+        }
+      } catch (err) {
+        console.error('pty_cwd failed:', err);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [followTerminal]);
 
   const handleCloseContainer = async () => {
     try {
@@ -156,8 +184,12 @@ export function PerContainer({ containerName }: PerContainerProps) {
             <>
               <div className="menu-title">easytidy - {containerName}</div>
               <div className="per-left-browser">
-                {/* 双击文本文件 → 在右侧面板打开编辑器 */}
-                <FileBrowser onOpenFile={openEditor} />
+                {/* 双击文本文件 → 在右侧面板打开编辑器；跟随终端开关 */}
+                <FileBrowser
+                  onOpenFile={openEditor}
+                  followTerminal={followTerminal}
+                  onToggleFollow={() => setFollowTerminal((f) => !f)}
+                />
               </div>
             </>
           )}

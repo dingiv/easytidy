@@ -25,7 +25,7 @@ use easytidy_protocol::{
     CfgSet, CfgSetResp, Frame, FsEntry, FsEntryType,
     FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp,
     Handshake, HandshakeAck, LifecycleEntryLaunch, Message, MsgKind,
-    PROTOCOL_VERSION, PtyClose, PtyExited, PtyOpen, PtyOpenResp, PtyResize, RpcError, ShutdownAck,
+    PROTOCOL_VERSION, PtyClose, PtyCwd, PtyCwdResp, PtyExited, PtyOpen, PtyOpenResp, PtyResize, RpcError, ShutdownAck,
 };
 use futures::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -90,6 +90,8 @@ struct PtySession {
     subs: Arc<std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<Frame>)>>>,
     /// 常驻标志：不随连接断开清理（attach 终端）；连接断开仅退订
     persistent: std::sync::atomic::AtomicBool,
+    /// spawn 的进程 pid（pty.cwd 经 /proc/<pid>/cwd 查询实时工作目录）
+    spawn_pid: u32,
 }
 
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
@@ -824,6 +826,9 @@ async fn handle_message(
         (MsgKind::Req, "pty.close") => {
             Ok(Some(handle_pty_close(msg, state).await?))
         }
+        (MsgKind::Req, "pty.cwd") => {
+            Ok(Some(handle_pty_cwd(msg, state).await?))
+        }
         (MsgKind::Req, "fs.list") => {
             Ok(Some(handle_fs_list(msg).await?))
         }
@@ -1110,6 +1115,7 @@ async fn handle_pty_open(
     let child = slave
         .spawn_command(cmd_builder)
         .context("Failed to spawn PTY child")?;
+    let spawn_pid = child.process_id().unwrap_or(0);
 
     // Allocate stream ID
     let stream_id = state.next_stream_id.fetch_add(1, Ordering::SeqCst);
@@ -1129,6 +1135,7 @@ async fn handle_pty_open(
         ring: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
         subs: Arc::new(std::sync::Mutex::new(vec![(conn_token, event_tx.clone())])),
         persistent: std::sync::atomic::AtomicBool::new(persistent),
+        spawn_pid,
     });
 
     // Store session
@@ -1301,6 +1308,85 @@ fn pty_reader_thread(
     }
 
     info!("PTY reader thread ended: stream_id={}, exit_code={}", stream_id, exit_code);
+}
+
+/// 读取进程 cwd：先直接读（server 的直接子进程可读，如 root 终端 bash）；
+/// ptrace 拒绝（node 属主进程，root 缺 CAP_SYS_PTRACE 时）→ 经 `su node`
+/// 执行 readlink——同 uid 可读（node 属主进程对 node 自己无 ptrace 限制）。
+async fn read_cwd(pid: u32) -> Option<String> {
+    let direct = std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    if direct.is_some() {
+        return direct;
+    }
+    // ptrace 拒绝 → 以 node 身份读取
+    if let Some(user) = user_map() {
+        let out = TokioCommand::new("su")
+            .args(["-c", &format!("readlink /proc/{pid}/cwd"), &user.name])
+            .output()
+            .await
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Handle pty.cwd：查询会话主进程的实时工作目录。
+///
+/// spawn 的可能是 su（su - node 场景），其子进程（bash）才是 shell——
+/// 先经 /proc/<pid>/task/<pid>/children 取第一个子进程，再读其
+/// /proc/<child-pid>/cwd（symlink，实时反映 cd 结果）；无子进程（root
+/// 终端直接 spawn bash）则直接读 spawn pid 的 cwd。
+async fn handle_pty_cwd(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: PtyCwd = serde_json::from_value(msg.payload)
+        .context("Failed to parse PtyCwd")?;
+
+    let sessions = state.sessions.read().await;
+    let Some(session) = sessions.get(&req.stream_id) else {
+        return Ok(Frame::Json(Message {
+            id: msg.id,
+            kind: MsgKind::Resp,
+            op: "pty.cwd".to_string(),
+            payload: json!(null),
+            err: Some(RpcError {
+                code: "not_found".to_string(),
+                message: format!("PTY stream {} not found", req.stream_id),
+            }),
+        }));
+    };
+    let spawn_pid = session.spawn_pid;
+
+    // 子进程（su 场景的 bash）优先；失败回退 spawn 进程 cwd；再失败空串
+    let cwd = {
+        let children_path = format!("/proc/{spawn_pid}/task/{spawn_pid}/children");
+        let child_pid = std::fs::read_to_string(children_path)
+            .ok()
+            .and_then(|c| c.split_whitespace().next().map(|s| s.to_string()));
+        match child_pid {
+            Some(child) => read_cwd(child.parse().unwrap_or(0)).await,
+            None => None,
+        }
+    }
+    .or_else(|| {
+        std::fs::read_link(format!("/proc/{spawn_pid}/cwd"))
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .unwrap_or_default();
+
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "pty.cwd".to_string(),
+        payload: serde_json::to_value(PtyCwdResp { cwd })?,
+        err: None,
+    }))
 }
 
 /// Handle PTY resize

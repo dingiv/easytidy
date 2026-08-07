@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { App as AntApp, Breadcrumb, Spin, Empty, Button } from 'antd';
-import { FolderOutlined, FileOutlined, ArrowLeftOutlined } from '@ant-design/icons';
+import { App as AntApp, Breadcrumb, Spin, Empty, Button, Tooltip } from 'antd';
+import { AimOutlined, FolderOutlined, FileOutlined, ArrowLeftOutlined } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import type { FsEntry } from '../types';
 import './FileBrowser.css'
@@ -9,6 +9,9 @@ import './FileBrowser.css'
 interface FileBrowserProps {
   /** 双击文本文件回调（在右侧面板打开编辑器） */
   onOpenFile?: (path: string) => void;
+  /** 跟随终端开关（PerContainer 轮询 pty.cwd 后导航） */
+  followTerminal?: boolean;
+  onToggleFollow?: () => void;
 }
 
 /** 路径 → 面包屑层级（每级可点击跳转） */
@@ -45,7 +48,7 @@ function isTextFile(name: string, size?: number): boolean {
   return TEXT_NAMES.has(lower);
 }
 
-export function FileBrowser({ onOpenFile }: FileBrowserProps) {
+export function FileBrowser({ onOpenFile, followTerminal, onToggleFollow }: FileBrowserProps) {
   const { message } = AntApp.useApp();
   const { currentPath, navigate, navigateToParent } = useFileBrowserStore();
   const [entries, setEntries] = useState<FsEntry[]>([]);
@@ -107,6 +110,18 @@ export function FileBrowser({ onOpenFile }: FileBrowserProps) {
     <div className="file-browser">
       {/* 导航行：返回根目录 + 返回上一级 + 面包屑（每级可点击） */}
       <div className="file-browser-breadcrumb">
+        <Tooltip
+          title={followTerminal ? '关闭跟随终端' : '跟随终端（目录自动同步到终端 pwd）'}
+          mouseEnterDelay={4}
+        >
+          <Button
+            size="small"
+            type={followTerminal ? 'primary' : 'text'}
+            icon={<AimOutlined />}
+            onClick={onToggleFollow}
+            title="跟随终端"
+          />
+        </Tooltip>
         <Breadcrumb
           items={crumbs.map((c) => ({
             title: (

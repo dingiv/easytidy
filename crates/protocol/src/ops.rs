@@ -41,6 +41,20 @@ pub struct PtyOpenResp {
     pub stream_id: u32,
 }
 
+/// 查询 PTY 会话主进程的实时工作目录（文件浏览器"跟随终端"用；
+/// 经 /proc/<pid>/cwd 读取，反映 cd 后的实际目录）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PtyCwd {
+    /// 流 ID
+    pub stream_id: u32,
+}
+
+/// PtyCwd 响应：当前工作目录
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PtyCwdResp {
+    pub cwd: String,
+}
+
 /// 关闭 PTY 会话
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PtyClose {
