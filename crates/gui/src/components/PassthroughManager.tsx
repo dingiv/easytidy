@@ -1,6 +1,15 @@
+// Passthrough 管理器：容器应用导出为宿主快捷方式。
+// - 扫描应用（容器固定目录）:导出/撤销/auto-start/查看 .desktop 内容
+// - 自定义应用（固定目录之外,如 `google-chrome-stable --disable-dev-shm-usage`）:
+//   添加/导出/auto-start/移除
+
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import type { AppInfo, PassthroughState } from '../types';
+import type {
+  AppInfo,
+  PassthroughApp,
+  PassthroughState,
+} from '../types';
 
 export function PassthroughManager() {
   const [apps, setApps] = useState<AppInfo[]>([]);
@@ -8,6 +17,12 @@ export function PassthroughManager() {
   const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 展开查看 .desktop 内容的条目
+  const [expandedContent, setExpandedContent] = useState<string | null>(null);
+  // 自定义应用表单
+  const [customName, setCustomName] = useState('');
+  const [customCmd, setCustomCmd] = useState('');
+  const [addingCustom, setAddingCustom] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -23,7 +38,7 @@ export function PassthroughManager() {
       ]);
       setApps(appsResult);
       setState(stateResult);
-      setSelectedApps(new Set(stateResult.exported_apps));
+      setSelectedApps(new Set(stateResult.exported.map((e) => e.desktop_file)));
     } catch (err: any) {
       setError(err.message || 'Failed to load data');
       console.error('passthrough load failed:', err);
@@ -31,6 +46,10 @@ export function PassthroughManager() {
       setLoading(false);
     }
   };
+
+  /** 扫描应用的 auto-start 状态（查配置条目;未配置 = false） */
+  const autoStartOf = (id: string): boolean =>
+    state?.configured_apps.find((a) => a.id === id)?.auto_start ?? false;
 
   const handleAppToggle = (desktopFile: string) => {
     const newSelected = new Set(selectedApps);
@@ -42,11 +61,22 @@ export function PassthroughManager() {
     setSelectedApps(newSelected);
   };
 
+  /** 设置某应用的 auto-start（容器启动时自动拉起） */
+  const handleAutoStart = async (id: string, name: string, cmd: string, enabled: boolean) => {
+    setError(null);
+    try {
+      await invoke('passthrough_set_auto_start', { id, name, cmd, enabled });
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to set auto-start');
+      console.error('passthrough_set_auto_start failed:', err);
+    }
+  };
+
   const handleExport = async () => {
     setError(null);
     try {
       for (const desktopFile of selectedApps) {
-        // 传整个 app（宿主侧生成 .desktop 需要 name/exec；desktop_file 用于定位与去重）
         const app = apps.find((a) => a.desktop_file === desktopFile);
         if (!app) continue;
         await invoke('passthrough_export', { app });
@@ -68,6 +98,59 @@ export function PassthroughManager() {
       console.error('passthrough_revoke failed:', err);
     }
   };
+
+  /** 导出自定义应用（构造 AppInfoFrontend 走现有导出流） */
+  const handleExportCustom = async (custom: PassthroughApp) => {
+    setError(null);
+    try {
+      const app: AppInfo = {
+        name: custom.name,
+        icon_path: '',
+        exec: custom.cmd,
+        desktop_file: custom.id,
+        startup_notify: false,
+      };
+      await invoke('passthrough_export', { app });
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to export custom app');
+      console.error('passthrough_export (custom) failed:', err);
+    }
+  };
+
+  const handleAddCustom = async () => {
+    if (!customName.trim() || !customCmd.trim()) {
+      setError('名称与命令不能为空');
+      return;
+    }
+    setAddingCustom(true);
+    setError(null);
+    try {
+      await invoke('passthrough_add_custom', { name: customName.trim(), cmd: customCmd.trim() });
+      setCustomName('');
+      setCustomCmd('');
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to add custom app');
+      console.error('passthrough_add_custom failed:', err);
+    } finally {
+      setAddingCustom(false);
+    }
+  };
+
+  const handleRemoveCustom = async (id: string) => {
+    setError(null);
+    try {
+      await invoke('passthrough_remove_app', { id });
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Failed to remove custom app');
+      console.error('passthrough_remove_app failed:', err);
+    }
+  };
+
+  /** 自定义应用（来自配置条目,custom: 前缀） */
+  const customApps = state?.configured_apps.filter((a) => a.id.startsWith('custom:')) ?? [];
 
   if (loading) {
     return <div className="loading">Loading applications...</div>;
@@ -92,21 +175,12 @@ export function PassthroughManager() {
         </div>
       )}
 
-      <div className="auto-start-status">
-        <label>
-          <input
-            type="checkbox"
-            checked={state?.auto_start_enabled ?? false}
-            disabled
-          />
-          Auto-start on container boot
-        </label>
-      </div>
-
       <div className="apps-list">
         {apps.map((app) => {
-          const isExported = state?.exported_apps.includes(app.desktop_file) ?? false;
+          const isExported =
+            state?.exported.some((e) => e.desktop_file === app.desktop_file) ?? false;
           const isSelected = selectedApps.has(app.desktop_file);
+          const autoStart = autoStartOf(app.desktop_file);
 
           return (
             <div
@@ -132,15 +206,35 @@ export function PassthroughManager() {
                   <div className="app-comment">{app.comment}</div>
                 )}
                 <div className="app-desktop-file">{app.desktop_file}</div>
+                <label className="app-toggle">
+                  <input
+                    type="checkbox"
+                    checked={autoStart}
+                    onChange={(e) =>
+                      handleAutoStart(app.desktop_file, app.name, app.exec, e.target.checked)
+                    }
+                  />
+                  <span>容器启动时自动拉起</span>
+                </label>
               </div>
               <div className="app-actions">
                 {isExported && (
-                  <button
-                    className="secondary-button"
-                    onClick={() => handleRevoke(app.desktop_file)}
-                  >
-                    Revoke
-                  </button>
+                  <>
+                    <button
+                      className="secondary-button"
+                      onClick={() =>
+                        setExpandedContent(expandedContent === app.desktop_file ? null : app.desktop_file)
+                      }
+                    >
+                      {expandedContent === app.desktop_file ? '收起内容' : '查看 .desktop'}
+                    </button>
+                    <button
+                      className="secondary-button"
+                      onClick={() => handleRevoke(app.desktop_file)}
+                    >
+                      Revoke
+                    </button>
+                  </>
                 )}
               </div>
             </div>
@@ -151,6 +245,77 @@ export function PassthroughManager() {
             No desktop applications found in container
           </div>
         )}
+      </div>
+
+      {expandedContent && (
+        <div className="desktop-content-section">
+          <h4>{expandedContent} 的 .desktop 配置</h4>
+          <pre className="desktop-content">
+            {state?.exported.find((e) => e.desktop_file === expandedContent)?.content ?? ''}
+          </pre>
+        </div>
+      )}
+
+      <div className="custom-section">
+        <h4>自定义应用（容器固定目录之外）</h4>
+        <div className="custom-form">
+          <input
+            placeholder="名称，如 Chrome (自定义)"
+            value={customName}
+            onChange={(e) => setCustomName(e.target.value)}
+          />
+          <input
+            placeholder="命令，如 google-chrome-stable --disable-dev-shm-usage"
+            value={customCmd}
+            onChange={(e) => setCustomCmd(e.target.value)}
+          />
+          <button className="primary-button" onClick={handleAddCustom} disabled={addingCustom}>
+            {addingCustom ? '添加中…' : '添加'}
+          </button>
+        </div>
+        {customApps.map((custom) => {
+          const isExported =
+            state?.exported.some((e) => e.desktop_file === custom.id) ?? false;
+          return (
+            <div
+              key={custom.id}
+              className={`app-item ${isExported ? 'exported' : ''}`}
+            >
+              <div className="app-icon">
+                <span>⚙️</span>
+              </div>
+              <div className="app-info">
+                <div className="app-name">{custom.name}</div>
+                <div className="app-desktop-file">{custom.cmd}</div>
+                <label className="app-toggle">
+                  <input
+                    type="checkbox"
+                    checked={custom.auto_start}
+                    onChange={(e) =>
+                      handleAutoStart(custom.id, custom.name, custom.cmd, e.target.checked)
+                    }
+                  />
+                  <span>容器启动时自动拉起</span>
+                </label>
+              </div>
+              <div className="app-actions">
+                {!isExported && (
+                  <button className="secondary-button" onClick={() => handleExportCustom(custom)}>
+                    Export
+                  </button>
+                )}
+                {isExported && (
+                  <button className="secondary-button" onClick={() => handleRevoke(custom.id)}>
+                    Revoke
+                  </button>
+                )}
+                <button className="secondary-button danger" onClick={() => handleRemoveCustom(custom.id)}>
+                  Remove
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );

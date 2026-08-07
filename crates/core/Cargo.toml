@@ -16,6 +16,8 @@ hyper-util = { workspace = true }
 http-body-util = { workspace = true }
 tower-service = { workspace = true }
 futures = { workspace = true }
+tokio-util = { workspace = true }
+easytidy-protocol = { path = "../protocol" }
 uuid = { workspace = true }
 tempfile = { workspace = true }
 dirs = { workspace = true }

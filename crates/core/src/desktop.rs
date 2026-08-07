@@ -137,12 +137,9 @@ pub fn desktop_dir() -> Option<PathBuf> {
         }
     }
     let home = dirs::home_dir()?;
-    for cand in [home.join("Desktop"), home.join("桌面")] {
-        if cand.is_dir() {
-            return Some(cand);
-        }
-    }
-    None
+    [home.join("Desktop"), home.join("桌面")]
+        .into_iter()
+        .find(|cand| cand.is_dir())
 }
 
 /// 标记 GNOME 桌面 .desktop 为已信任（允许双击启动；仅桌面路径需要，
@@ -251,10 +248,8 @@ pub fn ensure_gui_icon() -> Option<String> {
         return None;
     }
     let path = dir.join("easytidy-gui.svg");
-    if !path.exists() {
-        if std::fs::write(&path, EASYTIDY_ICON_SVG).is_err() {
-            return None;
-        }
+    if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_SVG).is_err() {
+        return None;
     }
     Some(path.to_string_lossy().into_owned())
 }
@@ -390,8 +385,27 @@ fn parse_pt_value(content: &str, container: &str, key: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// 已导出的 passthrough 条目（含 .desktop 全文，供 GUI 展示）
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ExportedPassthrough {
+    /// 容器内 .desktop 路径（X-easytidy-app 标记）
+    pub desktop_file: String,
+    /// .desktop 文件全文（read_to_string，非 UTF-8 以 lossy 兜底）
+    pub content: String,
+    /// 宿主文件路径
+    pub path: PathBuf,
+}
+
 /// 枚举指定容器已导出的应用（返回容器内 .desktop 路径列表）
 pub fn list_passthrough(container: &str) -> Result<Vec<String>> {
+    Ok(list_passthrough_detailed(container)?
+        .into_iter()
+        .map(|e| e.desktop_file)
+        .collect())
+}
+
+/// 枚举指定容器已导出的应用（含 .desktop 全文，GUI 展示用）
+pub fn list_passthrough_detailed(container: &str) -> Result<Vec<ExportedPassthrough>> {
     let dir = passthrough_dir()?;
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -413,7 +427,11 @@ pub fn list_passthrough(container: &str) -> Result<Vec<String>> {
         }
         if let Some(app) = parse_pt_value(&content, container, "X-easytidy-app=") {
             if !app.is_empty() {
-                out.push(app);
+                out.push(ExportedPassthrough {
+                    desktop_file: app,
+                    content,
+                    path,
+                });
             }
         }
     }

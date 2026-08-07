@@ -20,7 +20,8 @@ use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use clap::Parser;
 use easytidy_protocol::{
-    AppGetIcon, AppGetIconResp, AppInfo, AppsListResp, CfgGetResp,
+    AppGetIcon, AppGetIconResp, AppInfo, AppsLaunch, AppsLaunchResp,
+    AppsLaunchResult, AppsListResp, CfgGetResp,
     CfgSet, CfgSetResp, Frame, FsEntry, FsEntryType,
     FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp,
     Handshake, HandshakeAck, LifecycleEntryLaunch, Message, MsgKind,
@@ -789,6 +790,9 @@ async fn handle_message(
         }
         (MsgKind::Req, "apps.getIcon") => {
             Ok(Some(handle_apps_get_icon(msg).await?))
+        }
+        (MsgKind::Req, "apps.launch") => {
+            Ok(Some(handle_apps_launch(msg, state).await?))
         }
         (MsgKind::Req, "config.get") => {
             Ok(Some(handle_config_get(msg).await?))
@@ -1687,37 +1691,44 @@ async fn handle_lifecycle_shutdown(
     }))
 }
 
-/// Launch entry command on startup
-async fn launch_entry_command(state: &Arc<ServerState>, entry_cmd: String) -> Result<()> {
-    info!("Launching entry command: {}", entry_cmd);
+/// 拉起一个受管子进程（entry / passthrough auto-start 共用）。
+///
+/// 用户映射生效时经 su 以容器内宿主用户拉起（cmd 为整条 shell 命令串，
+/// 直接作 su -c 参数交给目标用户 shell 解析——**不做单引号转义**：util-linux
+/// su 经 argv 传参，不经宿主 shell 二次解析；转义会破坏含引号/重定向的
+/// 复杂命令（实测 auto-start 命令 127 失败））；否则 root 直接 spawn。
+/// stdout/stderr 丢弃（GUI 应用自管窗口）；注册 state.children 并后台
+/// wait（退出后移除 + 日志）。env 继承 server 进程 env（create 时已注入
+/// DISPLAY 等显示透传变量）。
+async fn spawn_managed_process(
+    state: &Arc<ServerState>,
+    cmd: &str,
+    kind: &str,
+    entry_id: Option<String>,
+) -> Result<u32> {
+    if cmd.trim().is_empty() {
+        return Err(anyhow!("Empty command"));
+    }
 
-    // 用户映射生效时经 su 以容器内宿主用户拉起（entry_cmd 为整条 shell 命令串，
-    // 单引号转义后交给 su -c 内的用户 shell 解析）；否则维持旧行为（root 直接 spawn）。
     let mut child = if let Some(user) = user_map() {
-        let full = shell_escape_single_quote(&entry_cmd);
         TokioCommand::new("su")
             .arg("-c")
-            .arg(full)
+            .arg(cmd)
             .arg(&user.name)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .context("Failed to spawn entry command (su)")?
+            .context("Failed to spawn command (su)")?
     } else {
-        let parts: Vec<&str> = entry_cmd.split_whitespace().collect();
-        if parts.is_empty() {
-            return Err(anyhow!("Empty entry command"));
-        }
-
-        let cmd = parts[0];
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        let cmd0 = parts[0];
         let args = &parts[1..];
-
-        TokioCommand::new(cmd)
+        TokioCommand::new(cmd0)
             .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .context("Failed to spawn entry command")?
+            .context("Failed to spawn command")?
     };
 
     let pid = child.id().unwrap();
@@ -1727,24 +1738,77 @@ async fn launch_entry_command(state: &Arc<ServerState>, entry_cmd: String) -> Re
         let mut children = state.children.write().await;
         children.insert(pid, ChildInfo {
             pid,
-            kind: "entry".to_string(),
-            entry_id: Some("default".to_string()),
+            kind: kind.to_string(),
+            entry_id: entry_id.clone(),
         });
     }
 
-    // Wait for child in background
+    // Wait for child in background（退出后移除跟踪）
+    let state = state.clone();
+    let kind_owned = kind.to_string();
     tokio::spawn(async move {
         match child.wait().await {
             Ok(status) => {
-                info!("Entry process exited: pid={}, status={}", pid, status);
+                info!("Managed process exited: pid={pid}, kind={kind_owned}, status={status}");
+                let mut children = state.children.write().await;
+                children.remove(&pid);
             }
             Err(e) => {
-                error!("Failed to wait for entry process: {}", e);
+                error!("Failed to wait for managed process {pid}: {e}");
+                let mut children = state.children.write().await;
+                children.remove(&pid);
             }
         }
     });
 
+    Ok(pid)
+}
+
+/// Launch entry command on startup
+async fn launch_entry_command(state: &Arc<ServerState>, entry_cmd: String) -> Result<()> {
+    info!("Launching entry command: {}", entry_cmd);
+    let pid = spawn_managed_process(state, &entry_cmd, "entry", Some("default".to_string())).await?;
+    info!("Entry command launched: pid={pid}");
     Ok(())
+}
+
+/// Handle apps.launch（passthrough auto-start：批量拉起，逐条独立成败）
+async fn handle_apps_launch(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: AppsLaunch = serde_json::from_value(msg.payload)
+        .context("Failed to parse AppsLaunch")?;
+
+    info!("apps.launch：{} 个应用", req.apps.len());
+    let mut results = Vec::with_capacity(req.apps.len());
+    for app in &req.apps {
+        match spawn_managed_process(state, &app.cmd, "passthrough", Some(app.name.clone())).await
+        {
+            Ok(pid) => {
+                info!("passthrough 应用已拉起：{} (pid={pid})", app.name);
+                results.push(AppsLaunchResult {
+                    name: app.name.clone(),
+                    pid: Some(pid),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                // 单条失败不阻断其余（如 cmd 不存在/为空）
+                warn!("passthrough 应用拉起失败：{}：{e}", app.name);
+                results.push(AppsLaunchResult {
+                    name: app.name.clone(),
+                    pid: None,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "apps.launch".to_string(),
+        payload: serde_json::to_value(AppsLaunchResp { results })?,
+        err: None,
+    }))
 }
 
 /// Child reaper task

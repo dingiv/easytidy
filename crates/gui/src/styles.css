@@ -408,6 +408,81 @@ button:disabled {
   gap: 0.5rem;
 }
 
+/* per-app auto-start 开关 */
+.app-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.35rem;
+  font-size: 0.78rem;
+  color: #a6adc8;
+  cursor: pointer;
+}
+
+/* 已导出 .desktop 内容展示 */
+.desktop-content-section {
+  margin-top: 1rem;
+}
+
+.desktop-content-section h4 {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+  color: #cdd6f4;
+}
+
+.desktop-content {
+  background: #11111b;
+  border: 1px solid #313244;
+  border-radius: 8px;
+  padding: 0.8rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  color: #cdd6f4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow: auto;
+}
+
+/* 自定义应用区 */
+.custom-section {
+  margin-top: 1.2rem;
+  border-top: 1px solid #313244;
+  padding-top: 1rem;
+}
+
+.custom-section h4 {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+  color: #cdd6f4;
+}
+
+.custom-form {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+
+.custom-form input {
+  flex: 1;
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  color: #cdd6f4;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.82rem;
+  min-width: 0;
+}
+
+.custom-form input::placeholder {
+  color: #6c7086;
+}
+
+.secondary-button.danger {
+  color: #f38ba8;
+}
+
 /* Config manager */
 .config-manager {
   height: 100%;

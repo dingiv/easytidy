@@ -205,6 +205,39 @@ pub struct AppInfo {
     pub startup_wm_class: Option<String>,
 }
 
+/// 拉起一组应用（passthrough auto-start：容器启动时 server 直接 spawn，
+/// 不绑定客户端连接——宿主一次性 CLI 无法保活 PTY 会话，实测）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppsLaunch {
+    /// 要拉起的应用列表（逐条独立成败）
+    pub apps: Vec<AppsLaunchItem>,
+}
+
+/// 单条拉起请求
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppsLaunchItem {
+    /// 应用名（仅日志/跟踪用）
+    pub name: String,
+    /// 实际执行命令串（如 "google-chrome-stable --disable-dev-shm-usage"）
+    pub cmd: String,
+}
+
+/// AppsLaunch 响应：逐条结果
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppsLaunchResp {
+    pub results: Vec<AppsLaunchResult>,
+}
+
+/// 单条拉起结果（成功给 pid，失败给 error——单条失败不阻断其余）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppsLaunchResult {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// 获取应用图标数据
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppGetIcon {
@@ -398,12 +431,52 @@ mod tests {
             icon_path: Some("/usr/share/icons/hicolor/48x48/apps/firefox.png".to_string()),
             exec: "firefox %u".to_string(),
             comment: Some("Web Browser".to_string()),
+            categories: Some("Network;WebBrowser;".to_string()),
+            startup_notify: true,
+            startup_wm_class: Some("firefox".to_string()),
         };
 
         let json = serde_json::to_string(&app).expect("serialize failed");
         let decoded: AppInfo = serde_json::from_str(&json).expect("deserialize failed");
 
         assert_eq!(app, decoded);
+    }
+
+    #[test]
+    fn test_apps_launch_serde() {
+        let req = AppsLaunch {
+            apps: vec![
+                AppsLaunchItem {
+                    name: "Chrome".to_string(),
+                    cmd: "google-chrome-stable --disable-dev-shm-usage".to_string(),
+                },
+                AppsLaunchItem {
+                    name: "Broken".to_string(),
+                    cmd: String::new(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&req).expect("serialize failed");
+        let decoded: AppsLaunch = serde_json::from_str(&json).expect("deserialize failed");
+        assert_eq!(req, decoded);
+
+        let resp = AppsLaunchResp {
+            results: vec![
+                AppsLaunchResult {
+                    name: "Chrome".to_string(),
+                    pid: Some(1234),
+                    error: None,
+                },
+                AppsLaunchResult {
+                    name: "Broken".to_string(),
+                    pid: None,
+                    error: Some("empty cmd".to_string()),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).expect("serialize failed");
+        let decoded: AppsLaunchResp = serde_json::from_str(&json).expect("deserialize failed");
+        assert_eq!(resp, decoded);
     }
 
     #[test]

@@ -50,10 +50,29 @@ export interface AppInfo {
   startup_wm_class?: string;
 }
 
+/// Passthrough 配置中的应用条目（有状态:auto_start=true 或 custom 应用）
+export interface PassthroughApp {
+  /// 应用标识:扫描应用=容器内 .desktop 路径;自定义应用="custom:<name>"
+  id: string;
+  name: string;
+  /// 实际执行命令串(已去 %U 占位符;自定义应用原样)
+  cmd: string;
+  /// 仅扫描应用:容器内 .desktop 路径
+  desktop_file?: string;
+  /// 容器启动时自动拉起
+  auto_start: boolean;
+}
+
+/// 已导出的 .desktop 条目(含全文)
+export interface ExportedPassthrough {
+  desktop_file: string;
+  content: string;
+}
+
 /// Passthrough state from passthrough_state
 export interface PassthroughState {
-  exported_apps: string[];
-  auto_start_enabled: boolean;
+  exported: ExportedPassthrough[];
+  configured_apps: PassthroughApp[];
 }
 
 /// Mount config for the container config manager

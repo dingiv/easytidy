@@ -15,6 +15,7 @@ pub const EXEC_PREFIX: &str = "easytidy --container";
 
 pub mod configfile;
 pub mod desktop;
+pub mod passthrough;
 pub mod error;
 pub mod events;
 pub mod flavor;

@@ -1304,18 +1304,135 @@ async fn fetch_container_file(
         .map_err(|e| format!("图标 base64 解码失败：{e}"))
 }
 
-/// 获取 passthrough 状态（宿主枚举已导出 .desktop）
+/// 获取 passthrough 状态（已导出 .desktop 全文 + 配置的应用条目）。
+///
+/// 返回（前端契约）：
+/// ```json
+/// { "exported": [{"desktop_file","content"}],
+///   "configured_apps": [{"id","name","cmd","desktop_file"?,"auto_start"}] }
+/// ```
+/// `configured_apps` 是 passthrough.toml 中有状态条目（auto_start=true 或
+/// custom 应用）；扫描应用若未配置则不在此（前端按 id 匹配查 auto-start）。
 #[tauri::command]
 async fn passthrough_state(
     session: tauri::State<'_, Option<GuiSession>>,
 ) -> Result<serde_json::Value, String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-    let exported_apps = easytidy_core::desktop::list_passthrough(&sess.container_name)
+    let container = &sess.container_name;
+
+    let exported = easytidy_core::desktop::list_passthrough_detailed(container)
         .map_err(|e| e.to_string())?;
+    let exported_json: Vec<_> = exported
+        .into_iter()
+        .map(|e| serde_json::json!({ "desktop_file": e.desktop_file, "content": e.content }))
+        .collect();
+
+    let config_file = passthrough_config_file()?;
+    let apps = config_file.apps(container).map_err(|e| e.to_string())?;
+    let apps_json: Vec<_> = apps
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id,
+                "name": a.name,
+                "cmd": a.cmd,
+                "desktop_file": a.desktop_file,
+                "auto_start": a.auto_start,
+            })
+        })
+        .collect();
+
     Ok(serde_json::json!({
-        "exported_apps": exported_apps,
-        "auto_start_enabled": false, // 静默启动 passthrough（M4）未实现
+        "exported": exported_json,
+        "configured_apps": apps_json,
     }))
+}
+
+/// passthrough 配置文件（默认路径）
+fn passthrough_config_file() -> Result<easytidy_core::passthrough::PassthroughConfigFile, String> {
+    let path = easytidy_core::passthrough::PassthroughConfigFile::default_path()
+        .map_err(|e| e.to_string())?;
+    Ok(easytidy_core::passthrough::PassthroughConfigFile::with_path(path))
+}
+
+/// 清理 Exec 的 %U/%f 等占位符（宿主侧不展开容器内文件参数；export/toggle 共用）
+fn clean_exec(exec: &str) -> String {
+    exec.split_whitespace()
+        .filter(|w| !w.starts_with('%'))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 设置应用 auto-start（容器启动时自动拉起；随容器启动链路触发）
+#[tauri::command]
+async fn passthrough_set_auto_start(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+    name: String,
+    cmd: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+
+    let app = easytidy_core::passthrough::PassthroughApp {
+        id: id.clone(),
+        name,
+        cmd: clean_exec(&cmd),
+        desktop_file: (!id.starts_with("custom:")).then(|| id.clone()),
+        auto_start: false,
+    };
+    let config_file = passthrough_config_file()?;
+    config_file
+        .set_auto_start(container, app, enabled)
+        .map_err(|e| e.to_string())?;
+    info!("passthrough auto-start 已设置：{container} enabled={enabled}");
+    Ok(())
+}
+
+/// 添加自定义应用（固定目录扫描之外，如 `google-chrome-stable --disable-dev-shm-usage`）。
+/// 返回 AppInfoFrontend（desktop_file=`custom:<name>`），前端直接进现有导出流。
+#[tauri::command]
+async fn passthrough_add_custom(
+    session: tauri::State<'_, Option<GuiSession>>,
+    name: String,
+    cmd: String,
+) -> Result<AppInfoFrontend, String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let config_file = passthrough_config_file()?;
+    let app = config_file
+        .add_custom(&sess.container_name, &name, &cmd)
+        .map_err(|e| e.to_string())?;
+    Ok(AppInfoFrontend {
+        name: app.name,
+        icon_path: None,
+        exec: app.cmd,
+        comment: None,
+        desktop_file: app.id,
+        categories: None,
+        startup_notify: false,
+        startup_wm_class: None,
+    })
+}
+
+/// 移除应用（配置条目 + 清理可能存在的导出，防孤儿）
+#[tauri::command]
+async fn passthrough_remove_app(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+) -> Result<(), String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+
+    let config_file = passthrough_config_file()?;
+    config_file.remove_app(container, &id).map_err(|e| e.to_string())?;
+
+    // 非 custom 且已导出 → 清理导出（防孤儿）
+    if !id.starts_with("custom:") {
+        let _ = easytidy_core::desktop::remove_passthrough(container, &id);
+    }
+    info!("passthrough 应用已移除：{container} {id}");
+    Ok(())
 }
 
 /// 导出 passthrough 应用（宿主生成 .desktop：应用菜单 + 桌面图标。
@@ -1333,16 +1450,14 @@ async fn passthrough_export(
     let container = sess.container_name.clone();
 
     // Exec 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数）
-    let exec = app
-        .exec
-        .split_whitespace()
-        .filter(|w| !w.starts_with('%'))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let exec = clean_exec(&app.exec);
 
-    // 图标搬运：容器内图标经 server fs.read 拉取 → 宿主 hicolor 缓存
+    // 图标：custom 应用（无容器内图标）用内置品牌图标；扫描应用经
+    // server fs.read 搬运容器内图标 → 宿主 hicolor 缓存
     let mut icon_attr = None;
-    if let Some(icon_path) = app.icon_path.as_ref() {
+    if app.desktop_file.starts_with("custom:") {
+        icon_attr = easytidy_core::desktop::ensure_gui_icon();
+    } else if let Some(icon_path) = app.icon_path.as_ref() {
         if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
             if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
                 if std::fs::create_dir_all(&icons_dir).is_ok() {
@@ -1560,6 +1675,9 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             passthrough_state,
             passthrough_export,
             passthrough_revoke,
+            passthrough_set_auto_start,
+            passthrough_add_custom,
+            passthrough_remove_app,
             export_gui_shortcut,
             // 单容器模式 - 配置
             config_get,
