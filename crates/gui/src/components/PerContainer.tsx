@@ -81,13 +81,15 @@ export function PerContainer({ containerName }: PerContainerProps) {
     e.preventDefault();
   };
 
-  // 文件浏览器"跟随终端"：启用后每秒查询激活终端的 pwd → 导航文件浏览器
+  // 文件浏览器"跟随终端"：server TTY 事件驱动（pty.cwdChanged 主动推送，
+  // 输入回车时毫秒级检测）→ store cwd 更新 → 订阅导航；开启时初始同步一次
   const [followTerminal, setFollowTerminal] = useState(false);
   const followRef = useRef({ activeId, panes });
   followRef.current = { activeId, panes };
   useEffect(() => {
     if (!followTerminal) return;
-    const timer = setInterval(async () => {
+    // 初始同步：开启瞬间查一次激活终端的 pwd
+    const syncOnce = async () => {
       const { activeId: aid, panes: ps } = followRef.current;
       const activePane = ps.find((p) => p.id === aid);
       if (!activePane || activePane.kind !== 'terminal') return;
@@ -97,14 +99,23 @@ export function PerContainer({ containerName }: PerContainerProps) {
       if (streamId === null) return;
       try {
         const cwd = await invoke<string>('pty_cwd', { streamId });
-        if (cwd && cwd !== useFileBrowserStore.getState().currentPath) {
-          useFileBrowserStore.getState().navigate(cwd);
-        }
+        if (cwd) useFileBrowserStore.getState().navigate(cwd);
       } catch (err) {
-        console.error('pty_cwd failed:', err);
+        console.error('pty_cwd (sync) failed:', err);
       }
-    }, 1000);
-    return () => clearInterval(timer);
+    };
+    syncOnce();
+    // 订阅 cwd 变化（server 推送更新 store）
+    const unsub = useTerminalStore.subscribe((state) => {
+      const { activeId: aid, panes: ps } = followRef.current;
+      const activePane = ps.find((p) => p.id === aid);
+      if (!activePane || activePane.kind !== 'terminal') return;
+      const cwd = state.streams[activePane.asRoot ? 'root' : 'user'].cwd;
+      if (cwd && cwd !== useFileBrowserStore.getState().currentPath) {
+        useFileBrowserStore.getState().navigate(cwd);
+      }
+    });
+    return unsub;
   }, [followTerminal]);
 
   const handleCloseContainer = async () => {

@@ -141,7 +141,9 @@ export interface ContainerConfigResult {
 
 /// PTY event from pty_open
 export interface PtyEvent {
-  kind: 'data' | 'exited';
+  kind: 'data' | 'exited' | 'cwdChanged';
   data?: number[];
   code?: number;
+  /// 工作目录（kind="cwdChanged" 时;server 主动推送）
+  cwd?: string;
 }

@@ -119,10 +119,14 @@ function TerminalInner({ asRoot }: TerminalProps) {
     };
     const handlePtyEvent = (event: PtyEvent) => {
       if (event.kind === 'data' && event.data) {
-        pendingWrites.push(...event.data);
+        // 循环 push（不用 spread：帧超过 ~65535 元素会 RangeError）
+        for (const b of event.data) pendingWrites.push(b);
         if (writeRaf === null) {
           writeRaf = requestAnimationFrame(flushWrites);
         }
+      } else if (event.kind === 'cwdChanged' && event.cwd) {
+        // server TTY 事件驱动推送（输入回车时检测）：更新 store 供跟随
+        useTerminalStore.getState().setCwd(asRoot ?? false, event.cwd);
       } else if (event.kind === 'exited') {
         if (writeRaf !== null) {
           cancelAnimationFrame(writeRaf);
@@ -213,23 +217,34 @@ function TerminalInner({ asRoot }: TerminalProps) {
     };
     terminalEl.addEventListener('keydown', handleCopyKey, true);
 
-    // Handle terminal input
+    // Handle terminal input。
+    // ⚠️ 大文本（粘贴）必须 Uint8Array 直传 + 分块：Array.from 转数字数组 +
+    // JSON 序列化会膨胀 4-5 倍（1MB 粘贴 → 3-5MB IPC），实测卡顿。
+    // Uint8Array 经 Tauri 2 高效传输（Rust 侧 Vec<u8> 直接接收）；
+    // 大输入分 64KB 块，小输入（打字）直发保持低延迟。
     let writeFailed = false;
+    const INPUT_CHUNK = 64 * 1024;
     term.onData((data: string) => {
       if (streamIdRef.current === null) return;
-      const encoder = new TextEncoder();
-      const dataArr = Array.from(encoder.encode(data));
-      invoke('pty_write', {
-        streamId: streamIdRef.current,
-        data: dataArr,
-      }).catch((err) => {
-        // 写失败必须可见：静默吞掉会让用户面对"无法输入"而不知原因
-        if (!writeFailed) {
-          writeFailed = true;
-          term.writeln(`\r\n\x1b[91m[输入通道错误：${err}，请刷新或切换 tab 重连]\x1b[0m`);
+      const bytes = new TextEncoder().encode(data);
+      const streamId = streamIdRef.current;
+      const sendChunk = (chunk: Uint8Array) => {
+        invoke('pty_write', { streamId, data: chunk }).catch((err) => {
+          // 写失败必须可见：静默吞掉会让用户面对"无法输入"而不知原因
+          if (!writeFailed) {
+            writeFailed = true;
+            term.writeln(`\r\n\x1b[91m[输入通道错误：${err}，请刷新或切换 tab 重连]\x1b[0m`);
+          }
+          console.error('pty_write failed:', err);
+        });
+      };
+      if (bytes.length <= INPUT_CHUNK) {
+        sendChunk(bytes);
+      } else {
+        for (let i = 0; i < bytes.length; i += INPUT_CHUNK) {
+          sendChunk(bytes.subarray(i, i + INPUT_CHUNK));
         }
-        console.error('pty_write failed:', err);
-      });
+      }
     });
 
     // 心跳保活：server 对无帧连接有 idle 超时（有 PTY 的连接 1h），

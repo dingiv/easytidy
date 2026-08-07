@@ -109,19 +109,21 @@ export function FileBrowser({ onOpenFile, followTerminal, onToggleFollow }: File
   return (
     <div className="file-browser">
       {/* 导航行：返回根目录 + 返回上一级 + 面包屑（每级可点击） */}
-      <div className="file-browser-breadcrumb">
+      <header className='file-browser-head'>
         <Tooltip
           title={followTerminal ? '关闭跟随终端' : '跟随终端（目录自动同步到终端 pwd）'}
           mouseEnterDelay={4}
-        >
+          >
           <Button
             size="small"
             type={followTerminal ? 'primary' : 'text'}
             icon={<AimOutlined />}
             onClick={onToggleFollow}
             title="跟随终端"
-          />
+            />
         </Tooltip>
+
+      <div className="file-browser-breadcrumb">
         <Breadcrumb
           items={crumbs.map((c) => ({
             title: (
@@ -138,7 +140,7 @@ export function FileBrowser({ onOpenFile, followTerminal, onToggleFollow }: File
               </a>
             ),
           }))}
-        />
+          />
           <Button
             size="small"
             type="text"
@@ -146,8 +148,9 @@ export function FileBrowser({ onOpenFile, followTerminal, onToggleFollow }: File
             disabled={currentPath === '/'}
             onClick={navigateToParent}
             title="返回上一级"
-          />
+            />
       </div>
+            </header>
 
       {error && <div className="error-message">{error}</div>}
 

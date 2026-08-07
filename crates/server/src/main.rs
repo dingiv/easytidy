@@ -92,6 +92,8 @@ struct PtySession {
     persistent: std::sync::atomic::AtomicBool,
     /// spawn 的进程 pid（pty.cwd 经 /proc/<pid>/cwd 查询实时工作目录）
     spawn_pid: u32,
+    /// 最近一次 cwd（事件驱动检测：输入回车时比较，变化才推送 cwdChanged）
+    last_cwd: std::sync::Mutex<Option<String>>,
 }
 
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
@@ -1136,6 +1138,7 @@ async fn handle_pty_open(
         subs: Arc::new(std::sync::Mutex::new(vec![(conn_token, event_tx.clone())])),
         persistent: std::sync::atomic::AtomicBool::new(persistent),
         spawn_pid,
+        last_cwd: std::sync::Mutex::new(None),
     });
 
     // Store session
@@ -1360,25 +1363,8 @@ async fn handle_pty_cwd(msg: Message, state: &Arc<ServerState>) -> Result<Frame>
             }),
         }));
     };
-    let spawn_pid = session.spawn_pid;
-
-    // 子进程（su 场景的 bash）优先；失败回退 spawn 进程 cwd；再失败空串
-    let cwd = {
-        let children_path = format!("/proc/{spawn_pid}/task/{spawn_pid}/children");
-        let child_pid = std::fs::read_to_string(children_path)
-            .ok()
-            .and_then(|c| c.split_whitespace().next().map(|s| s.to_string()));
-        match child_pid {
-            Some(child) => read_cwd(child.parse().unwrap_or(0)).await,
-            None => None,
-        }
-    }
-    .or_else(|| {
-        std::fs::read_link(format!("/proc/{spawn_pid}/cwd"))
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
-    })
-    .unwrap_or_default();
+    // 复用 session_cwd（su 场景取子进程 bash；ptrace 拒绝时经 su node）
+    let cwd = session_cwd(session).await.unwrap_or_default();
 
     Ok(Frame::Json(Message {
         id: msg.id,
@@ -1481,6 +1467,8 @@ async fn handle_raw_data(
     let sessions = state.sessions.read().await;
     if let Some(session) = sessions.get(&stream_id) {
         let writer = session.writer.clone();
+        // TTY 事件检测（用户在终端敲回车执行命令）：输入含换行即"TTY 事件"
+        let has_enter = data.contains(&b'\n') || data.contains(&b'\r');
         let data = data.to_vec();
 
         // Write in spawn_blocking to avoid blocking async runtime
@@ -1492,10 +1480,50 @@ async fn handle_raw_data(
             let _ = writer_guard.flush();
         }).await
         .context("spawn_blocking join error")?;
+
+        // TTY 事件驱动 cwd 检测（"高人方案"机制三：TTY 事件触发 + /proc 读取）。
+        // server 持有 PTY master，用户敲回车（执行命令）的输入经此转发——
+        // 此时读一次 bash cwd，变化则广播 pty.cwdChanged（主动推送，
+        // 毫秒级响应，替代 GUI 轮询）。
+        if has_enter {
+            if let Some(cwd) = session_cwd(session).await {
+                let mut guard = session.last_cwd.lock().unwrap();
+                if *guard != Some(cwd.clone()) {
+                    *guard = Some(cwd.clone());
+                    info!("cwd 变化：stream_id={stream_id} → {cwd}");
+                    // 广播给订阅连接（GUI 的 pty reader 消费）
+                    let evt = Frame::Json(Message {
+                        id: state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64,
+                        kind: MsgKind::Evt,
+                        op: "pty.cwdChanged".to_string(),
+                        payload: serde_json::json!({
+                            "stream_id": stream_id,
+                            "cwd": cwd,
+                        }),
+                        err: None,
+                    });
+                    let mut subs = session.subs.lock().unwrap();
+                    subs.retain(|(_, tx)| tx.send(evt.clone()).is_ok());
+                }
+            }
+        }
     } else {
         warn!("PTY session {} not found for write", stream_id);
     }
     Ok(())
+}
+
+/// 读取会话主进程的实时 cwd（su 场景取子进程 bash；ptrace 拒绝时经 su node）
+async fn session_cwd(session: &Arc<PtySession>) -> Option<String> {
+    let spawn_pid = session.spawn_pid;
+    let children_path = format!("/proc/{spawn_pid}/task/{spawn_pid}/children");
+    let child_pid = std::fs::read_to_string(children_path)
+        .ok()
+        .and_then(|c| c.split_whitespace().next().map(|s| s.parse::<u32>().unwrap_or(0)));
+    match child_pid {
+        Some(pid) => read_cwd(pid).await,
+        None => read_cwd(spawn_pid).await,
+    }
 }
 
 /// Handle fs.list

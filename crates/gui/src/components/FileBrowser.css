@@ -1,10 +1,10 @@
 .file-browser-breadcrumb {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-
-    padding: 1ch;
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
+
 /* 文本编辑器视图 */
 .file-editor {
   display: flex;
@@ -38,4 +38,14 @@
 
 .file-editor-textarea::selection {
   background: #45475a;
+}
+
+.file-browser-head {
+  display: flex;
+  align-items: center;
+  padding: 1ch 0;
+}
+
+.file-browser-head >* {
+  margin: 0 0.5ch;
 }

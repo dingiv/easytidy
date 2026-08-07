@@ -13,6 +13,8 @@ import type { PtyEvent } from '../types';
 interface TerminalStream {
   streamId: number | null;
   channel: Channel<PtyEvent> | null;
+  /** 最近 cwd（server TTY 事件驱动推送 pty.cwdChanged 更新） */
+  cwd: string | null;
 }
 
 interface TerminalStore {
@@ -24,26 +26,35 @@ interface TerminalStore {
   setStream: (asRoot: boolean, streamId: number, channel: Channel<PtyEvent>) => void;
   /** 失效缓存（会话退出后，下次挂载新建） */
   clearStream: (asRoot: boolean) => void;
+  /** 更新 cwd（server 主动推送） */
+  setCwd: (asRoot: boolean, cwd: string) => void;
 }
 
 export const useTerminalStore = create<TerminalStore>((set, get) => ({
   streams: {
-    user: { streamId: null, channel: null },
-    root: { streamId: null, channel: null },
+    user: { streamId: null, channel: null, cwd: null },
+    root: { streamId: null, channel: null, cwd: null },
   },
   getStream: (asRoot) => get().streams[asRoot ? 'root' : 'user'],
   setStream: (asRoot, streamId, channel) =>
     set((s) => ({
       streams: {
         ...s.streams,
-        [asRoot ? 'root' : 'user']: { streamId, channel },
+        [asRoot ? 'root' : 'user']: { streamId, channel, cwd: s.streams[asRoot ? 'root' : 'user'].cwd },
       },
     })),
   clearStream: (asRoot) =>
     set((s) => ({
       streams: {
         ...s.streams,
-        [asRoot ? 'root' : 'user']: { streamId: null, channel: null },
+        [asRoot ? 'root' : 'user']: { streamId: null, channel: null, cwd: null },
+      },
+    })),
+  setCwd: (asRoot, cwd) =>
+    set((s) => ({
+      streams: {
+        ...s.streams,
+        [asRoot ? 'root' : 'user']: { ...s.streams[asRoot ? 'root' : 'user'], cwd },
       },
     })),
 }));

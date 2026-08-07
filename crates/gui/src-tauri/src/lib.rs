@@ -69,12 +69,14 @@ pub struct GuiSession {
 /// PTY 事件（通过 Channel 发送给前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PtyEvent {
-    /// 事件类型："data" / "exited"
+    /// 事件类型："data" / "exited" / "cwdChanged"
     pub kind: String,
     /// 数据（kind="data" 时）
     pub data: Option<Vec<u8>>,
     /// 退出码（kind="exited" 时）
     pub code: Option<i32>,
+    /// 工作目录（kind="cwdChanged" 时；server 主动推送的 TTY 事件）
+    pub cwd: Option<String>,
 }
 
 /// Podman 客户端（延迟连接）
@@ -950,6 +952,7 @@ async fn pty_open(
                                 kind: "data".to_string(),
                                 data: Some(data),
                                 code: None,
+                                cwd: None,
                             };
                             if on_event.send(event).is_err() {
                                 break; // 通道关闭
@@ -964,11 +967,27 @@ async fn pty_open(
                                         kind: "exited".to_string(),
                                         data: None,
                                         code: Some(exited.code),
+                                        cwd: None,
                                     };
                                     let _ = on_event.send(event);
                                     break;
                                 }
                                 _ => {}
+                            }
+                        } else if msg.op == "pty.cwdChanged" {
+                            // server 主动推送（TTY 事件驱动：输入回车时检测 cwd 变化）
+                            if let Some(cwd) = msg
+                                .payload
+                                .get("cwd")
+                                .and_then(|c| c.as_str())
+                            {
+                                let event = PtyEvent {
+                                    kind: "cwdChanged".to_string(),
+                                    data: None,
+                                    code: None,
+                                    cwd: Some(cwd.to_string()),
+                                };
+                                let _ = on_event.send(event);
                             }
                         }
                     }
