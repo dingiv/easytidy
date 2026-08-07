@@ -866,6 +866,8 @@ async fn pty_open(
     cmd: Option<String>,
     cols: u16,
     rows: u16,
+    // 以 root 运行（root 终端；Tauri 参数名 camelCase → 前端传 asRoot）
+    as_root: bool,
 ) -> Result<u32, String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container_name = sess.container_name.clone();
@@ -889,7 +891,12 @@ async fn pty_open(
         cwd: "/".to_string(),
         cols,
         rows,
-        as_root: false,
+        // ⚠️ 曾硬编码 false 且命令缺 as_root 参数——前端 asRoot 被静默忽略,
+        // root 终端 attach 到 node 会话（2026-08-08 实测）
+        as_root,
+        // 接线常驻终端：GUI 终端复用以容器为单位的常驻会话
+        // （server 持有句柄，连接断开不清理；重开窗口回放当前屏幕）
+        attach: true,
     };
 
     // 在此连接上发送 pty.open 并接收响应

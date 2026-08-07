@@ -11,7 +11,7 @@ use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -57,11 +57,20 @@ struct ServerState {
     /// PTY sessions: stream_id -> session
     sessions: Arc<RwLock<HashMap<u32, Arc<PtySession>>>>,
 
+    /// 常驻终端（每容器按身份各一个，attach 语义）：key → stream_id
+    /// （key: "user"=node 常规终端 / "root"=root 终端）
+    /// （std RwLock：reader 线程（非 async）结束时需清除，不能用 tokio RwLock；
+    /// 包 Arc 供 Clone（reader 线程与连接任务共享））
+    default_terminal: Arc<std::sync::RwLock<HashMap<String, u32>>>,
+
     /// Child processes: pid -> ChildInfo
     children: Arc<RwLock<HashMap<u32, ChildInfo>>>,
 
     /// Next stream ID
     next_stream_id: Arc<AtomicU32>,
+
+    /// Next connection token（PTY 订阅退订标识）
+    next_conn_id: Arc<AtomicU64>,
 
     /// Next message ID
     next_msg_id: Arc<AtomicU32>,
@@ -74,7 +83,17 @@ struct ServerState {
 struct PtySession {
     writer: Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
     master: Arc<std::sync::Mutex<Box<dyn MasterPty + Send>>>,
+    /// 输出环形缓冲（新 attach 客户端回放当前屏幕；上限见 RING_MAX）
+    ring: Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
+    /// 订阅连接的输出通道（reader 广播；连接断开时按连接 token 退订——
+    /// UnboundedSender 无 PartialEq，用连接级唯一 token 标识）
+    subs: Arc<std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<Frame>)>>>,
+    /// 常驻标志：不随连接断开清理（attach 终端）；连接断开仅退订
+    persistent: std::sync::atomic::AtomicBool,
 }
+
+/// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
+const RING_MAX: usize = 128 * 1024;
 
 /// Child process info
 #[derive(Debug, Clone)]
@@ -90,8 +109,10 @@ impl Clone for ServerState {
     fn clone(&self) -> Self {
         ServerState {
             sessions: self.sessions.clone(),
+            default_terminal: self.default_terminal.clone(),
             children: self.children.clone(),
             next_stream_id: self.next_stream_id.clone(),
+            next_conn_id: self.next_conn_id.clone(),
             next_msg_id: self.next_msg_id.clone(),
             shutting_down: self.shutting_down.clone(),
         }
@@ -467,8 +488,10 @@ async fn main() -> Result<()> {
     // Setup server state
     let state = Arc::new(ServerState {
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        default_terminal: Arc::new(std::sync::RwLock::new(HashMap::new())),
         children: Arc::new(RwLock::new(HashMap::new())),
         next_stream_id: Arc::new(AtomicU32::new(1)),
+        next_conn_id: Arc::new(AtomicU64::new(1)),
         next_msg_id: Arc::new(AtomicU32::new(1)),
         shutting_down: Arc::new(AtomicBool::new(false)),
     });
@@ -600,6 +623,9 @@ async fn handle_connection(
     // 本连接打开的 PTY 流：有活跃 PTY 时跳过空闲超时（交互 shell 会长时间无输入）
     let mut conn_ptys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
+    // 连接唯一 token（PTY 订阅退订标识；UnboundedSender 无 PartialEq）
+    let conn_token = state.next_conn_id.fetch_add(1, Ordering::SeqCst);
+
     // 主循环包在内层函数：无论以何种方式退出（break / `?` 错误 / 超时），
     // 外层统一清理本连接打开的 PTY 会话（防 su/-bash 孤儿泄漏）
     let result = connection_loop(
@@ -609,9 +635,10 @@ async fn handle_connection(
         &mut event_rx,
         &handshake_done,
         &mut conn_ptys,
+        conn_token,
     )
     .await;
-    close_conn_ptys(&state, &conn_ptys).await;
+    close_conn_ptys(&state, &conn_ptys, conn_token).await;
     result
 }
 
@@ -623,6 +650,7 @@ async fn connection_loop(
     event_rx: &mut mpsc::UnboundedReceiver<Frame>,
     handshake_done: &Arc<AtomicBool>,
     conn_ptys: &mut std::collections::HashSet<u32>,
+    conn_token: u64,
 ) -> Result<()> {
     // Main connection loop
     loop {
@@ -655,6 +683,7 @@ async fn connection_loop(
                                     state,
                                     handshake_done,
                                     event_tx_clone,
+                                    conn_token,
                                 ).await?;
 
                                 if let Some(resp) = response {
@@ -717,22 +746,43 @@ async fn connection_loop(
 
 /// 连接退出时清理本连接打开的 PTY 会话。
 ///
-/// ⚠️ 泄漏修复（2026-08-07 实测）：GUI 切 tab 卸载 Terminal → 连接断开，
-/// 但此前从不清理会话 → `su - node` / `-bash` 成对残留（13 对实测）。
-/// remove → session drop → PTY writer 关闭 → 子进程 SIGHUP 退出 → catatonit 收割。
-async fn close_conn_ptys(state: &Arc<ServerState>, conn_ptys: &std::collections::HashSet<u32>) {
+/// - 非持久会话（CLI run 等）：remove → session drop → PTY writer 关闭 →
+///   子进程 SIGHUP 退出 → catatonit 收割（防 su/-bash 孤儿泄漏，实测）
+/// - **持久会话（attach 常驻终端）：保留——server 持有句柄，仅退订
+///   本连接的输出通道**；会话由 pty.close / 自然退出终结
+async fn close_conn_ptys(
+    state: &Arc<ServerState>,
+    conn_ptys: &std::collections::HashSet<u32>,
+    conn_token: u64,
+) {
     if conn_ptys.is_empty() {
         return;
     }
-    let mut sessions = state.sessions.write().await;
-    let mut closed = 0;
+    let mut unsubscribed = 0;
+    let mut to_remove = Vec::new();
+    let sessions = state.sessions.read().await;
     for sid in conn_ptys {
-        if sessions.remove(sid).is_some() {
-            closed += 1;
+        let Some(session) = sessions.get(sid) else {
+            continue;
+        };
+        if session.persistent.load(Ordering::SeqCst) {
+            // 常驻：退订本连接（按连接 token），会话保留继续缓冲输出
+            let mut subs = session.subs.lock().unwrap();
+            subs.retain(|(t, _)| *t != conn_token);
+            unsubscribed += 1;
+        } else {
+            to_remove.push(*sid);
         }
     }
-    if closed > 0 {
-        info!("连接退出，清理 {closed} 个 PTY 会话");
+    drop(sessions);
+    if !to_remove.is_empty() {
+        let mut sessions = state.sessions.write().await;
+        for sid in &to_remove {
+            sessions.remove(sid);
+        }
+    }
+    if unsubscribed > 0 || !to_remove.is_empty() {
+        info!("连接退出：退订 {unsubscribed} 个常驻终端，清理 {} 个会话", to_remove.len());
     }
 }
 
@@ -742,6 +792,7 @@ async fn handle_message(
     state: &Arc<ServerState>,
     handshake_done: &Arc<AtomicBool>,
     event_tx: mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
 ) -> Result<Option<Frame>> {
     // Require handshake first
     if msg.op != "hello" && !handshake_done.load(Ordering::SeqCst) {
@@ -765,7 +816,7 @@ async fn handle_message(
             Ok(Some(handle_ping(msg).await?))
         }
         (MsgKind::Req, "pty.open") => {
-            Ok(Some(handle_pty_open(msg, state, event_tx).await?))
+            Ok(Some(handle_pty_open(msg, state, event_tx, conn_token).await?))
         }
         (MsgKind::Req, "pty.resize") => {
             Ok(Some(handle_pty_resize(msg, state).await?))
@@ -888,9 +939,79 @@ async fn handle_pty_open(
     msg: Message,
     state: &Arc<ServerState>,
     event_tx: mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
 ) -> Result<Frame> {
     let req: PtyOpen = serde_json::from_value(msg.payload)
         .context("Failed to parse PtyOpen")?;
+
+    // 接线常驻终端：server 按身份各持一个 attach 终端（persistent 会话，
+    // 不随连接断开清理；key: "user"=node 常规 / "root"=root）。
+    // 已有 → 订阅 + 回放环形缓冲 → 复用同一 stream_id；无 → 走新建路径并登记。
+    // ⚠️ guard 先取值再 await：std RwLock guard 在 if-let scrutinee 中存活
+    // 整个语句，跨 await 导致 future 非 Send
+    let attach_key = if req.as_root { "root" } else { "user" };
+    let default_sid = state
+        .default_terminal
+        .read()
+        .unwrap()
+        .get(attach_key)
+        .copied();
+    if req.attach && default_sid.is_some() {
+        let default_sid = default_sid.unwrap();
+        let sessions = state.sessions.read().await;
+        if let Some(session) = sessions.get(&default_sid) {
+            // 用请求尺寸立即同步 PTY：attach 客户端尺寸可能与旧会话不同，
+            // 不 resize 则 shell 按旧行列换行 → 提示符截断错位（实测）
+            {
+                let master = session.master.lock().unwrap();
+                let _ = master.resize(PtySize {
+                    rows: req.rows,
+                    cols: req.cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                });
+            }
+
+            // 回放环形缓冲（恢复当前屏幕）→ 订阅。
+            // ⚠️ 前缀"清屏 + 光标复位"：ring 是从字节流中间截取的片段
+            // （128KB 裁剪/半截 ESC 序列），直接回放会让 xterm 从错误状态
+            // 开始渲染 → 光标漂移、提示符残缺错位（实测乱码）。
+            // 合并**单帧**发送：分块回放导致 xterm 逐块渲染 → 切回 tab 时
+            // "先少量文字再迅速补齐"的闪烁（实测）。
+            // DECSET 2026（同步输出）包裹整帧：xterm 6.0 原生将整帧原子渲染，
+            // 清除回放过程的逐块重绘闪烁（社区标准做法，调研 2026-08-07）
+            {
+                const SYNC_START: &[u8] = b"\x1b[?2026h";
+                const SYNC_END: &[u8] = b"\x1b[?2026l";
+                let prefix = b"\x1b[2J\x1b[H";
+                let ring = session.ring.lock().unwrap();
+                let mut pending: Vec<u8> =
+                    Vec::with_capacity(SYNC_START.len() + prefix.len() + ring.len() + SYNC_END.len());
+                pending.extend_from_slice(SYNC_START);
+                pending.extend_from_slice(prefix);
+                pending.extend(ring.iter().copied());
+                pending.extend_from_slice(SYNC_END);
+                // ring 不清空：多客户端 attach 各自从"清屏 + 全量 ring"渲染，
+                // 渲染幂等；清空会破坏后续 attach 的回放
+                drop(ring);
+                let _ = event_tx.send(Frame::Raw {
+                    stream_id: default_sid,
+                    data: pending,
+                });
+            }
+            session.subs.lock().unwrap().push((conn_token, event_tx));
+            info!("PTY attach: stream_id={}", default_sid);
+            return Ok(Frame::Json(Message {
+                id: msg.id,
+                kind: MsgKind::Resp,
+                op: "pty.open".to_string(),
+                payload: serde_json::to_value(PtyOpenResp {
+                    stream_id: default_sid,
+                })?,
+                err: None,
+            }));
+        }
+    }
 
     let pty_system = native_pty_system();
     let pty_size = PtySize {
@@ -910,7 +1031,16 @@ async fn handle_pty_open(
     // as_root=true（setup/包管理）：直接以容器 root 运行（rootless 下 = 宿主用户权）
     // 映射未生效（env 缺失/用户创建失败）：维持现状（/bin/sh root）。
     let mut cmd_builder = if req.as_root {
-        let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
+        // root 交互 shell 优先 bash（与 node 终端体验一致；PTY 对端自动交互）
+        let cmd = if req.cmd.is_empty() {
+            if Path::new("/bin/bash").exists() {
+                "/bin/bash".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        } else {
+            req.cmd.clone()
+        };
         let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
 
         let mut b = CommandBuilder::new(cmd);
@@ -953,6 +1083,11 @@ async fn handle_pty_open(
             cmd_builder.env(k, v);
         }
     }
+    // TERM 注入：交互 shell 必需（clear 等依赖），客户端 env 未必携带
+    // （实测 "TERM environment variable not set"）
+    if !req.env.contains_key("TERM") {
+        cmd_builder.env("TERM", "xterm-256color");
+    }
 
     // Set working directory
     cmd_builder.cwd(&req.cwd);
@@ -979,10 +1114,21 @@ async fn handle_pty_open(
     // Allocate stream ID
     let stream_id = state.next_stream_id.fetch_add(1, Ordering::SeqCst);
 
+    // 常驻（attach）会话：persistent 标志 + 按身份登记为 default_terminal
+    let persistent = req.attach;
+    if persistent {
+        let mut def = state.default_terminal.write().unwrap();
+        def.insert(attach_key.to_string(), stream_id);
+        info!("常驻终端已登记：{attach_key} → stream_id={stream_id}");
+    }
+
     // Create session
     let session = Arc::new(PtySession {
         writer: Arc::new(std::sync::Mutex::new(writer)),
         master: master.clone(),
+        ring: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        subs: Arc::new(std::sync::Mutex::new(vec![(conn_token, event_tx.clone())])),
+        persistent: std::sync::atomic::AtomicBool::new(persistent),
     });
 
     // Store session
@@ -999,8 +1145,20 @@ async fn handle_pty_open(
     // Spawn PTY reader thread (owns the child for reaping)
     let msg_id = state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64;
     let stream_id_copy = stream_id;
+    let session_for_reader = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&stream_id).cloned().unwrap()
+    };
+    let default_terminal = state.default_terminal.clone();
     thread::spawn(move || {
-        pty_reader_thread(stream_id_copy, reader, child, event_tx, msg_id);
+        pty_reader_thread(
+            stream_id_copy,
+            reader,
+            child,
+            msg_id,
+            session_for_reader,
+            default_terminal,
+        );
     });
 
     Ok(Frame::Json(Message {
@@ -1013,12 +1171,16 @@ async fn handle_pty_open(
 }
 
 /// PTY reader thread (runs in a separate thread because PTY I/O is synchronous)
+///
+/// 输出路径：写入环形缓冲（新 attach 客户端回放）+ 广播所有订阅连接
+/// （send 失败 = 连接断开 → 退订该连接；常驻会话保留继续缓冲）。
 fn pty_reader_thread(
     stream_id: u32,
     reader: Box<dyn std::io::Read + Send>,
     mut child: Box<dyn portable_pty::Child + Send>,
-    event_tx: mpsc::UnboundedSender<Frame>,
     msg_id: u64,
+    session: Arc<PtySession>,
+    default_terminal: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 ) {
     info!("PTY reader thread started: stream_id={}", stream_id);
 
@@ -1033,15 +1195,24 @@ fn pty_reader_thread(
             }
             Ok(n) => {
                 debug!("PTY read {} bytes: stream_id={}", n, stream_id);
-                // Send Frame::Raw with actual bytes to client
+                let data = buf[..n].to_vec();
+
+                // 环形缓冲（回放；上限裁剪）
+                {
+                    let mut ring = session.ring.lock().unwrap();
+                    ring.extend(&data);
+                    while ring.len() > RING_MAX {
+                        ring.pop_front();
+                    }
+                }
+
+                // 广播订阅者（send 失败 = 连接断开 → 退订）
                 let frame = Frame::Raw {
                     stream_id,
-                    data: buf[..n].to_vec(),
+                    data,
                 };
-                if event_tx.send(frame).is_err() {
-                    error!("Failed to send PTY data, channel closed");
-                    break;
-                }
+                let mut subs = session.subs.lock().unwrap();
+                subs.retain(|(_, tx)| tx.send(frame.clone()).is_ok());
             }
             Err(e) => {
                 error!("PTY read error: stream_id={}, {}", stream_id, e);
@@ -1100,8 +1271,8 @@ fn pty_reader_thread(
         }
     };
 
-    // Send pty.exited event
-    let _ = event_tx.send(Frame::Json(Message {
+    // Send pty.exited event to all subscribers（连接侧 GUI/CLI 据此显示退出）
+    let evt = Frame::Json(Message {
         id: msg_id,
         kind: MsgKind::Evt,
         op: "pty.exited".to_string(),
@@ -1110,7 +1281,24 @@ fn pty_reader_thread(
             "code": exit_code,
         }),
         err: None,
-    }));
+    });
+    {
+        let mut subs = session.subs.lock().unwrap();
+        for (_, tx) in subs.iter() {
+            let _ = tx.send(evt.clone());
+        }
+        subs.clear();
+    }
+
+    // 常驻终端自然退出（用户 exit/进程结束）→ 清除登记，下次 attach 新建
+    {
+        let mut def = default_terminal.write().unwrap();
+        if let Some((key, _)) = def.iter().find(|(_, v)| **v == stream_id) {
+            let key = key.clone();
+            def.remove(&key);
+            info!("常驻终端已退出并清除登记：{key} → stream_id={stream_id}");
+        }
+    }
 
     info!("PTY reader thread ended: stream_id={}, exit_code={}", stream_id, exit_code);
 }
@@ -1161,6 +1349,16 @@ async fn handle_pty_close(
 ) -> Result<Frame> {
     let req: PtyClose = serde_json::from_value(msg.payload)
         .context("Failed to parse PtyClose")?;
+
+    // 显式关闭（pty.close）：常驻终端也一并终结并清除登记
+    {
+        let mut def = state.default_terminal.write().unwrap();
+        if let Some((key, _)) = def.iter().find(|(_, v)| **v == req.stream_id) {
+            let key = key.clone();
+            def.remove(&key);
+            info!("常驻终端已显式关闭并清除登记：{key} → stream_id={}", req.stream_id);
+        }
+    }
 
     let mut sessions = state.sessions.write().await;
     if let Some(_session) = sessions.remove(&req.stream_id) {
@@ -1382,22 +1580,22 @@ async fn handle_fs_write(msg: Message) -> Result<Frame> {
 async fn handle_apps_list(msg: Message) -> Result<Frame> {
     let mut apps = Vec::new();
 
-    let paths = [
-        "/usr/share/applications",
-        "/usr/local/share/applications",
-        "~/.local/share/applications",
+    // 扫描标准 .desktop 位置：系统目录 + 容器用户 home + server 自身 home
+    // （server 以 root 运行，$HOME=/root；用户 home 是 /home/node——之前
+    // 只扫 ~/ 漏掉用户 home 的 .desktop，实测）
+    let mut paths: Vec<String> = vec![
+        "/usr/share/applications".to_string(),
+        "/usr/local/share/applications".to_string(),
     ];
+    if let Some(user) = user_map() {
+        paths.push(format!("{}/.local/share/applications", user.home));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(format!("{home}/.local/share/applications"));
+    }
 
     for base in &paths {
-        let base_path = if let Some(rest) = base.strip_prefix("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                PathBuf::from(home).join(rest)
-            } else {
-                continue;
-            }
-        } else {
-            PathBuf::from(base)
-        };
+        let base_path = PathBuf::from(base);
 
         if let Ok(iter) = fs::read_dir(base_path) {
             for entry in iter.flatten() {
@@ -1431,7 +1629,6 @@ fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
     let mut icon_path = None;
     let mut exec = None;
     let mut comment = None;
-    let mut no_display = false;
     let mut categories = None;
     let mut startup_notify = false;
     let mut startup_wm_class = None;
@@ -1453,17 +1650,14 @@ fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
                 "Icon" => icon_path = resolve_icon_path(value).or(Some(value.to_string())),
                 "Exec" => exec = Some(value.to_string()),
                 "Comment" => comment = Some(value.to_string()),
-                "NoDisplay" => no_display = value == "true",
+                // NoDisplay 不再过滤（扫全：passthrough 场景用户要看到所有
+                // .desktop，如 python3.12.desktop 的 NoDisplay=true，实测遗漏）
                 "Categories" => categories = Some(value.to_string()),
                 "StartupNotify" => startup_notify = value == "true",
                 "StartupWMClass" => startup_wm_class = Some(value.to_string()),
                 _ => {}
             }
         }
-    }
-
-    if no_display {
-        return Err(anyhow!("NoDisplay=true"));
     }
 
     let name = name.ok_or_else(|| anyhow!("Missing Name"))?;
@@ -1895,6 +2089,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             children: Arc::new(RwLock::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU32::new(1)),
+            next_conn_id: Arc::new(AtomicU64::new(1)),
             next_msg_id: Arc::new(AtomicU32::new(1)),
             shutting_down: Arc::new(AtomicBool::new(false)),
         });

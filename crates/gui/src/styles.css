@@ -245,6 +245,7 @@ button:disabled {
   display: flex;
   flex-direction: column;
   height: 100%;
+  width: 100%;
 }
 
 .breadcrumb {
@@ -726,4 +727,192 @@ button:disabled {
   padding: 2rem;
   color: #9399b2;
   text-align: center;
+}
+
+/* 终端身份切换条（node / root） */
+.terminal-identity-bar {
+  display: flex;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  flex-shrink: 0;
+}
+
+.terminal-identity-bar button {
+  background: transparent;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  color: #a6adc8;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.7rem;
+  cursor: pointer;
+}
+
+.terminal-identity-bar button.tab-active {
+  background: #89b4fa22;
+  border-color: #89b4fa;
+  color: #89b4fa;
+}
+
+.terminal-identity-bar button:hover {
+  border-color: #89b4fa;
+}
+
+.terminal-identity-pane {
+  flex: 1;
+  min-height: 0;
+}
+
+/* 头部方形工具按钮 */
+.menu-right {
+  margin-left: auto;
+}
+
+.tool-button {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  background: #313244;
+  border: none;
+  border-radius: 8px;
+  color: #cdd6f4;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.tool-button:hover {
+  background: #45475a;
+}
+
+.tool-button.danger {
+  background: #f38ba833;
+  color: #f38ba8;
+}
+
+.tool-button.danger:hover {
+  background: #f38ba855;
+}
+
+/* 浏览器式标签栏 */
+.pane-tabs {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.5rem;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.pane-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.5rem 0.25rem 0.75rem;
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  color: #a6adc8;
+  font-size: 0.8rem;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.pane-tab:hover {
+  background: #313244;
+}
+
+.pane-tab.active {
+  background: #313244;
+  border-color: #89b4fa;
+  color: #cdd6f4;
+}
+
+.pane-tab-close {
+  font-size: 0.7rem;
+  padding: 2px;
+  border-radius: 4px;
+  opacity: 0.6;
+}
+
+.pane-tab-close:hover {
+  opacity: 1;
+  background: #f38ba855;
+  color: #f38ba8;
+}
+
+.pane-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #6c7086;
+  font-size: 0.9rem;
+}
+
+/* passthrough 头部操作组 */
+.passthrough-header-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* 左右布局：左列（标题+文件浏览器）| 右列（工具栏+标签栏+面板） */
+.per-layout {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.per-left {
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  background: #181825;
+  border-right: 1px solid #45475a;
+  flex-shrink: 0;
+}
+
+.per-left .menu-title {
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #313244;
+  margin-right: 0;
+}
+
+.per-left-browser {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.per-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* 拖拽手柄（侧边栏右边界） */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 10;
+}
+
+.sidebar-resizer:hover {
+  background: #89b4fa44;
+}
+
+.per-left {
+  position: relative;
 }

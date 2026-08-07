@@ -118,14 +118,28 @@ export function configsEqual(a: ContainerConfig, b: ContainerConfig): boolean {
   );
 }
 
+/** 引擎内部挂载（create 时自动注入，非用户可配）：server 二进制 + socket 目录 */
+const ENGINE_MOUNT_PATHS = ['/usr/bin/easytidy-server', '/run/easytidy'];
+
+/** 过滤引擎内部挂载（effective 的 mounts 含它们，与 saved 比较需剔除——
+ * 否则 pendingRestart 恒真，未修改也提示"配置已修改"，实测） */
+function userMounts(mounts: MountConfig[]): MountConfig[] {
+  return mounts.filter(
+    (m) =>
+      !ENGINE_MOUNT_PATHS.some(
+        (p) => m.container_path === p || m.container_path.startsWith(`${p}/`),
+      ),
+  );
+}
+
 /**
  * saved（configfile 期望）与 effective（inspect 实际）是否一致。
  * view 形状与 ContainerConfig 不同（无 entry/silent_boot/persistent），
- * 不能复用 configsEqual；user_home 侧检验 userns_mode（keep-id 下 podman
- * 可能回显 "private"/None，此时只按 saved 判定）。
+ * 不能复用 configsEqual；mounts 侧过滤引擎内部挂载；user_home 侧检验
+ * userns_mode（keep-id 下 podman 可能回显 "private"/None，此时只按 saved 判定）。
  */
 export function viewMatchesSaved(saved: ContainerConfig, view: ContainerConfigView): boolean {
-  if (!mountsEqual(saved.mounts, view.mounts)) return false;
+  if (!mountsEqual(saved.mounts, userMounts(view.mounts))) return false;
   if (!networksEqual(saved.network, view.network)) return false;
   if (!envRestartEqual(saved.env, view.env)) return false;
   if (saved.user_home && view.userns_mode !== null && view.userns_mode !== 'keep-id') {

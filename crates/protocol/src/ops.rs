@@ -27,6 +27,11 @@ pub struct PtyOpen {
     /// setup/包管理场景传 true 跳过 su）
     #[serde(default)]
     pub as_root: bool,
+    /// 接线常驻终端（默认 false）：server 持有每容器一个常驻交互终端
+    /// （persistent 会话，不随连接断开清理）；true 时优先复用已有常驻
+    /// 终端（输出回放），无则新建并设为常驻。CLI 执行命令传 false。
+    #[serde(default)]
+    pub attach: bool,
 }
 
 /// PtyOpen 响应：返回分配的 stream_id

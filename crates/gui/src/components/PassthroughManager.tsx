@@ -23,6 +23,23 @@ export function PassthroughManager() {
   const [customName, setCustomName] = useState('');
   const [customCmd, setCustomCmd] = useState('');
   const [addingCustom, setAddingCustom] = useState(false);
+  // 导出本容器 GUI 管理界面的桌面快捷方式
+  const [exportingGui, setExportingGui] = useState(false);
+
+  /** 导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面，双击打开此管理界面） */
+  const handleExportGuiShortcut = async () => {
+    setExportingGui(true);
+    setError(null);
+    try {
+      await invoke('export_gui_shortcut');
+      setError(null);
+    } catch (err: any) {
+      setError(err.message || 'Failed to export GUI shortcut');
+      console.error('export_gui_shortcut failed:', err);
+    } finally {
+      setExportingGui(false);
+    }
+  };
 
   useEffect(() => {
     loadData();
@@ -160,13 +177,23 @@ export function PassthroughManager() {
     <div className="passthrough-manager">
       <div className="passthrough-header">
         <h3>Desktop Applications Passthrough</h3>
-        <button
-          className="primary-button"
-          onClick={handleExport}
-          disabled={selectedApps.size === 0}
-        >
-          Export Selected ({selectedApps.size})
-        </button>
+        <div className="passthrough-header-actions">
+          <button
+            className="secondary-button"
+            onClick={handleExportGuiShortcut}
+            disabled={exportingGui}
+            title="导出本容器管理界面的桌面快捷方式"
+          >
+            {exportingGui ? '导出中…' : '导出桌面图标'}
+          </button>
+          <button
+            className="primary-button"
+            onClick={handleExport}
+            disabled={selectedApps.size === 0}
+          >
+            Export Selected ({selectedApps.size})
+          </button>
+        </div>
       </div>
 
       {error && (

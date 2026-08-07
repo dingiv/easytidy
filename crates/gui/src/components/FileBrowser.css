@@ -5,3 +5,37 @@
 
     padding: 1ch;
 }
+/* 文本编辑器视图 */
+.file-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.file-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #313244;
+  flex-shrink: 0;
+}
+
+.file-editor-textarea {
+  flex: 1;
+  width: 100%;
+  resize: none;
+  border: none;
+  outline: none;
+  background: #11111b;
+  color: #cdd6f4;
+  padding: 0.8rem;
+  font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  tab-size: 4;
+}
+
+.file-editor-textarea::selection {
+  background: #45475a;
+}

@@ -1,10 +1,15 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Breadcrumb, Spin, Empty, Button } from 'antd';
+import { App as AntApp, Breadcrumb, Spin, Empty, Button } from 'antd';
 import { FolderOutlined, FileOutlined, ArrowLeftOutlined } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import type { FsEntry } from '../types';
 import './FileBrowser.css'
+
+interface FileBrowserProps {
+  /** 双击文本文件回调（在右侧面板打开编辑器） */
+  onOpenFile?: (path: string) => void;
+}
 
 /** 路径 → 面包屑层级（每级可点击跳转） */
 function pathToCrumbs(path: string): { label: string; key: string }[] {
@@ -19,7 +24,29 @@ function pathToCrumbs(path: string): { label: string; key: string }[] {
   ];
 }
 
-export function FileBrowser() {
+/** 纯文本扩展名/文件名白名单（双击可打开编辑） */
+const TEXT_EXTS = new Set([
+  'txt', 'md', 'json', 'json5', 'toml', 'yaml', 'yml',
+  'sh', 'bash', 'py', 'js', 'jsx', 'ts', 'tsx', 'rs', 'c', 'h',
+  'cpp', 'hpp', 'go', 'rb', 'java', 'sql', 'html', 'css', 'scss',
+  'conf', 'cfg', 'ini', 'env', 'log', 'xml', 'csv', 'properties', 'vue',
+]);
+const TEXT_NAMES = new Set([
+  'dockerfile', 'makefile', 'readme', 'license', 'gitignore',
+  'bashrc', 'bash_profile', 'profile', 'zshrc', 'vimrc',
+]);
+
+/** 是否纯文本文件（扩展名/文件名白名单；编辑限制 1MB） */
+function isTextFile(name: string, size?: number): boolean {
+  if (size !== undefined && size > 1_048_576) return false; // >1MB 提示用终端
+  const lower = name.toLowerCase();
+  const dot = lower.lastIndexOf('.');
+  if (dot > 0) return TEXT_EXTS.has(lower.slice(dot + 1));
+  return TEXT_NAMES.has(lower);
+}
+
+export function FileBrowser({ onOpenFile }: FileBrowserProps) {
+  const { message } = AntApp.useApp();
   const { currentPath, navigate, navigateToParent } = useFileBrowserStore();
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +78,15 @@ export function FileBrowser() {
     if (entry.is_dir) {
       const newPath = currentPath === '/' ? `/${entry.name}` : `${currentPath}/${entry.name}`;
       navigate(newPath);
+      return;
     }
+    // 纯文本文件 → 回调 PerContainer 在右侧面板打开编辑器
+    const filePath = currentPath === '/' ? `/${entry.name}` : `${currentPath}/${entry.name}`;
+    if (!isTextFile(entry.name, entry.size)) {
+      message.info(entry.size && entry.size > 1_048_576 ? '文件超过 1MB，请用终端编辑' : '二进制或非文本文件，请在终端中查看');
+      return;
+    }
+    onOpenFile?.(filePath);
   };
 
   const formatSize = (bytes?: number) => {
