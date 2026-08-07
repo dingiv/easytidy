@@ -151,7 +151,13 @@ impl Flavor {
                     });
                 }
             }
-            env_extra.push("XDG_DATA_DIRS=/usr/share/easytidy-host".to_string());
+            // ⚠️ 必须**追加**系统默认目录，不能纯覆盖：gdk-pixbuf 2.42 经
+            // $XDG_DATA_DIRS/gdk-pixbuf-2.0/2.10.0/loaders.cache 查找 loader
+            // 注册表，覆盖后系统 cache 不可达 → 容器内 PNG 图标解码失败 →
+            // GTK 文件选择器断言崩溃（2026-08-07 Chrome 保存图片实测）。
+            env_extra.push(
+                "XDG_DATA_DIRS=/usr/share/easytidy-host:/usr/local/share:/usr/share".to_string(),
+            );
             if let Ok(home) = std::env::var("HOME") {
                 for sub in [".local/share/fonts", ".local/share/icons"] {
                     let p = format!("{home}/{sub}");

@@ -224,8 +224,10 @@ pub fn keep_id_create_body(
         // libpod SpecGenerator 用 "command"（Docker compat 才是 "cmd"）
         "command": cmd,
         // keep-id 下容器进程默认被设为 uid 1000（keep-id 值）——server 必须
-        // 以**容器内 uid 0** 运行才有装包能力（uid 0 → 宿主用户 → 镜像文件属主，
-        // 实测 apt/sudo 可用）；应用层再经 su 到 node（uid 1000，chrome 不掉沙盒）
+        // 以**容器内 uid 0** 运行才有装包能力：容器层文件（镜像+可写层）在宿主
+        // 侧属主 = subuid 100000（rootless podman 容器文件统一归 subuid 区），
+        // 容器 root 的宿主身份恰为该属主 → 能写（apt/sudo 可用，实测）；
+        // 应用层再经 su 到 node（uid 1000 = 宿主用户，chrome 不掉沙盒）
         "user": "0:0",
         "env": env_map,
         "labels": labels,
@@ -236,10 +238,12 @@ pub fn keep_id_create_body(
         "exposed_ports": exposed_ports,
         "port_bindings": port_bindings,
         "working_dir": working_dir,
-        // libpod 专属：keep-id（容器 root = 宿主用户身份）。
-        // 注意：字段放**顶层** userns（实测 namespaces.userns 被忽略）；
-        // 映射语义（podman 5.x）：容器 0 → 宿主用户（uid 值），
-        // 容器 1000（node 用户）→ 宿主 root。
+        // libpod 专属：keep-id。注意：字段放**顶层** userns
+        // （实测 namespaces.userns 被忽略）。
+        // 真实映射语义（实测文件属主，2026-08-07；/proc/self/uid_map 字面
+        // 不代表最终属主）：容器 uid 1000（node）= 宿主登录用户（1000）；
+        // 容器 uid 0（root）= 宿主 subuid 100000（容器文件系统属主，
+        // **不是宿主默认用户**——root 写宿主 home 属主呈现 100000）
         "userns": { "nsmode": "keep-id" }
     })
 }

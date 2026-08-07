@@ -46,7 +46,10 @@ export function PassthroughManager() {
     setError(null);
     try {
       for (const desktopFile of selectedApps) {
-        await invoke('passthrough_export', { desktopFile });
+        // 传整个 app（宿主侧生成 .desktop 需要 name/exec；desktop_file 用于定位与去重）
+        const app = apps.find((a) => a.desktop_file === desktopFile);
+        if (!app) continue;
+        await invoke('passthrough_export', { app });
       }
       await loadData();
     } catch (err: any) {

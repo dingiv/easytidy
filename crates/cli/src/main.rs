@@ -106,6 +106,17 @@ enum Commands {
         container: String,
     },
 
+    /// 撤销 passthrough 导出（删除宿主导出的 .desktop；桌面右键 Remove 用）
+    Unexport {
+        /// 容器名
+        #[arg(long)]
+        container: String,
+
+        /// 容器内 .desktop 路径（passthrough 导出时的应用标识）
+        #[arg(long)]
+        desktop_file: String,
+    },
+
     /// 删除容器
     Rm {
         /// 容器名或 ID
@@ -245,6 +256,10 @@ async fn main() -> Result<()> {
         Commands::Run { container, root, command } => {
             let code = cmd_run(container, command, root).await?;
             std::process::exit(code);
+        }
+        Commands::Unexport { container, desktop_file } => {
+            // 宿主侧操作，无需 podman 连接
+            cmd_unexport(container, desktop_file)
         }
         _ => {
             // 需要 podman 连接的命令
@@ -416,6 +431,13 @@ async fn cmd_stop(podman: Podman, container: String) -> Result<()> {
     podman.stop(&container).await?;
     println!("容器 {} 停止成功", container);
 
+    Ok(())
+}
+
+/// 撤销 passthrough 导出（删除宿主导出的 .desktop；桌面右键 Remove 调用）。
+fn cmd_unexport(container: String, desktop_file: String) -> Result<()> {
+    let removed = easytidy_core::desktop::remove_passthrough(&container, &desktop_file)?;
+    println!("已撤销导出：{}（{}）", desktop_file, removed.display());
     Ok(())
 }
 
@@ -741,9 +763,9 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
     }
 
     // 4. 准备 PTY 打开
-    // 获取当前终端尺寸
-    let (cols, rows) = terminal::size()
-        .context("获取终端尺寸失败")?;
+    // 获取当前终端尺寸；无 tty 场景（桌面图标/CRON 启动，ioctl 返回
+    // EAGAIN——journalctl 实测）回退 80×24，不影响命令执行
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
     // 确定命令：未显式指定时发空 cmd，由容器内 server 默认到 /bin/sh
     // （宿主 $SHELL 不一定存在于容器镜像，如 alpine 无 bash）

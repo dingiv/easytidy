@@ -9,7 +9,7 @@
 //! - Podman（中心化模式，延迟连接）
 //! - GuiSession（单容器模式，socket 会话）
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -24,6 +24,7 @@ use tracing::{debug, error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
+use easytidy_core::flavor::Flavor;
 use easytidy_core::models::{ContainerConfig, ContainerSummary};
 use easytidy_core::podman::Podman;
 use easytidy_protocol::{
@@ -33,7 +34,6 @@ use easytidy_protocol::ops::{
     PtyOpen, PtyOpenResp, PtyResize, PtyClose, PtyExited,
     FsList, FsListResp, FsRead, FsReadResp, FsWrite,
     AppsList, AppsListResp,
-    PtState, PtStateResp, PtExport, PtExportResp, PtRevoke, PtRevokeResp,
     CfgGet, CfgGetResp, CfgSet,
     LifecycleShutdown,
 };
@@ -346,19 +346,266 @@ async fn inspect_container(
 }
 
 // ============================================================================
+// 环境语义面板命令（docs/13-mutable-env-paradigm.md）
+//
+// 五种环境语义：新环境 / 删除环境 / 快照 / fork / 运行·关闭。
+// 引擎语义已由 easytidy-core 实现，此处仅做 GUI 桥接（含 env_rm 的全清理）。
+// ============================================================================
+
+/// 环境视图（前端 env_list 契约）。
+///
+/// status 取值："running"（运行中）/ "exited"、"created"（已停止）/
+/// "missing"（仅注册表配置存在，podman 中无容器）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvView {
+    /// 环境名
+    pub name: String,
+    /// 基础镜像
+    pub image: String,
+    /// 运行状态
+    pub status: String,
+    /// 是否为 easytidy 管理
+    pub managed: bool,
+}
+
+/// 列出可用 flavor 模板（$XDG_CONFIG_HOME/easytidy/flavors/*.toml）。
+#[tauri::command]
+fn flavor_list() -> Result<Vec<String>, String> {
+    Flavor::list().map_err(|e| e.to_string())
+}
+
+/// 列出所有环境（managed 容器 + configfile 注册表合并）。
+#[tauri::command]
+async fn env_list(
+    podman: tauri::State<'_, PodmanState>,
+) -> Result<Vec<EnvView>, String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let containers = p.list_containers().await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+
+    // configfile 注册表：podman 中不存在的配置 → "missing"（仅配置保留）
+    let config_path = ConfigFile::default_path()
+        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_file = ConfigFile::with_path(config_path);
+    let registered = config_file
+        .list_containers()
+        .map_err(|e| format!("读取注册表失败：{}", e))?;
+
+    let mut views: Vec<EnvView> = Vec::new();
+    let mut covered: HashSet<String> = HashSet::new();
+    for c in containers {
+        if !c.managed {
+            continue; // 仅展示 easytidy 管理的环境
+        }
+        covered.insert(c.name.clone());
+        views.push(EnvView {
+            name: c.name,
+            image: c.image,
+            status: c.status,
+            managed: true,
+        });
+    }
+    for cfg in registered {
+        if covered.contains(&cfg.name) {
+            continue;
+        }
+        views.push(EnvView {
+            name: cfg.name,
+            image: cfg.image,
+            status: "missing".to_string(),
+            managed: true,
+        });
+    }
+    views.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(views)
+}
+
+/// 新建环境：flavor 模板展开创建，或指定镜像创建；创建后启动并注册。
+///
+/// 镜像需已拉取（`create_with_config` 对缺失镜像报错，错误信息直接透传）。
+#[tauri::command]
+async fn env_new(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+    flavor: Option<String>,
+    image: Option<String>,
+) -> Result<(), String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+
+    // 配置来源：flavor 模板展开（继承挂载/网络/用户映射/GUI 透传）或直接镜像
+    let config = match flavor {
+        Some(f) => {
+            let flavor = Flavor::load(&f).map_err(|e| e.to_string())?;
+            flavor.build_config(&name).map_err(|e| e.to_string())?
+        }
+        None => {
+            let Some(image) = image else {
+                return Err("新建环境需要提供模板（flavor）或镜像（image）".to_string());
+            };
+            ContainerConfig {
+                name: name.clone(),
+                image: image.clone(),
+                ..Default::default()
+            }
+        }
+    };
+
+    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
+    p.create_with_config(&name, &config.image, &server_bin, &config)
+        .await
+        .map_err(|e| e.to_string())?;
+    p.start(&name).await.map_err(|e| e.to_string())?;
+
+    let config_path = ConfigFile::default_path()
+        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_file = ConfigFile::with_path(config_path);
+    config_file
+        .register_container(config)
+        .map_err(|e| format!("注册环境配置失败：{}", e))?;
+
+    podman.return_podman(p).await;
+    info!("新环境 {} 已创建并运行", name);
+    Ok(())
+}
+
+/// 删除环境：容器 + 注册配置 + 桌面图标 + socket 目录全清理。
+///
+/// 快照镜像为独立资产，删除时保留（可被 fork 复用）。
+#[tauri::command]
+async fn env_rm(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+) -> Result<(), String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    p.remove(&name, true).await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+
+    // 清理注册配置（失败仅告警，不阻断删除）
+    let config_path = ConfigFile::default_path()
+        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_file = ConfigFile::with_path(config_path);
+    if let Err(e) = config_file.unregister_container(&name) {
+        warn!("注销环境 {} 配置失败（忽略）：{}", name, e);
+    }
+    // 清理桌面图标
+    if let Err(e) = desktop::uninstall_desktop_entry(&name) {
+        debug!("清理环境 {} 桌面图标失败（忽略）：{}", name, e);
+    }
+    // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>）
+    if let Ok(sock) = easytidy_core::host_socket_path(&name) {
+        if let Some(dir) = sock.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    info!("环境 {} 已删除（快照镜像保留为独立资产）", name);
+    Ok(())
+}
+
+/// 快照：commit 当前容器文件系统层为快照镜像 `easytidy/snapshot/<name>-<tag>`。
+///
+/// 默认标签 = 时间戳；返回快照镜像名（前端展示/复用）。
+#[tauri::command]
+async fn env_snapshot(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+    tag: Option<String>,
+) -> Result<String, String> {
+    let tag = tag.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs().to_string())
+            .unwrap_or_else(|_| "now".to_string())
+    });
+
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let image_ref = p.snapshot(&name, &tag).await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+
+    info!("环境 {} 快照完成：{}", name, image_ref);
+    Ok(image_ref)
+}
+
+/// fork：从快照镜像派生新环境，继承源环境的全部配置（仅镜像换成快照）。
+#[tauri::command]
+async fn env_fork(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+    snapshot: String,
+    new_name: String,
+) -> Result<(), String> {
+    // 读源环境配置
+    let config_path = ConfigFile::default_path()
+        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_file = ConfigFile::with_path(config_path);
+    let mut config = config_file
+        .get_container(&name)
+        .map_err(|e| format!("读取源环境配置失败：{}", e))?
+        .ok_or_else(|| format!("源环境 {} 不在注册表中（请先创建该环境）", name))?;
+
+    // 快照镜像：easytidy/snapshot/<name>-<snapshot>
+    let image_ref = format!("easytidy/snapshot/{name}-{snapshot}");
+    config.name = new_name.clone();
+    config.image = image_ref.clone();
+
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
+    p.create_with_config(&new_name, &image_ref, &server_bin, &config)
+        .await
+        .map_err(|e| e.to_string())?;
+    p.start(&new_name).await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+
+    config_file
+        .register_container(config)
+        .map_err(|e| format!("注册新环境配置失败：{}", e))?;
+
+    info!("新环境 {} 已从快照 {} 派生并运行", new_name, snapshot);
+    Ok(())
+}
+
+/// 运行环境（start）。
+#[tauri::command]
+async fn env_start(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+) -> Result<(), String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    p.start(&name).await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+    Ok(())
+}
+
+/// 关闭环境（stop；环境保留，可随时恢复运行）。
+#[tauri::command]
+async fn env_stop(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+) -> Result<(), String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    p.stop(&name).await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+    Ok(())
+}
+
+// ============================================================================
 // 配置管理器命令（M4 前置：mount 管理 + 网络映射管理；改配置 = 重建容器）
 // ============================================================================
 
-/// 获取容器配置（configfile 期望配置 + podman inspect 当前生效状态）。
+/// 获取容器配置（configfile 期望配置 + podman inspect 当前生效状态 + 宿主用户）。
 ///
 /// 返回（前端契约）：
 /// ```json
 /// { "config": { "name","image","entry","silent_boot","persistent",
 ///                "mounts":[{"host_path","container_path","read_only"}],
-///                "network":{"mode":"host"|"mapped","ports":[{"host_port","container_port","protocol"}]} },
-///   "effective": { "mounts":[...同形状...], "network": {...} } }
+///                "network":{"mode":"host"|"mapped","ports":[...]},
+///                "env":["K=V"], "user_home":true },
+///   "effective": { "mounts":[...], "network":{...}, "env":["K=V"],
+///                  "user":"0:0"|null, "userns_mode":"keep-id"|null },
+///   "host_user": { "name","uid","gid","home" } | null }
 /// ```
-/// `effective` 为 `null` 表示容器尚未创建（仅 configfile 有记录）或 podman 不可达。
+/// `effective` 为 `null` 表示容器尚未创建（仅 configfile 有记录）或 podman 不可达；
+/// `host_user` 为 `null` 表示宿主用户探测失败（容器降级 root 运行，UI 需展示）。
 #[tauri::command]
 async fn get_container_config(name: String) -> Result<serde_json::Value, String> {
     // configfile 期望配置
@@ -388,6 +635,8 @@ async fn get_container_config(name: String) -> Result<serde_json::Value, String>
     Ok(serde_json::json!({
         "config": serde_json::to_value(config).map_err(|e| e.to_string())?,
         "effective": effective,
+        // 宿主用户（uid 映射语义对照表数据源；null = 探测失败，容器降级 root）
+        "host_user": serde_json::to_value(easytidy_core::userenv::host_user()).map_err(|e| e.to_string())?,
     }))
 }
 
@@ -835,6 +1084,41 @@ async fn pty_close(
     Ok(())
 }
 
+/// 心跳保活（走该 PTY 专用连接发 ping 帧）。
+///
+/// server 对无帧连接有 idle 超时（有 PTY 的连接 1h）——终端长时间无输出
+/// 时靠心跳维持连接，否则连接被回收后输入永久失效（前端无法感知）。
+/// ping 响应由 pty_open 的 reader 任务消费（非 pty.exited 的 JSON 忽略）。
+#[tauri::command]
+async fn pty_ping(
+    session: tauri::State<'_, Option<GuiSession>>,
+    stream_id: u32,
+) -> Result<(), String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    // 流已关闭时静默忽略（ping 可能在退出竞态中触发）
+    let maybe_sink = {
+        let active = sess.active_ptys.lock().await;
+        active.get(&stream_id).cloned()
+    };
+    let Some(sink) = maybe_sink else {
+        return Ok(());
+    };
+
+    sink.lock()
+        .await
+        .send(Frame::Json(Message {
+            id: 0,
+            kind: MsgKind::Req,
+            op: "ping".to_string(),
+            payload: serde_json::Value::Null,
+            err: None,
+        }))
+        .await
+        .map_err(|e| format!("ping 发送失败：{}", e))?;
+    Ok(())
+}
+
 // ============================================================================
 // 文件系统命令
 // ============================================================================
@@ -922,6 +1206,9 @@ pub struct AppInfoFrontend {
     pub exec: String,
     pub comment: Option<String>,
     pub desktop_file: String,
+    pub categories: Option<String>,
+    pub startup_notify: bool,
+    pub startup_wm_class: Option<String>,
 }
 
 /// 列出桌面应用
@@ -944,92 +1231,204 @@ async fn apps_list(
         exec: a.exec,
         comment: a.comment,
         desktop_file: a.desktop_file,
+        categories: a.categories,
+        startup_notify: a.startup_notify,
+        startup_wm_class: a.startup_wm_class,
     }).collect();
 
     Ok(apps)
 }
 
 // ============================================================================
-// Passthrough 命令
+// Passthrough 命令（宿主本地实现）
+//
+// passthrough 语义：把容器内应用导出为宿主 .desktop
+// （Exec = easytidy --container <name> run -- <exec>，经 server socket 拉起
+// 应用）。⚠️ 必须在宿主本地生成——server 在容器内无法写宿主 .desktop；
+// M2 曾把这三个操作走 server socket（server 无 passthrough.* 操作），
+// GUI 调用必报 unknown_op（2026-08-07 实测）。导出文件标记
+// X-easytidy-pt=1 + X-easytidy-container=<name> + X-easytidy-app=<容器内路径>，
+// 供 state 枚举与 revoke 定位。
 // ============================================================================
 
-/// Passthrough 状态条目（前端）
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PtEntryFrontend {
-    pub desktop_file: String,
-    pub menu: bool,
-    pub silent_boot: bool,
-    pub generated_path: String,
+/// 宿主 CLI 绝对路径（passthrough .desktop 的 Exec/TryExec 用）。
+///
+/// 探测顺序：① GUI 同目录的 easytidy（开发布局 target/debug 共存）；
+/// ② 安装目录 ~/.local/share/easytidy/bin/easytidy（部署布局）；
+/// ③ PATH 中的 easytidy。宿主 PATH 未必有 easytidy（实测未安装），
+/// 必须给出绝对路径，否则桌面入口无法启动。
+fn cli_path() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("easytidy");
+            if sibling.exists() {
+                return sibling.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if let Some(data) = dirs::data_local_dir() {
+        let installed = data.join("easytidy/bin/easytidy");
+        if installed.exists() {
+            return installed.to_string_lossy().into_owned();
+        }
+    }
+    "easytidy".to_string()
 }
 
-/// 获取 passthrough 状态
+/// 经 server fs.read 拉取容器内文件（passthrough 图标搬运；失败返回 Err，
+/// 调用方应忽略——图标缺失仅影响显示，不影响导出）
+async fn fetch_container_file(
+    sess: &GuiSession,
+    path: &str,
+) -> Result<Vec<u8>, String> {
+    let read_req = FsRead {
+        path: path.to_string(),
+        offset: None,
+        len: None,
+    };
+    let resp = send_json_request(
+        sess,
+        "fs.read".to_string(),
+        serde_json::to_value(read_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    let read_resp: FsReadResp = serde_json::from_value(resp.payload)
+        .map_err(|e| format!("解析 fs.read 响应失败：{e}"))?;
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(read_resp.data_b64)
+        .map_err(|e| format!("图标 base64 解码失败：{e}"))
+}
+
+/// 获取 passthrough 状态（宿主枚举已导出 .desktop）
 #[tauri::command]
 async fn passthrough_state(
     session: tauri::State<'_, Option<GuiSession>>,
-) -> Result<Vec<PtEntryFrontend>, String> {
+) -> Result<serde_json::Value, String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-
-    let resp = send_json_request(sess, "passthrough.state".to_string(),
-        serde_json::to_value(PtState).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
-
-    let state_resp: PtStateResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 passthrough.state 响应失败：{}", e))?;
-
-    let entries: Vec<PtEntryFrontend> = state_resp.entries.into_iter().map(|e| PtEntryFrontend {
-        desktop_file: e.desktop_file,
-        menu: e.menu,
-        silent_boot: e.silent_boot,
-        generated_path: e.generated_path,
-    }).collect();
-
-    Ok(entries)
+    let exported_apps = easytidy_core::desktop::list_passthrough(&sess.container_name)
+        .map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({
+        "exported_apps": exported_apps,
+        "auto_start_enabled": false, // 静默启动 passthrough（M4）未实现
+    }))
 }
 
-/// 导出 passthrough 应用
+/// 导出 passthrough 应用（宿主生成 .desktop：应用菜单 + 桌面图标。
+/// distrobox 风格 TryExec/GenericName/Keywords/Actions=Remove；桌面图标
+/// 经 chmod +x + `gio metadata::trusted` 信任标记（GNOME 双击必需）。
+/// 生成逻辑在 core::desktop::write_passthrough，CLI unexport 与其共用）
 #[tauri::command]
 async fn passthrough_export(
     session: tauri::State<'_, Option<GuiSession>>,
-    desktop_file: String,
+    app: AppInfoFrontend,
+    // 同时创建桌面图标（GNOME 桌面默认不显示应用菜单，入口在桌面路径）
+    desktop_icon: Option<bool>,
 ) -> Result<String, String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = sess.container_name.clone();
 
-    let export_req = PtExport {
-        desktop_file: desktop_file.clone(),
-        menu: true,
-        silent_boot: false,
+    // Exec 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数）
+    let exec = app
+        .exec
+        .split_whitespace()
+        .filter(|w| !w.starts_with('%'))
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // 图标搬运：容器内图标经 server fs.read 拉取 → 宿主 hicolor 缓存
+    let mut icon_attr = None;
+    if let Some(icon_path) = app.icon_path.as_ref() {
+        if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
+            if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
+                if std::fs::create_dir_all(&icons_dir).is_ok() {
+                    let base = app
+                        .desktop_file
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or("app")
+                        .trim_end_matches(".desktop");
+                    let safe: String = base
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                        .collect();
+                    let ext = icon_path.rsplit('.').next().unwrap_or("png");
+                    let icon_file =
+                        icons_dir.join(format!("easytidy-pt-{container}-{safe}.{ext}"));
+                    if std::fs::write(&icon_file, &icon_data).is_ok() {
+                        icon_attr = Some(icon_file.to_string_lossy().into_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    let spec = easytidy_core::desktop::PassthroughSpec {
+        container: container.clone(),
+        app_name: app.name,
+        comment: app.comment,
+        categories: app.categories,
+        exec,
+        icon: icon_attr,
+        desktop_file: app.desktop_file,
+        cli_path: cli_path(),
+        startup_notify: app.startup_notify,
+        startup_wm_class: app.startup_wm_class,
     };
+    let menu_path = easytidy_core::desktop::write_passthrough(&spec, desktop_icon.unwrap_or(true))
+        .map_err(|e| e.to_string())?;
+    info!("passthrough 导出：{} → {:?}", spec.desktop_file, menu_path);
 
-    let resp = send_json_request(sess, "passthrough.export".to_string(),
-        serde_json::to_value(export_req).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
-
-    let export_resp: PtExportResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 passthrough.export 响应失败：{}", e))?;
-
-    Ok(export_resp.generated_path)
+    Ok(menu_path.to_string_lossy().into_owned())
 }
 
-/// 撤销 passthrough 导出
+/// 撤销 passthrough 导出（宿主删除对应 .desktop）
 #[tauri::command]
 async fn passthrough_revoke(
     session: tauri::State<'_, Option<GuiSession>>,
     desktop_file: String,
 ) -> Result<String, String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let removed = easytidy_core::desktop::remove_passthrough(&sess.container_name, &desktop_file)
+        .map_err(|e| e.to_string())?;
+    Ok(removed.to_string_lossy().into_owned())
+}
 
-    let revoke_req = PtRevoke {
-        desktop_file: desktop_file.clone(),
-    };
+/// 导出本容器的 GUI 管理界面桌面快捷方式（菜单 + 桌面图标）。
+///
+/// Exec = 当前 GUI 二进制 --container <name>（per-container 模式），
+/// TryExec 同；内置品牌 SVG 图标；桌面副本 chmod +x + gio trusted。
+/// 返回应用菜单路径。
+#[tauri::command]
+async fn export_gui_shortcut(
+    session: tauri::State<'_, Option<GuiSession>>,
+    desktop_icon: Option<bool>,
+) -> Result<String, String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    let resp = send_json_request(sess, "passthrough.revoke".to_string(),
-        serde_json::to_value(revoke_req).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    // 当前进程即 GUI 二进制（per-container 模式入口）；current_exe 失败
+    // 回退命令行 argv[0]，再不行报错（Exec 必须绝对路径）
+    let gui_path = std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(|| std::env::args().next())
+        .ok_or_else(|| "无法确定 GUI 可执行路径".to_string())?;
 
-    let revoke_resp: PtRevokeResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 passthrough.revoke 响应失败：{}", e))?;
-
-    Ok(revoke_resp.removed_path)
+    let menu_path = easytidy_core::desktop::write_gui_entry(
+        &sess.container_name,
+        &gui_path,
+        desktop_icon.unwrap_or(true),
+    )
+    .map_err(|e| e.to_string())?;
+    info!(
+        "GUI 入口导出：{} → {:?}",
+        sess.container_name, menu_path
+    );
+    Ok(menu_path.to_string_lossy().into_owned())
 }
 
 // ============================================================================
@@ -1133,6 +1532,15 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             inspect_container,
             build_server,
             open_container_window,
+            // 环境语义面板（docs/13-mutable-env-paradigm.md）
+            flavor_list,
+            env_list,
+            env_new,
+            env_rm,
+            env_snapshot,
+            env_fork,
+            env_start,
+            env_stop,
             // 配置管理器（M4 前置）
             get_container_config,
             apply_container_config,
@@ -1141,6 +1549,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             pty_write,
             pty_resize,
             pty_close,
+            pty_ping,
             // 单容器模式 - 文件系统
             fs_list,
             fs_read,
@@ -1151,6 +1560,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             passthrough_state,
             passthrough_export,
             passthrough_revoke,
+            export_gui_shortcut,
             // 单容器模式 - 配置
             config_get,
             config_set,

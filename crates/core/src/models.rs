@@ -137,16 +137,28 @@ impl Default for ContainerConfig {
     }
 }
 
-/// 容器配置视图（`Podman::inspect_config` 投影：当前生效的 mounts / 网络）。
+/// 容器配置视图（`Podman::inspect_config` 投影：当前生效的 mounts / 网络 / env）。
 ///
-/// 与 [`ContainerConfig`] 同形状，但来自 podman inspect 的实际状态，
-/// 供 GUI "当前生效" 面板与 configfile 期望配置对比。
+/// 与 [`ContainerConfig`] 同形状（不含 entry/silent_boot/persistent——这些无
+/// "生效"概念），但来自 podman inspect 的实际状态，供 GUI "当前生效" 面板与
+/// configfile 期望配置对比。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerConfigView {
     /// 当前生效的 bind mounts（含 engine 内部挂载：server 二进制 + socket 目录）
     pub mounts: Vec<MountConfig>,
     /// 当前生效的网络配置
     pub network: NetworkConfig,
+    /// 当前生效的环境变量（含系统注入 `EASYTIDY_USER_*` 与 podman 自动
+    /// 补的 PATH/HOSTNAME/TERM/HOME——GUI 对比时需过滤后子集比较）
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// 容器进程用户（inspect `Config.User`；keep-id 下为 "0:0"，未设则 None）
+    #[serde(default)]
+    pub user: Option<String>,
+    /// userns 模式（inspect `HostConfig.UsernsMode`；keep-id 容器实际回显
+    /// 可能为 "private" 或 None——语义以 `user_home` 配置 + docs/12 为准）
+    #[serde(default)]
+    pub userns_mode: Option<String>,
 }
 
 #[cfg(test)]
@@ -168,6 +180,18 @@ persistent = true
         assert!(config.mounts.is_empty());
         assert_eq!(config.network.mode, NetworkMode::Host);
         assert!(config.network.ports.is_empty());
+        assert!(config.env.is_empty());
+        assert!(config.user_home);
+    }
+
+    #[test]
+    fn test_config_view_new_fields_defaults() {
+        // 旧 JSON（无 env/user/userns_mode 字段）→ 空 env + None
+        let view: ContainerConfigView =
+            serde_json::from_str(r#"{"mounts":[],"network":{"mode":"host","ports":[]}}"#).unwrap();
+        assert!(view.env.is_empty());
+        assert_eq!(view.user, None);
+        assert_eq!(view.userns_mode, None);
     }
 
     #[test]

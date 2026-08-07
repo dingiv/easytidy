@@ -20,6 +20,21 @@ export function PerContainer({ containerName }: PerContainerProps) {
     }
   };
 
+  const [exporting, setExporting] = useState(false);
+
+  /** 导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面，双击打开此管理界面） */
+  const handleExportGuiShortcut = async () => {
+    setExporting(true);
+    try {
+      const path = await invoke<string>('export_gui_shortcut');
+      console.log('GUI shortcut exported:', path);
+    } catch (err) {
+      console.error('export_gui_shortcut failed:', err);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (
     <div className="per-container app">
       {/* Menu bar */}
@@ -28,6 +43,9 @@ export function PerContainer({ containerName }: PerContainerProps) {
         <nav className="menu-items">
           <button className="menu-item" onClick={() => window.location.reload()}>
             Back to Centralized
+          </button>
+          <button className="menu-item" onClick={handleExportGuiShortcut} disabled={exporting}>
+            {exporting ? '导出中…' : '导出桌面图标'}
           </button>
           <button className="menu-item danger" onClick={handleCloseContainer}>
             Close Container
@@ -67,21 +85,17 @@ export function PerContainer({ containerName }: PerContainerProps) {
           </div>
 
           <div className="tab-content">
-            {activeTab === 'terminal' && (
-              <div className="tab-pane terminal-pane">
-                <Terminal />
-              </div>
-            )}
-            {activeTab === 'passthrough' && (
-              <div className="tab-pane">
-                <PassthroughManager />
-              </div>
-            )}
-            {activeTab === 'config' && (
-              <div className="tab-pane">
-                <ConfigManager containerName={containerName} />
-              </div>
-            )}
+            {/* 三 tab 常驻渲染、display 切换：终端组件不卸载——
+                卸载重建会丢 shell 会话且掩盖连接/焦点问题（2026-08-07 实测） */}
+            <div className="tab-pane terminal-pane" style={{ display: activeTab === 'terminal' ? undefined : 'none' }}>
+              <Terminal />
+            </div>
+            <div className="tab-pane" style={{ display: activeTab === 'passthrough' ? undefined : 'none' }}>
+              <PassthroughManager />
+            </div>
+            <div className="tab-pane" style={{ display: activeTab === 'config' ? undefined : 'none' }}>
+              <ConfigManager containerName={containerName} />
+            </div>
           </div>
         </section>
       </main>

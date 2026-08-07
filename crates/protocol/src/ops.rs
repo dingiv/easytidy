@@ -194,6 +194,15 @@ pub struct AppInfo {
     /// 描述（可选）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comment: Option<String>,
+    /// Categories（.desktop，逗号分隔；passthrough 导出时原样带出）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub categories: Option<String>,
+    /// StartupNotify（.desktop，默认 false）
+    #[serde(default)]
+    pub startup_notify: bool,
+    /// StartupWMClass（.desktop；Wayland 窗口匹配用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_wm_class: Option<String>,
 }
 
 /// 获取应用图标数据

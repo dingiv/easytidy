@@ -36,7 +36,7 @@ rootless podman 下每个容器运行在自己的 user namespace 中。默认映
 |---|---|---|---|---|
 | 默认 rootless + 建 uid-1000 用户 | ❌（映射 subuid 101000） | ✅ | ❌（读不了 /run/user/1000） | 失败 |
 | keep-id + 用户 1000 | ✅ | ❌（容器 root 写不了镜像 root 文件） | ✅ | 装包挂 |
-| keep-id + server 以 uid 0 + 应用 su node | ✅ | ✅（server uid 0 = 宿主用户 = 镜像属主） | ✅ | **采用** |
+| keep-id + server 以 uid 0 + 应用 su node | ✅ | ✅（server uid 0 = 容器层文件属主，宿主侧 subuid 100000） | ✅ | **采用** |
 
 ## 4. keep-id 的真实映射语义（实证）
 
@@ -76,7 +76,8 @@ network: host（默认，端口映射可选 mapped）
 
 ### 运行（server 启动时）
 
-1. server 以容器内 uid 0（=宿主用户）运行 → 装包/setup 可用
+1. server 以容器内 uid 0 运行（容器层文件属主，宿主侧 subuid 100000；**不是宿主
+   默认用户 1000**）→ 装包/setup 可用
 2. 用户映射 setup：创建容器内用户 `node`（uid/gid = 宿主值，名字不同）；
    ubuntu 镜像 uid 1000 默认用户经 usermod 重命名对齐
 3. 免密 sudo：写 `/etc/sudoers.d/easytidy-node`（`NOPASSWD: ALL`），
@@ -89,9 +90,14 @@ network: host（默认，端口映射可选 mapped）
 
 | 场景 | 容器内身份 | 宿主身份 | 备注 |
 |---|---|---|---|
-| 应用默认 | node（uid 1000） | 宿主登录用户（1000） | chrome 沙盒完整、宿主 home 直读写、显示可用 |
-| setup/装包 | root（uid 0） | 宿主登录用户 | `--root` 或免密 sudo；能写容器系统文件 |
-| 提升通道 | sudo → root | 宿主登录用户 | 免密 |
+| 应用默认 | node（uid 1000） | **宿主登录用户（1000）** | chrome 沙盒完整、宿主 home 直读写（属主 1000）、显示可用 |
+| setup/装包 | root（uid 0） | **宿主 subuid 100000**（容器文件系统属主；⚠️ 不是宿主默认用户） | `--root` 或免密 sudo；能写容器系统文件；写宿主 home 属主呈现 100000 |
+| 提升通道 | sudo → root | 宿主 subuid 100000 | 免密 |
+
+> ⚠️ 2026-08-07 修正：曾误写"容器 root = 宿主登录用户"。准确语义：
+> keep-id 下 **容器 uid 1000 = 宿主 1000**（文件属主实证），而 **容器 uid 0 =
+> 宿主 subuid 100000**——容器 root 能装包是因为它正好是容器层文件（镜像+可写层，
+> rootless 下宿主侧统一 subuid 属主）的属主，与宿主默认用户无关。
 
 ## 6. 实现要点与踩坑（libpod 端点）
 

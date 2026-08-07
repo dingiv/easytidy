@@ -5,7 +5,8 @@
 //! `su` 以该用户拉起应用——避免容器内 root 读写宿主挂载目录的权限问题。
 
 /// 宿主用户信息（当前进程实际身份对应的用户）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `Serialize`：GUI 配置管理器"用户"面板展示宿主身份（uid 映射语义对照表数据源）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HostUser {
     /// 用户名（/etc/passwd 中 uid 对应的登录名）
     pub name: String,

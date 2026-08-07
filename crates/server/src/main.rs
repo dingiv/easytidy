@@ -122,10 +122,11 @@ static USER_MAP: OnceLock<UserMap> = OnceLock::new();
 
 /// 当前生效的用户映射。
 ///
-/// 默认 shell/应用的常规身份恒为容器内 node 用户（uid/gid 对齐宿主，名字不同）。
-/// 注：rootless podman 下容器 uid 1000 → 宿主 subuid（100000+），名义对齐；
-/// 宿主 /run/user/1000 等显示 socket 对 node 用户只读不可达——GUI 应用如需
-/// 宿主显示权限，可用 `run --root`（容器 root = 宿主用户身份）或免密 sudo。
+/// 默认 shell/应用的常规身份恒为容器内 node 用户（uid/gid 与宿主真实对齐，
+/// 名字不同）。keep-id 语义（实测文件属主）：node（uid 1000）= 宿主登录
+/// 用户（读宿主 /run/user/1000 显示 socket、写宿主 home 属主 1000）；
+/// 容器 root（uid 0）= 容器层文件属主（宿主侧 subuid 100000，**不是宿主
+/// 默认用户**）——装包身份，`run --root` 或免密 sudo 进入。
 fn user_map() -> Option<&'static UserMap> {
     USER_MAP.get()
 }
@@ -286,6 +287,37 @@ async fn setup_user_mapping() -> bool {
     true
 }
 
+/// 修正 XDG_DATA_DIRS 值，确保包含系统默认数据目录。
+///
+/// 背景：旧版 flavor 注入 `XDG_DATA_DIRS=/usr/share/easytidy-host`（纯覆盖），
+/// gdk-pixbuf 2.42 经 `$XDG_DATA_DIRS/gdk-pixbuf-2.0/2.10.0/loaders.cache`
+/// 查找 loader 注册表，覆盖后系统 cache 不可达 → 容器内 PNG 图标解码失败
+/// （"Unrecognized image file format"）→ GTK 文件选择器断言崩溃（实测 Chrome
+/// 保存图片）。mime 数据库（$XDG_DATA_DIRS/mime）同理受影响。追加 glib 默认
+/// 的 /usr/local/share:/usr/share（容器内缺失路径无害）。
+fn fixup_xdg_data_dirs_value(v: &str) -> String {
+    let mut merged = v.to_string();
+    for p in ["/usr/local/share", "/usr/share"] {
+        if !merged.split(':').any(|c| c == p) {
+            merged.push(':');
+            merged.push_str(p);
+        }
+    }
+    merged
+}
+
+/// 修正 server 进程自身的 XDG_DATA_DIRS（子进程继承）。
+fn fixup_xdg_data_dirs() {
+    let Ok(v) = std::env::var("XDG_DATA_DIRS") else {
+        return;
+    };
+    let merged = fixup_xdg_data_dirs_value(&v);
+    if merged != v {
+        std::env::set_var("XDG_DATA_DIRS", &merged);
+        info!("XDG_DATA_DIRS 已修正（追加系统默认）: {merged}");
+    }
+}
+
 /// 宿主字体接入 fontconfig。
 ///
 /// flavor `gui=true` 把宿主 `/usr/share/fonts` 与 `~/.local/share/fonts` 只读挂载到
@@ -412,6 +444,12 @@ fn build_su_command(cmd: &str, argv: &[String]) -> String {
 async fn main() -> Result<()> {
     // Parse arguments
     let args = Args::parse();
+
+    // XDG_DATA_DIRS 防御性修正：旧版 flavor 注入纯覆盖值 /usr/share/easytidy-host，
+    // 容器内 gdk-pixbuf 找不到系统 loaders.cache → PNG 图标解码失败 → GTK 断言
+    // 崩溃（2026-08-07 Chrome 保存图片实测）。对 env 已固化的旧容器追加系统
+    // 默认目录（/usr/local/share:/usr/share，glib 默认；缺失路径无害）。
+    fixup_xdg_data_dirs();
 
     // Initialize tracing
     let env_filter = EnvFilter::from_default_env()
@@ -561,6 +599,30 @@ async fn handle_connection(
     // 本连接打开的 PTY 流：有活跃 PTY 时跳过空闲超时（交互 shell 会长时间无输入）
     let mut conn_ptys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
+    // 主循环包在内层函数：无论以何种方式退出（break / `?` 错误 / 超时），
+    // 外层统一清理本连接打开的 PTY 会话（防 su/-bash 孤儿泄漏）
+    let result = connection_loop(
+        &mut framed,
+        &state,
+        &event_tx,
+        &mut event_rx,
+        &handshake_done,
+        &mut conn_ptys,
+    )
+    .await;
+    close_conn_ptys(&state, &conn_ptys).await;
+    result
+}
+
+/// 单连接主循环（见 [`handle_connection`]：退出后统一清理 PTY 会话）。
+async fn connection_loop(
+    framed: &mut Framed<UnixStream, easytidy_protocol::frame::FrameCodec>,
+    state: &Arc<ServerState>,
+    event_tx: &mpsc::UnboundedSender<Frame>,
+    event_rx: &mut mpsc::UnboundedReceiver<Frame>,
+    handshake_done: &Arc<AtomicBool>,
+    conn_ptys: &mut std::collections::HashSet<u32>,
+) -> Result<()> {
     // Main connection loop
     loop {
         if state.shutting_down.load(Ordering::SeqCst) {
@@ -589,8 +651,8 @@ async fn handle_connection(
                                 let req_payload = msg.payload.clone();
                                 let response = handle_message(
                                     msg,
-                                    &state,
-                                    &handshake_done,
+                                    state,
+                                    handshake_done,
                                     event_tx_clone,
                                 ).await?;
 
@@ -616,7 +678,7 @@ async fn handle_connection(
                             }
                             Frame::Raw { stream_id, data } => {
                                 // Forward raw data to PTY
-                                handle_raw_data(stream_id, &data, &state).await?;
+                                handle_raw_data(stream_id, &data, state).await?;
                             }
                         }
                     }
@@ -650,6 +712,27 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+/// 连接退出时清理本连接打开的 PTY 会话。
+///
+/// ⚠️ 泄漏修复（2026-08-07 实测）：GUI 切 tab 卸载 Terminal → 连接断开，
+/// 但此前从不清理会话 → `su - node` / `-bash` 成对残留（13 对实测）。
+/// remove → session drop → PTY writer 关闭 → 子进程 SIGHUP 退出 → catatonit 收割。
+async fn close_conn_ptys(state: &Arc<ServerState>, conn_ptys: &std::collections::HashSet<u32>) {
+    if conn_ptys.is_empty() {
+        return;
+    }
+    let mut sessions = state.sessions.write().await;
+    let mut closed = 0;
+    for sid in conn_ptys {
+        if sessions.remove(sid).is_some() {
+            closed += 1;
+        }
+    }
+    if closed > 0 {
+        info!("连接退出，清理 {closed} 个 PTY 会话");
+    }
 }
 
 /// Handle a JSON message
@@ -856,9 +939,15 @@ async fn handle_pty_open(
         b
     };
 
-    // Set environment variables
+    // Set environment variables。XDG_DATA_DIRS 必须含系统默认目录（旧 flavor 注入
+    // 纯覆盖值导致 gdk-pixbuf 找不到系统 loaders.cache，PNG 图标解码失败、GTK
+    // 断言崩溃——Chrome 保存图片实测），此处对固化 env 做防御性修正。
     for (k, v) in &req.env {
-        cmd_builder.env(k, v);
+        if k == "XDG_DATA_DIRS" {
+            cmd_builder.env(k, fixup_xdg_data_dirs_value(v));
+        } else {
+            cmd_builder.env(k, v);
+        }
     }
 
     // Set working directory
@@ -1339,6 +1428,9 @@ fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
     let mut exec = None;
     let mut comment = None;
     let mut no_display = false;
+    let mut categories = None;
+    let mut startup_notify = false;
+    let mut startup_wm_class = None;
 
     for line in content.lines() {
         let line = line.trim();
@@ -1352,10 +1444,15 @@ fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
 
             match key {
                 "Name" => name = Some(value.to_string()),
-                "Icon" => icon_path = Some(value.to_string()),
+                // Icon 常为主题名（如 "google-chrome"）而非路径——解析成实际
+                // 图标文件，宿主 passthrough 才能搬运；解析失败保留原值
+                "Icon" => icon_path = resolve_icon_path(value).or(Some(value.to_string())),
                 "Exec" => exec = Some(value.to_string()),
                 "Comment" => comment = Some(value.to_string()),
                 "NoDisplay" => no_display = value == "true",
+                "Categories" => categories = Some(value.to_string()),
+                "StartupNotify" => startup_notify = value == "true",
+                "StartupWMClass" => startup_wm_class = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -1374,7 +1471,44 @@ fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
         icon_path,
         exec,
         comment,
+        categories,
+        startup_notify,
+        startup_wm_class,
     })
+}
+
+/// 把 .desktop 的 Icon 值解析为容器内实际图标文件路径。
+///
+/// Icon= 常为主题名（如 "google-chrome"）而非路径，按图标主题标准位置
+/// 依次探测（hicolor 多尺寸 + Adwaita + pixmaps，svg/png 均试）；已是
+/// 绝对路径或相对路径则原样返回。解析失败返回 None（保留原值显示）。
+fn resolve_icon_path(icon: &str) -> Option<String> {
+    if icon.starts_with('/') || icon.contains('/') {
+        return Some(icon.to_string());
+    }
+    let (base, exts): (&str, &[&str]) = if icon.ends_with(".svg") || icon.ends_with(".png") {
+        (icon.trim_end_matches(".svg").trim_end_matches(".png"), &["svg", "png"])
+    } else {
+        (icon, &["svg", "png"])
+    };
+    let sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "24x24", "16x16"];
+    for size in sizes {
+        for ext in exts {
+            for theme_root in ["/usr/share/icons/hicolor", "/usr/share/icons/Adwaita"] {
+                let p = format!("{theme_root}/{size}/apps/{base}.{ext}");
+                if Path::new(&p).exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    for ext in exts {
+        let p = format!("/usr/share/pixmaps/{base}.{ext}");
+        if Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Handle apps.getIcon

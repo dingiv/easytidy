@@ -501,6 +501,20 @@ impl Podman {
             ports.sort_by_key(|p| p.container_port);
         }
 
+        // env（含系统注入 EASYTIDY_USER_* 与 podman 自动补的 PATH/HOSTNAME/TERM/HOME——
+        // GUI 对比时过滤后子集比较，见 ConfigManager.tsx envRestartEqual）
+        let env = info
+            .config
+            .as_ref()
+            .and_then(|c| c.env.clone())
+            .unwrap_or_default();
+
+        // 容器进程用户（keep-id 分支 create 时写 "0:0"）
+        let user = info.config.as_ref().and_then(|c| c.user.clone());
+
+        // userns 模式（keep-id 容器实际可能回显 "private"/None——语义以 user_home + docs/12 为准）
+        let userns_mode = info.host_config.as_ref().and_then(|h| h.userns_mode.clone());
+
         Ok(ContainerConfigView {
             mounts,
             network: NetworkConfig {
@@ -511,6 +525,9 @@ impl Podman {
                 },
                 ports,
             },
+            env,
+            user,
+            userns_mode,
         })
     }
 

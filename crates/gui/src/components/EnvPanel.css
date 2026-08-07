@@ -1,0 +1,122 @@
+/* 环境语义面板（docs/13-mutable-env-paradigm.md） */
+
+/* Tabs 占满剩余高度，内容区滚动（Centralized 容器 | 环境 双页签） */
+.centralized-tabs {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.centralized-tabs .ant-tabs-content-holder {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.centralized-tabs .ant-tabs-content,
+.centralized-tabs .ant-tabs-tabpane {
+  height: 100%;
+}
+
+/* 面板主体 */
+.env-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.env-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+
+.env-panel-title {
+  margin: 0 !important;
+}
+
+.env-panel-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+}
+
+.spin-block {
+  height: 120px;
+}
+
+/* 环境卡片列表 */
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+
+.env-card {
+  border-color: #45475a;
+}
+
+.env-card-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.env-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.env-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.env-name {
+  font-size: 1.05rem;
+}
+
+.env-image {
+  max-width: 480px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.env-actions {
+  flex-shrink: 0;
+}
+
+/* 弹窗表单 */
+.env-modal-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 4px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-field label {
+  font-size: 0.85rem;
+  color: #a6adc8;
+}
+
+.env-hint {
+  margin-bottom: 0;
+}

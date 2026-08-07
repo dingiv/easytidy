@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { Tabs } from 'antd';
 import type { ContainerSummary } from '../types';
+import { EnvPanel } from './EnvPanel';
 
 export function Centralized() {
   const [containers, setContainers] = useState<ContainerSummary[]>([]);
@@ -107,128 +109,147 @@ export function Centralized() {
 
   return (
     <div className="centralized">
-      <div className="centralized-header">
-        <h2>Container Management</h2>
-        <div className="header-actions">
-          <button className="secondary-button" onClick={loadContainers}>
-            Refresh
-          </button>
-          <button className="primary-button" onClick={() => setShowCreateDialog(true)}>
-            New Container
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div className="error-message">
-          {error}
-        </div>
-      )}
-
-      {loading ? (
-        <div className="loading">Loading containers...</div>
-      ) : (
-        <div className="container-list">
-          {containers.map((container) => (
-            <div key={container.name} className="container-item">
-              <div className="container-info">
-                <h3>{container.name}</h3>
-                <div className="container-meta">
-                  <span className={`status status-${container.status.toLowerCase()}`}>
-                    {container.status}
-                  </span>
-                  <span className="image">{container.image}</span>
-                  {container.managed && (
-                    <span className="managed-badge">Managed</span>
-                  )}
+      <Tabs
+        className="centralized-tabs"
+        defaultActiveKey="containers"
+        items={[
+          {
+            key: 'containers',
+            label: '容器',
+            children: (
+              <>
+                <div className="centralized-header">
+                  <h2>Container Management</h2>
+                  <div className="header-actions">
+                    <button className="secondary-button" onClick={loadContainers}>
+                      Refresh
+                    </button>
+                    <button className="primary-button" onClick={() => setShowCreateDialog(true)}>
+                      New Container
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div className="container-actions">
-                <button
-                  className="action-button"
-                  onClick={() => handleStartContainer(container.name)}
-                  disabled={container.status === 'running'}
-                  title="Start"
-                >
-                  ▶
-                </button>
-                <button
-                  className="action-button"
-                  onClick={() => handleStopContainer(container.name)}
-                  disabled={container.status !== 'running'}
-                  title="Stop"
-                >
-                  ⏸
-                </button>
-                <button
-                  className="action-button"
-                  onClick={() => handleRestartContainer(container.name)}
-                  disabled={container.status !== 'running'}
-                  title="Restart"
-                >
-                  ↻
-                </button>
-                <button
-                  className="action-button open-button"
-                  onClick={() => handleOpenContainer(container.name)}
-                  title="Open"
-                >
-                  Open
-                </button>
-                <button
-                  className="action-button delete-button"
-                  onClick={() => handleRemoveContainer(container.name)}
-                  title="Delete"
-                >
-                  🗑
-                </button>
-              </div>
-            </div>
-          ))}
-          {containers.length === 0 && (
-            <div className="empty-message">
-              No containers found. Create one to get started.
-            </div>
-          )}
-        </div>
-      )}
 
-      {/* Create Container Dialog */}
-      {showCreateDialog && (
-        <div className="dialog-overlay" onClick={() => setShowCreateDialog(false)}>
-          <div className="dialog" onClick={(e) => e.stopPropagation()}>
-            <h3>Create New Container</h3>
-            <div className="dialog-content">
-              <div className="form-group">
-                <label>Image:</label>
-                <input
-                  type="text"
-                  value={createImage}
-                  onChange={(e) => setCreateImage(e.target.value)}
-                  placeholder="docker.io/library/ubuntu:latest"
-                />
-              </div>
-              <div className="form-group">
-                <label>Name:</label>
-                <input
-                  type="text"
-                  value={createName}
-                  onChange={(e) => setCreateName(e.target.value)}
-                  placeholder="my-container"
-                />
-              </div>
-            </div>
-            <div className="dialog-actions">
-              <button className="secondary-button" onClick={() => setShowCreateDialog(false)}>
-                Cancel
-              </button>
-              <button className="primary-button" onClick={handleCreateContainer}>
-                Create
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+                {error && (
+                  <div className="error-message">
+                    {error}
+                  </div>
+                )}
+
+                {loading ? (
+                  <div className="loading">Loading containers...</div>
+                ) : (
+                  <div className="container-list">
+                    {containers.map((container) => (
+                      <div key={container.name} className="container-item">
+                        <div className="container-info">
+                          <h3>{container.name}</h3>
+                          <div className="container-meta">
+                            <span className={`status status-${container.status.toLowerCase()}`}>
+                              {container.status}
+                            </span>
+                            <span className="image">{container.image}</span>
+                            {container.managed && (
+                              <span className="managed-badge">Managed</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="container-actions">
+                          <button
+                            className="action-button"
+                            onClick={() => handleStartContainer(container.name)}
+                            disabled={container.status === 'running'}
+                            title="Start"
+                          >
+                            ▶
+                          </button>
+                          <button
+                            className="action-button"
+                            onClick={() => handleStopContainer(container.name)}
+                            disabled={container.status !== 'running'}
+                            title="Stop"
+                          >
+                            ⏸
+                          </button>
+                          <button
+                            className="action-button"
+                            onClick={() => handleRestartContainer(container.name)}
+                            disabled={container.status !== 'running'}
+                            title="Restart"
+                          >
+                            ↻
+                          </button>
+                          <button
+                            className="action-button open-button"
+                            onClick={() => handleOpenContainer(container.name)}
+                            title="Open"
+                          >
+                            Open
+                          </button>
+                          <button
+                            className="action-button delete-button"
+                            onClick={() => handleRemoveContainer(container.name)}
+                            title="Delete"
+                          >
+                            🗑
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {containers.length === 0 && (
+                      <div className="empty-message">
+                        No containers found. Create one to get started.
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Create Container Dialog */}
+                {showCreateDialog && (
+                  <div className="dialog-overlay" onClick={() => setShowCreateDialog(false)}>
+                    <div className="dialog" onClick={(e) => e.stopPropagation()}>
+                      <h3>Create New Container</h3>
+                      <div className="dialog-content">
+                        <div className="form-group">
+                          <label>Image:</label>
+                          <input
+                            type="text"
+                            value={createImage}
+                            onChange={(e) => setCreateImage(e.target.value)}
+                            placeholder="docker.io/library/ubuntu:latest"
+                          />
+                        </div>
+                        <div className="form-group">
+                          <label>Name:</label>
+                          <input
+                            type="text"
+                            value={createName}
+                            onChange={(e) => setCreateName(e.target.value)}
+                            placeholder="my-container"
+                          />
+                        </div>
+                      </div>
+                      <div className="dialog-actions">
+                        <button className="secondary-button" onClick={() => setShowCreateDialog(false)}>
+                          Cancel
+                        </button>
+                        <button className="primary-button" onClick={handleCreateContainer}>
+                          Create
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </>
+            ),
+          },
+          {
+            key: 'env',
+            label: '环境',
+            children: <EnvPanel />,
+          },
+        ]}
+      />
     </div>
   );
 }
