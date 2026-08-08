@@ -32,6 +32,14 @@ pub struct PtyOpen {
     /// 终端（输出回放），无则新建并设为常驻。CLI 执行命令传 false。
     #[serde(default)]
     pub attach: bool,
+    /// 多终端实例：true = 新建**独立持久会话**（server 持有，不随连接断开
+    /// 清理，也不登记为身份默认终端；GUI 多开终端用，配合 pty.list 恢复）
+    #[serde(default)]
+    pub persistent: bool,
+    /// 附接到指定已存在会话（输出回放 + 订阅，返回其 stream_id；
+    /// GUI 重开窗口恢复多终端面板用；会话不存在时回退新建路径）
+    #[serde(default)]
+    pub attach_stream: Option<u32>,
 }
 
 /// PtyOpen 响应：返回分配的 stream_id
@@ -39,6 +47,31 @@ pub struct PtyOpen {
 pub struct PtyOpenResp {
     /// 流 ID（后续的 Raw 帧和 PtyResize/PtyClose 都需要）
     pub stream_id: u32,
+}
+
+/// 列出当前所有活跃 PTY 会话（GUI get_terminals；多终端面板恢复用）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PtyList;
+
+/// 单个终端会话信息（pty.list 项）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PtyTerminalInfo {
+    /// 流 ID（pty.open{attach_stream} 重连）
+    pub stream_id: u32,
+    /// 显示命令（pty.open 的 cmd；空 = 默认登录 shell）
+    pub cmd: String,
+    /// 以 root 运行（身份标签）
+    pub as_root: bool,
+    /// 常驻会话（server 持有，不随连接断开清理）
+    pub persistent: bool,
+    /// 最近一次工作目录（pty.cwd 查询过才有）
+    pub cwd: Option<String>,
+}
+
+/// PtyList 响应：所有活跃会话
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PtyListResp {
+    pub terminals: Vec<PtyTerminalInfo>,
 }
 
 /// 查询 PTY 会话主进程的实时工作目录（文件浏览器"跟随终端"用；
@@ -461,6 +494,8 @@ mod tests {
             rows: 24,
             as_root: false,
             attach: false,
+            persistent: false,
+            attach_stream: None,
         };
 
         let json = serde_json::to_string(&op).expect("serialize failed");

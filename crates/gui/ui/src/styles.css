@@ -945,3 +945,124 @@ button:disabled {
   max-height: 100%;
   object-fit: contain;
 }
+
+/* ============================================================================
+ * 应用图标（AppIcon / 自定义应用）+ 图标选择弹窗（IconPickerModal）
+ * ========================================================================== */
+
+.app-icon-fallback {
+  font-size: 1.2rem;
+  color: #999;
+}
+
+.app-icon-img {
+  border-radius: 6px;
+}
+
+/* 图标选择弹窗 */
+.icon-picker-sources {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.icon-picker-label {
+  color: #888;
+  font-size: 13px;
+}
+
+.icon-picker-browser {
+  display: flex;
+  gap: 12px;
+  min-height: 260px;
+}
+
+.icon-picker-nav {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+}
+
+.icon-picker-nav .ant-input {
+  flex: 1;
+}
+
+.icon-picker-list {
+  flex: 1;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  overflow-y: auto;
+  max-height: 280px;
+  padding: 4px;
+}
+
+.icon-picker-list.icon-picker-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-picker-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.icon-picker-entry:hover {
+  background: #f0f5ff;
+}
+
+.icon-picker-entry.selected {
+  background: #e6f4ff;
+}
+
+.icon-picker-entry-icon {
+  flex: none;
+}
+
+.icon-picker-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icon-picker-preview {
+  width: 160px;
+  flex: none;
+  border: 1px dashed #ddd;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+}
+
+.icon-picker-preview img {
+  max-width: 140px;
+  max-height: 140px;
+  object-fit: contain;
+}
+
+.icon-picker-preview-hint {
+  color: #aaa;
+  font-size: 12px;
+  padding: 8px;
+  text-align: center;
+}
+
+.icon-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.icon-picker-footer .error-message {
+  margin-right: auto;
+}

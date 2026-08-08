@@ -40,6 +40,24 @@ fn main() {
         }
     }
 
+    // 进程锁（$XDG_RUNTIME_DIR/easytidy/ 下 flock）：
+    // - 主 GUI（中心化模式）：gui.lock，单实例
+    // - per-container GUI：gui-<name>.lock，每容器实例单实例
+    // 锁由进程持有 fd，退出/崩溃自动释放；已存在实例时直接退出。
+    let _lock = {
+        let container = match &mode {
+            AppMode::Container { name } => Some(name.as_str()),
+            AppMode::Centralized => None,
+        };
+        match easytidy_core::guilock::acquire(container) {
+            Ok(lock) => lock,
+            Err(e) => {
+                eprintln!("easytidy: {e}");
+                std::process::exit(1);
+            }
+        }
+    };
+
     // 调用 lib.rs 的 run 函数
     easytidy_gui_lib::run(mode, config_file);
 }

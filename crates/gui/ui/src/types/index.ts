@@ -61,6 +61,8 @@ export interface PassthroughApp {
   desktop_file?: string;
   /// 容器启动时自动拉起
   auto_start: boolean;
+  /// 宿主本地图标路径（~/.easytidy/icons/；自定义应用用户选定后落盘）
+  icon?: string;
 }
 
 /// 已导出的 .desktop 条目(含全文)
@@ -137,6 +139,19 @@ export interface ContainerConfigResult {
   config: ContainerConfig;
   effective: ContainerConfigView | null;
   host_user: HostUser | null;
+}
+
+/// 活跃终端会话（get_terminals / server pty.list）
+export interface TerminalInfo {
+  stream_id: number;
+  /// 显示命令（pty.open 的 cmd；空 = 默认登录 shell）
+  cmd: string;
+  /// 以 root 运行
+  as_root: boolean;
+  /// 常驻会话（server 持有，不随连接断开清理）
+  persistent: boolean;
+  /// 最近一次工作目录
+  cwd?: string | null;
 }
 
 /// PTY event from pty_open

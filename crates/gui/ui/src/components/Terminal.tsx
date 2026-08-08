@@ -1,10 +1,11 @@
 // 终端组件：xterm + server PTY 流。
 //
-// 缓存策略（2026-08-07）：模块级 streamCache 缓存 PTY 流（stream_id +
-// Channel）——组件 remount（如父组件结构变化/未来改动）时不重新 pty_open，
-// 复用同一流接线到新 xterm；配合 server 的 attach 语义（每容器一个常驻
-// 会话 + 环形缓冲回放），终端会话跨组件生命周期保持。切 tab 由 PerContainer
-// 常驻渲染（display 切换）承载，本层缓存作防御兜底。
+// 多终端（2026-08-08）：每条会话一条专用连接，面板由 PerContainer 常驻渲染
+// （display 切换，切 tab 不销毁）。会话生命周期由 server 持有：
+// - 新开：pty_open{persistent} → 独立持久会话（不随连接断开清理）
+// - 重开窗口/重挂载：pty_open{attach_stream} → server 清屏 + 环形缓冲回放
+//   恢复屏幕（无需本地缓存流）
+// 会话退出（pty.exited）→ 清理 store cwd → 通知父面板关闭。
 
 import { memo, useEffect, useRef, useState } from 'react';
 import { Terminal as XTerminal } from '@xterm/xterm';
@@ -42,11 +43,18 @@ function fallbackCopy(text: string) {
 }
 
 interface TerminalProps {
-  /** 以 root 身份运行（false = node 常规终端；各自独立常驻会话） */
+  /** 以 root 身份运行（false = node 常规终端；各自独立持久会话） */
   asRoot?: boolean;
+  /** 已有会话 stream_id：附接重连（server 回放当前屏幕）；
+   *  缺省/null = 新建独立持久会话（多终端实例） */
+  streamId?: number | null;
+  /** 会话建立后回调（新建路径拿到 stream_id，父面板绑定/关闭用） */
+  onStream?: (streamId: number) => void;
+  /** 会话退出（pty.exited）→ 父面板关闭 */
+  onExit?: (streamId: number) => void;
 }
 
-function TerminalInner({ asRoot }: TerminalProps) {
+function TerminalInner({ asRoot, streamId, onStream, onExit }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -126,7 +134,10 @@ function TerminalInner({ asRoot }: TerminalProps) {
         }
       } else if (event.kind === 'cwdChanged' && event.cwd) {
         // server TTY 事件驱动推送（输入回车时检测）：更新 store 供跟随
-        useTerminalStore.getState().setCwd(asRoot ?? false, event.cwd);
+        const sid = streamIdRef.current;
+        if (sid !== null) {
+          useTerminalStore.getState().setCwd(sid, event.cwd);
+        }
       } else if (event.kind === 'exited') {
         if (writeRaf !== null) {
           cancelAnimationFrame(writeRaf);
@@ -135,8 +146,12 @@ function TerminalInner({ asRoot }: TerminalProps) {
         }
         const code = event.code ?? 0;
         term.writeln(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m`);
-        // 会话已终结：失效缓存，下次挂载新建
-        useTerminalStore.getState().clearStream(asRoot ?? false);
+        // 会话已终结：清理 store cwd，通知父面板关闭（关闭面板 = 关闭终端）
+        const sid = streamIdRef.current;
+        if (sid !== null) {
+          useTerminalStore.getState().clearCwd(sid);
+          onExit?.(sid);
+        }
         setExited(true);
       }
     };
@@ -144,48 +159,40 @@ function TerminalInner({ asRoot }: TerminalProps) {
     // Get initial size
     const { cols, rows } = term;
 
-    // PTY 流缓存（zustand，原模块级全局变量迁移）：组件 remount 复用
-    // 不重新 pty_open；按身份分键，各自独立常驻会话。
-    // effect 内读取（渲染时快照可能错过其他实例的写入）
-    const cache = useTerminalStore.getState().getStream(asRoot ?? false);
+    // 多终端：已有会话 → 附接重连（server 清屏 + 环形缓冲回放恢复屏幕）；
+    // 无 → 新建独立持久会话（server 持有，不随连接断开清理）。
+    // ⚠️ 面板可能在 pty_open 返回前被关闭（快速开-关）：resolve 后检测
+    // cancelled，立即 pty_close 回收刚建的会话，避免孤儿常驻终端。
+    let streamCancelled = false;
+    const ch = new Channel<PtyEvent>();
+    ch.onmessage = handlePtyEvent;
 
-    if (cache.streamId !== null && cache.channel) {
-      // —— 复用缓存流：组件 remount 不重新 pty_open，接线已有 PTY 流
-      streamIdRef.current = cache.streamId;
-      cache.channel.onmessage = handlePtyEvent; // 重绑到新 xterm
-      // 同步一次尺寸：复用路径不经过 pty_open，PTY 可能还是旧客户端尺寸
-      // （切 tab/换窗口尺寸后截断换行的隐患）
-      invoke('pty_resize', {
-        streamId: streamIdRef.current,
-        cols: term.cols,
-        rows: term.rows,
-      }).catch((err) => console.error('pty_resize (reuse) failed:', err));
-      term.focus();
-    } else {
-      // —— 新建流（server attach 语义：复用容器常驻会话，无则新建）
-      const ch = new Channel<PtyEvent>();
-      ch.onmessage = handlePtyEvent;
-
-      invoke<number>('pty_open', {
-        onEvent: ch,
-        cmd: null,
-        cols,
-        rows,
-        // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换，
-        // 如 streamId→stream_id）；传 snake_case 会被静默忽略——曾导致
-        // as_root 丢失、root 终端 attach 到 node 会话（实测）
-        asRoot: asRoot ?? false,
+    invoke<number>('pty_open', {
+      onEvent: ch,
+      cmd: null,
+      cols,
+      rows,
+      // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换，
+      // 如 streamId→stream_id）；传 snake_case 会被静默忽略——曾导致
+      // as_root 丢失、root 终端 attach 到 node 会话（实测）
+      asRoot: asRoot ?? false,
+      persistent: streamId == null,          // 新开 = 独立持久会话
+      attachStreamId: streamId ?? undefined, // 重连 = 附接已有会话
+    })
+      .then((sid) => {
+        if (streamCancelled) {
+          // 面板已卸载：回收刚建的会话（孤儿常驻终端）
+          invoke('pty_close', { streamId: sid }).catch(() => {});
+          return;
+        }
+        streamIdRef.current = sid;
+        onStream?.(sid);
+        term.focus();
       })
-        .then((sid) => {
-          streamIdRef.current = sid;
-          useTerminalStore.getState().setStream(asRoot ?? false, sid, ch);
-          term.focus();
-        })
-        .catch((err) => {
-          console.error('pty_open failed:', err);
-          term.writeln(`\r\n\x1b[91mFailed to open PTY: ${err}\x1b[0m`);
-        });
-    }
+      .catch((err) => {
+        console.error('pty_open failed:', err);
+        term.writeln(`\r\n\x1b[91mFailed to open PTY: ${err}\x1b[0m`);
+      });
 
     // 焦点管理（WebKitGTK 已知坑：窗口失焦/切走后再回来，xterm 的 textarea
     // 点击无法重新获得焦点——光标在闪但键盘事件进不了 xterm，表现为"终端
@@ -308,6 +315,7 @@ function TerminalInner({ asRoot }: TerminalProps) {
 
     // Cleanup
     return () => {
+      streamCancelled = true;
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
       if (writeRaf !== null) {

@@ -113,11 +113,9 @@ pub fn passthrough_dir() -> Result<PathBuf> {
     Ok(data_home.join("applications"))
 }
 
-/// 宿主图标缓存目录（~/.local/share/icons/hicolor/256x256/apps/）
+/// 宿主图标缓存目录（~/.easytidy/icons/，集中管理；不存在则创建）
 pub fn passthrough_icon_dir() -> Result<PathBuf> {
-    let data_home = dirs::data_local_dir()
-        .ok_or_else(|| Error::Config("无法确定 XDG_DATA_HOME".to_string()))?;
-    Ok(data_home.join("icons/hicolor/256x256/apps"))
+    crate::appdata::icons_dir()
 }
 
 /// 宿主桌面目录（`xdg-user-dir DESKTOP` 动态获取，兼容中文系统"桌面"；
@@ -239,14 +237,10 @@ const EASYTIDY_ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" view
   <path d="M34 46h60M34 62h60M34 78h38" stroke="#cdd6f4" stroke-width="6" stroke-linecap="round" fill="none"/>
 </svg>"##;
 
-/// 确保 easytidy 品牌图标存在（~/.local/share/icons/hicolor/scalable/apps/easytidy-gui.svg）
+/// 确保 easytidy 品牌图标存在（~/.easytidy/icons/easytidy-gui.svg）
 /// 返回图标绝对路径；写入失败返回 None（不影响快捷方式导出）。
 pub fn ensure_gui_icon() -> Option<String> {
-    let data_home = dirs::data_local_dir()?;
-    let dir = data_home.join("icons/hicolor/scalable/apps");
-    if std::fs::create_dir_all(&dir).is_err() {
-        return None;
-    }
+    let dir = crate::appdata::icons_dir().ok()?;
     let path = dir.join("easytidy-gui.svg");
     if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_SVG).is_err() {
         return None;

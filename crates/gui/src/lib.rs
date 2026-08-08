@@ -70,6 +70,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::config::get_container_config,
             commands::config::apply_container_config,
             // PTY 终端
+            commands::pty::get_terminals,
             commands::pty::pty_open,
             commands::pty::pty_write,
             commands::pty::pty_resize,
@@ -95,6 +96,10 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::passthrough_add_custom,
             commands::passthrough::passthrough_remove_app,
             commands::passthrough::export_gui_shortcut,
+            // 图标（自定义应用：宿主选择 / 容器选择 → ~/.easytidy/icons）
+            commands::passthrough::passthrough_pick_host_icon,
+            commands::passthrough::passthrough_import_container_icon,
+            commands::passthrough::passthrough_set_custom_icon,
             // 配置（容器内 server 配置读写）
             commands::passthrough::config_get,
             commands::passthrough::config_set,

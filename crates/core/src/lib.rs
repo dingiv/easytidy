@@ -13,7 +13,9 @@ use crate::error::{Error, Result};
 /// 宿主导出 .desktop 的 Exec 前缀（passthrough 机制）
 pub const EXEC_PREFIX: &str = "easytidy --container";
 
+pub mod appdata;
 pub mod configfile;
+pub mod guilock;
 pub mod desktop;
 pub mod icon;
 pub mod passthrough;

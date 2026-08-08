@@ -5,6 +5,8 @@
 
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { AppIcon } from './AppIcon';
+import { IconPickerModal } from './IconPickerModal';
 import type {
   AppInfo,
   PassthroughApp,
@@ -25,6 +27,8 @@ export function PassthroughManager() {
   const [addingCustom, setAddingCustom] = useState(false);
   // 导出本容器 GUI 管理界面的桌面快捷方式
   const [exportingGui, setExportingGui] = useState(false);
+  // 正在选择图标的自定义应用 id（null = 弹窗关闭）
+  const [iconPickerFor, setIconPickerFor] = useState<string | null>(null);
 
   /** 导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面，双击打开此管理界面） */
   const handleExportGuiShortcut = async () => {
@@ -116,13 +120,14 @@ export function PassthroughManager() {
     }
   };
 
-  /** 导出自定义应用（构造 AppInfoFrontend 走现有导出流） */
+  /** 导出自定义应用（构造 AppInfoFrontend 走现有导出流；
+   *  icon = 宿主 ~/.easytidy/icons 路径，export 时 Icon= 直接用） */
   const handleExportCustom = async (custom: PassthroughApp) => {
     setError(null);
     try {
       const app: AppInfo = {
         name: custom.name,
-        icon_path: '',
+        icon_path: custom.icon ?? '',
         exec: custom.cmd,
         desktop_file: custom.id,
         startup_notify: false,
@@ -222,10 +227,8 @@ export function PassthroughManager() {
                 />
               </div>
               <div className="app-icon">
-                {app.icon_path && (
-                  <img src={`file://${app.icon_path}`} alt="" />
-                )}
-                {!app.icon_path && <span>📦</span>}
+                {/* 容器内图标：经 server（socket）拉取显示，不走宿主文件系统 */}
+                <AppIcon path={app.icon_path} />
               </div>
               <div className="app-info">
                 <div className="app-name">{app.name}</div>
@@ -309,7 +312,17 @@ export function PassthroughManager() {
               className={`app-item ${isExported ? 'exported' : ''}`}
             >
               <div className="app-icon">
-                <span>⚙️</span>
+                {custom.icon ? (
+                  // 宿主本地图标（~/.easytidy/icons/）
+                  <img
+                    className="app-icon-img"
+                    src={`file://${custom.icon}`}
+                    alt=""
+                    style={{ width: 28, height: 28, objectFit: 'contain' }}
+                  />
+                ) : (
+                  <span>⚙️</span>
+                )}
               </div>
               <div className="app-info">
                 <div className="app-name">{custom.name}</div>
@@ -336,6 +349,12 @@ export function PassthroughManager() {
                     Revoke
                   </button>
                 )}
+                <button
+                  className="secondary-button"
+                  onClick={() => setIconPickerFor(custom.id)}
+                >
+                  选择图标
+                </button>
                 <button className="secondary-button danger" onClick={() => handleRemoveCustom(custom.id)}>
                   Remove
                 </button>
@@ -344,6 +363,14 @@ export function PassthroughManager() {
           );
         })}
       </div>
+
+      {/* 自定义应用图标选择（宿主机 / 容器内两个入口） */}
+      <IconPickerModal
+        open={iconPickerFor !== null}
+        appId={iconPickerFor ?? ''}
+        onClose={() => setIconPickerFor(null)}
+        onChanged={loadData}
+      />
     </div>
   );
 }

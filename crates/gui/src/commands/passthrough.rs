@@ -55,7 +55,7 @@ fn cli_path() -> String {
 /// 返回（前端契约）：
 /// ```json
 /// { "exported": [{"desktop_file","content"}],
-///   "configured_apps": [{"id","name","cmd","desktop_file"?,"auto_start"}] }
+///   "configured_apps": [{"id","name","cmd","desktop_file"?,"auto_start","icon"?}] }
 /// ```
 /// `configured_apps` 是 passthrough.toml 中有状态条目（auto_start=true 或
 /// custom 应用）；扫描应用若未配置则不在此（前端按 id 匹配查 auto-start）。
@@ -84,6 +84,7 @@ pub async fn passthrough_state(
                 "cmd": a.cmd,
                 "desktop_file": a.desktop_file,
                 "auto_start": a.auto_start,
+                "icon": a.icon,
             })
         })
         .collect();
@@ -121,14 +122,22 @@ pub async fn passthrough_set_auto_start(
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
+    // 保留已存应用的图标（upsert 会整体覆盖，不能丢）
+    let config_file = passthrough_config_file()?;
+    let existing_icon = config_file
+        .apps(container)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.id == id)
+        .and_then(|a| a.icon);
     let app = easytidy_core::passthrough::PassthroughApp {
         id: id.clone(),
         name,
         cmd: clean_exec(&cmd),
         desktop_file: (!id.starts_with("custom:")).then(|| id.clone()),
         auto_start: false,
+        icon: existing_icon,
     };
-    let config_file = passthrough_config_file()?;
     config_file
         .set_auto_start(container, app, enabled)
         .map_err(|e| e.to_string())?;
@@ -151,7 +160,7 @@ pub async fn passthrough_add_custom(
         .map_err(|e| e.to_string())?;
     Ok(AppInfoFrontend {
         name: app.name,
-        icon_path: None,
+        icon_path: app.icon,
         exec: app.cmd,
         comment: None,
         desktop_file: app.id,
@@ -181,6 +190,89 @@ pub async fn passthrough_remove_app(
     Ok(())
 }
 
+// ============================================================================
+// 图标命令（自定义应用图标：宿主选择 / 容器选择 → 统一落盘 ~/.easytidy/icons）
+// ============================================================================
+
+/// 把图标字节写入 `~/.easytidy/icons/`（时间戳防冲突，保留扩展名），返回宿主路径。
+fn save_icon_to_appdata(bytes: &[u8], source_name: &str) -> Result<String, String> {
+    let ext = std::path::Path::new(source_name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .filter(|e| !e.is_empty())
+        .unwrap_or_else(|| "png".to_string());
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let dir = easytidy_core::appdata::icons_dir().map_err(|e| e.to_string())?;
+    let dst = dir.join(format!("icon-{secs}.{ext}"));
+    std::fs::write(&dst, bytes).map_err(|e| format!("复制图标到 ~/.easytidy/icons 失败：{e}"))?;
+    info!("图标已落盘：{}", dst.display());
+    Ok(dst.to_string_lossy().into_owned())
+}
+
+/// 从宿主机选择图标（rfd 原生文件对话框）→ 复制到 ~/.easytidy/icons/。
+/// 自定义应用图标入口之一；返回宿主本地路径（写入 passthrough.toml 的 icon）。
+#[tauri::command]
+pub async fn passthrough_pick_host_icon() -> Result<String, String> {
+    use std::io::Read;
+
+    // 原生对话框会阻塞主线程：spawn_blocking 避免卡 async runtime
+    let picked = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .add_filter("图片", &["png", "jpg", "jpeg", "svg", "ico", "webp", "gif"])
+            .pick_file()
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("文件选择对话框失败：{e}"))?
+    .ok_or_else(|| "已取消".to_string())?;
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(&picked)
+        .and_then(|mut f| f.read_to_end(&mut bytes))
+        .map_err(|e| format!("读取宿主图标失败：{e}"))?;
+    save_icon_to_appdata(&bytes, &picked)
+}
+
+/// 从容器内选择图标（前端容器文件浏览器选定路径）→ 经 server fs.read
+/// 拉取 → 复制到 ~/.easytidy/icons/。自定义应用图标入口之二。
+#[tauri::command]
+pub async fn passthrough_import_container_icon(
+    session: tauri::State<'_, Option<GuiSession>>,
+    container_path: String,
+) -> Result<String, String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let bytes = fetch_container_file(sess, &container_path).await?;
+    save_icon_to_appdata(&bytes, &container_path)
+}
+
+/// 设置自定义应用图标（icon = 宿主 ~/.easytidy/icons 路径；None = 清除）。
+/// 持久化到 passthrough.toml；导出时 Icon= 直接用该路径。
+#[tauri::command]
+pub async fn passthrough_set_custom_icon(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+    icon: Option<String>,
+) -> Result<(), String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+
+    let config_file = passthrough_config_file()?;
+    let mut apps = config_file.apps(container).map_err(|e| e.to_string())?;
+    let Some(app) = apps.iter_mut().find(|a| a.id == id) else {
+        return Err(format!("应用不存在：{id}"));
+    };
+    app.icon = icon.clone();
+    config_file
+        .upsert_app(container, app.clone())
+        .map_err(|e| e.to_string())?;
+    info!("自定义应用图标已设置：{container} {id} → {icon:?}");
+    Ok(())
+}
+
 /// 导出 passthrough 应用（宿主生成 .desktop：应用菜单 + 桌面图标。
 /// distrobox 风格 TryExec/GenericName/Keywords/Actions=Remove；桌面图标
 /// 经 chmod +x + `gio metadata::trusted` 信任标记（GNOME 双击必需）。
@@ -198,11 +290,19 @@ pub async fn passthrough_export(
     // Exec 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数）
     let exec = clean_exec(&app.exec);
 
-    // 图标：custom 应用（无容器内图标）用内置品牌图标；扫描应用经
-    // server fs.read 搬运容器内图标 → 宿主 hicolor 缓存
+    // 图标：custom 应用优先用用户选定的宿主本地图标（~/.easytidy/icons/，
+    // Icon= 绝对路径直接可用），未选定回退内置品牌图标；扫描应用经
+    // server fs.read 搬运容器内图标 → 合成品牌化 → ~/.easytidy/icons/ 缓存
     let mut icon_attr = None;
     if app.desktop_file.starts_with("custom:") {
-        icon_attr = easytidy_core::desktop::ensure_gui_icon();
+        if let Some(icon) = app.icon_path.as_ref() {
+            if std::path::Path::new(icon).is_file() {
+                icon_attr = Some(icon.clone());
+            }
+        }
+        if icon_attr.is_none() {
+            icon_attr = easytidy_core::desktop::ensure_gui_icon();
+        }
     } else if let Some(icon_path) = app.icon_path.as_ref() {
         if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
             if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
@@ -218,8 +318,8 @@ pub async fn passthrough_export(
                         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
                         .collect();
                     let icon_file = icons_dir.join(format!("easytidy-pt-{container}-{safe}.png"));
-                    // 品牌化合成:230px 内容 + 天蓝→深蓝 45° 渐变边框 +
-                    // 右下角 easytidy 水印(64px);合成失败回退原始图标
+                    // 品牌化合成:208px 内容 + 天蓝→深蓝 45° 渐变圆角边框 +
+                    // 右下角 easytidy 水印(96px);合成失败回退原始图标
                     let composed =
                         easytidy_core::icon::compose_app_icon(&icon_data, EASYTIDY_BRAND_ICON);
                     let bytes = composed.unwrap_or(icon_data);

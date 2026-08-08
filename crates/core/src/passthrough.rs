@@ -37,6 +37,10 @@ pub struct PassthroughApp {
     pub desktop_file: Option<String>,
     #[serde(default)]
     pub auto_start: bool,
+    /// 宿主本地图标路径（~/.easytidy/icons/；自定义应用用户选定后落盘，
+    /// export 时 Icon= 直接用；容器应用导出时由 GUI 搬运生成）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
 }
 
 impl PassthroughApp {
@@ -69,15 +73,11 @@ pub struct PassthroughConfigFile {
 }
 
 impl PassthroughConfigFile {
-    /// 默认路径：$XDG_CONFIG_HOME/easytidy/passthrough.toml
+    /// 默认路径：~/.easytidy/passthrough.toml
+    /// （首次使用自动迁移旧 $XDG_CONFIG_HOME/easytidy/passthrough.toml）
     pub fn default_path() -> Result<PathBuf> {
-        let base = std::env::var("XDG_CONFIG_HOME")
-            .ok()
-            .filter(|s| !s.is_empty())
-            .map(PathBuf::from)
-            .or_else(dirs::config_dir)
-            .ok_or_else(|| Error::Config("无法确定 XDG_CONFIG_HOME".to_string()))?;
-        Ok(base.join("easytidy").join("passthrough.toml"))
+        crate::appdata::migrate_legacy_configs();
+        crate::appdata::passthrough_config_path()
     }
 
     pub fn with_path(path: PathBuf) -> Self {
@@ -218,6 +218,7 @@ impl PassthroughConfigFile {
             cmd: cmd.trim().to_string(),
             desktop_file: None,
             auto_start: false,
+            icon: None,
         };
         apps.push(app.clone());
         self.save(&config)?;
@@ -372,6 +373,7 @@ mod tests {
             cmd: "echo hi".to_string(),
             desktop_file: None,
             auto_start,
+            icon: None,
         }
     }
 
@@ -385,6 +387,7 @@ mod tests {
             cmd: "google-chrome-stable --disable-dev-shm-usage".to_string(),
             desktop_file: Some("/usr/share/applications/google-chrome.desktop".to_string()),
             auto_start: true,
+            icon: None,
         };
         f.upsert_app("chrome", scanned.clone()).unwrap();
         let apps = f.apps("chrome").unwrap();

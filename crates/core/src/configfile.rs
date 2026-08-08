@@ -65,12 +65,11 @@ pub struct ConfigFile {
 }
 
 impl ConfigFile {
-    /// 创建配置文件实例（默认路径：$XDG_CONFIG_HOME/easytidy/config.toml）。
+    /// 创建配置文件实例（默认路径：~/.easytidy/config.toml；
+    /// 首次使用自动迁移旧 $XDG_CONFIG_HOME/easytidy/config.toml）。
     pub fn default_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| Error::Config("无法确定 XDG_CONFIG_HOME".to_string()))?;
-
-        Ok(config_dir.join("easytidy").join("config.toml"))
+        crate::appdata::migrate_legacy_configs();
+        crate::appdata::config_file_path()
     }
 
     /// 创建配置文件实例（指定路径）。

@@ -25,7 +25,8 @@ use easytidy_protocol::{
     CfgSet, CfgSetResp, Frame, FsEntry, FsEntryType,
     FsCopy, FsCopyResp, FsMkdir, FsMkdirResp, FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp,
     Handshake, HandshakeAck, LifecycleEntryLaunch, Message, MsgKind, ServerInfoResp,
-    PROTOCOL_VERSION, PtyClose, PtyCwd, PtyCwdResp, PtyExited, PtyOpen, PtyOpenResp, PtyResize, RpcError, ShutdownAck,
+    PROTOCOL_VERSION, PtyClose, PtyCwd, PtyCwdResp, PtyExited,
+    PtyListResp, PtyOpen, PtyOpenResp, PtyResize, PtyTerminalInfo, RpcError, ShutdownAck,
 };
 use futures::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
@@ -94,6 +95,10 @@ struct PtySession {
     spawn_pid: u32,
     /// 最近一次 cwd（事件驱动检测：输入回车时比较，变化才推送 cwdChanged）
     last_cwd: std::sync::Mutex<Option<String>>,
+    /// 显示命令（pty.open 的 cmd；空 = 默认登录 shell；pty.list 展示用）
+    cmd: String,
+    /// 以 root 运行（身份标签；pty.list 展示用）
+    as_root: bool,
 }
 
 /// HTTP 静态文件服务端口（server.info 查询;0 = 未启用）
@@ -967,6 +972,9 @@ async fn handle_message(
         (MsgKind::Req, "pty.cwd") => {
             Ok(Some(handle_pty_cwd(msg, state).await?))
         }
+        (MsgKind::Req, "pty.list") => {
+            Ok(Some(handle_pty_list(msg, state).await?))
+        }
         (MsgKind::Req, "fs.list") => {
             Ok(Some(handle_fs_list(msg).await?))
         }
@@ -1086,6 +1094,72 @@ async fn handle_ping(msg: Message) -> Result<Frame> {
     }))
 }
 
+/// 把连接订阅到已有 PTY 会话：按请求尺寸同步 PTY + 清屏回放环形缓冲 + 登记订阅。
+/// 返回 None = 会话不存在（调用方回退新建路径）。
+///
+/// ⚠️ 回放前缀"清屏 + 光标复位"：ring 是从字节流中间截取的片段（128KB
+/// 裁剪/半截 ESC 序列），直接回放会让 xterm 从错误状态开始渲染 → 光标漂移、
+/// 提示符残缺错位（实测乱码）。合并**单帧**发送：分块回放导致 xterm 逐块
+/// 渲染 → 切回 tab 时"先少量文字再迅速补齐"的闪烁（实测）。DECSET 2026
+/// （同步输出）包裹整帧：xterm 6.0 原生将整帧原子渲染，清除回放过程的
+/// 逐块重绘闪烁（社区标准做法，调研 2026-08-07）。
+async fn attach_to_session(
+    state: &Arc<ServerState>,
+    stream_id: u32,
+    cols: u16,
+    rows: u16,
+    event_tx: &mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
+    msg_id: u64,
+) -> Result<Option<Frame>> {
+    let sessions = state.sessions.read().await;
+    let Some(session) = sessions.get(&stream_id) else {
+        return Ok(None);
+    };
+
+    // 用请求尺寸立即同步 PTY：attach 客户端尺寸可能与旧会话不同，
+    // 不 resize 则 shell 按旧行列换行 → 提示符截断错位（实测）
+    {
+        let master = session.master.lock().unwrap();
+        let _ = master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+    }
+
+    // 回放环形缓冲（恢复当前屏幕）→ 订阅
+    {
+        const SYNC_START: &[u8] = b"\x1b[?2026h";
+        const SYNC_END: &[u8] = b"\x1b[?2026l";
+        let prefix = b"\x1b[2J\x1b[H";
+        let ring = session.ring.lock().unwrap();
+        let mut pending: Vec<u8> =
+            Vec::with_capacity(SYNC_START.len() + prefix.len() + ring.len() + SYNC_END.len());
+        pending.extend_from_slice(SYNC_START);
+        pending.extend_from_slice(prefix);
+        pending.extend(ring.iter().copied());
+        pending.extend_from_slice(SYNC_END);
+        // ring 不清空：多客户端 attach 各自从"清屏 + 全量 ring"渲染，
+        // 渲染幂等；清空会破坏后续 attach 的回放
+        drop(ring);
+        let _ = event_tx.send(Frame::Raw {
+            stream_id,
+            data: pending,
+        });
+    }
+    session.subs.lock().unwrap().push((conn_token, (*event_tx).clone()));
+    info!("PTY attach: stream_id={}", stream_id);
+    Ok(Some(Frame::Json(Message {
+        id: msg_id,
+        kind: MsgKind::Resp,
+        op: "pty.open".to_string(),
+        payload: serde_json::to_value(PtyOpenResp { stream_id })?,
+        err: None,
+    })))
+}
+
 /// Handle PTY open
 async fn handle_pty_open(
     msg: Message,
@@ -1108,61 +1182,31 @@ async fn handle_pty_open(
         .unwrap()
         .get(attach_key)
         .copied();
+    // 多终端：按 stream_id 附接已有会话（GUI 重开窗口恢复面板）
+    if let Some(sid) = req.attach_stream {
+        if let Some(resp) =
+            attach_to_session(state, sid, req.cols, req.rows, &event_tx, conn_token, msg.id).await?
+        {
+            return Ok(resp);
+        }
+        info!("attach_stream {} 不存在，回退新建路径", sid);
+    }
+    // 单终端 attach 语义：复用身份默认常驻会话
     if req.attach {
         if let Some(default_sid) = default_sid {
-        let sessions = state.sessions.read().await;
-        if let Some(session) = sessions.get(&default_sid) {
-            // 用请求尺寸立即同步 PTY：attach 客户端尺寸可能与旧会话不同，
-            // 不 resize 则 shell 按旧行列换行 → 提示符截断错位（实测）
+            if let Some(resp) = attach_to_session(
+                state,
+                default_sid,
+                req.cols,
+                req.rows,
+                &event_tx,
+                conn_token,
+                msg.id,
+            )
+            .await?
             {
-                let master = session.master.lock().unwrap();
-                let _ = master.resize(PtySize {
-                    rows: req.rows,
-                    cols: req.cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                });
+                return Ok(resp);
             }
-
-            // 回放环形缓冲（恢复当前屏幕）→ 订阅。
-            // ⚠️ 前缀"清屏 + 光标复位"：ring 是从字节流中间截取的片段
-            // （128KB 裁剪/半截 ESC 序列），直接回放会让 xterm 从错误状态
-            // 开始渲染 → 光标漂移、提示符残缺错位（实测乱码）。
-            // 合并**单帧**发送：分块回放导致 xterm 逐块渲染 → 切回 tab 时
-            // "先少量文字再迅速补齐"的闪烁（实测）。
-            // DECSET 2026（同步输出）包裹整帧：xterm 6.0 原生将整帧原子渲染，
-            // 清除回放过程的逐块重绘闪烁（社区标准做法，调研 2026-08-07）
-            {
-                const SYNC_START: &[u8] = b"\x1b[?2026h";
-                const SYNC_END: &[u8] = b"\x1b[?2026l";
-                let prefix = b"\x1b[2J\x1b[H";
-                let ring = session.ring.lock().unwrap();
-                let mut pending: Vec<u8> =
-                    Vec::with_capacity(SYNC_START.len() + prefix.len() + ring.len() + SYNC_END.len());
-                pending.extend_from_slice(SYNC_START);
-                pending.extend_from_slice(prefix);
-                pending.extend(ring.iter().copied());
-                pending.extend_from_slice(SYNC_END);
-                // ring 不清空：多客户端 attach 各自从"清屏 + 全量 ring"渲染，
-                // 渲染幂等；清空会破坏后续 attach 的回放
-                drop(ring);
-                let _ = event_tx.send(Frame::Raw {
-                    stream_id: default_sid,
-                    data: pending,
-                });
-            }
-            session.subs.lock().unwrap().push((conn_token, event_tx));
-            info!("PTY attach: stream_id={}", default_sid);
-            return Ok(Frame::Json(Message {
-                id: msg.id,
-                kind: MsgKind::Resp,
-                op: "pty.open".to_string(),
-                payload: serde_json::to_value(PtyOpenResp {
-                    stream_id: default_sid,
-                })?,
-                err: None,
-            }));
-        }
         }
     }
 
@@ -1268,12 +1312,15 @@ async fn handle_pty_open(
     // Allocate stream ID
     let stream_id = state.next_stream_id.fetch_add(1, Ordering::SeqCst);
 
-    // 常驻（attach）会话：persistent 标志 + 按身份登记为 default_terminal
-    let persistent = req.attach;
-    if persistent {
+    // 常驻会话：attach（登记为身份默认终端，供复用）或 persistent（多终端
+    // 实例，独立会话不登记——GUI 经 pty.list/attach_stream 恢复）
+    let persistent = req.attach || req.persistent;
+    if req.attach {
         let mut def = state.default_terminal.write().unwrap();
         def.insert(attach_key.to_string(), stream_id);
         info!("常驻终端已登记：{attach_key} → stream_id={stream_id}");
+    } else if req.persistent {
+        info!("多终端会话已创建：stream_id={stream_id} as_root={}", req.as_root);
     }
 
     // Create session
@@ -1285,6 +1332,8 @@ async fn handle_pty_open(
         persistent: std::sync::atomic::AtomicBool::new(persistent),
         spawn_pid,
         last_cwd: std::sync::Mutex::new(None),
+        cmd: req.cmd.clone(),
+        as_root: req.as_root,
     });
 
     // Store session
@@ -1489,6 +1538,31 @@ async fn read_cwd(pid: u32) -> Option<String> {
 /// Handle pty.cwd：查询会话主进程的实时工作目录。
 ///
 /// spawn 的可能是 su（su - node 场景），其子进程（bash）才是 shell——
+/// 列出所有活跃 PTY 会话（GUI get_terminals：多终端面板恢复）。
+///
+/// 返回全部会话（含 CLI 临时会话）——GUI 按需 attach；附 cmd/as_root/
+/// persistent 供标签展示。
+async fn handle_pty_list(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let sessions = state.sessions.read().await;
+    let terminals: Vec<PtyTerminalInfo> = sessions
+        .iter()
+        .map(|(sid, s)| PtyTerminalInfo {
+            stream_id: *sid,
+            cmd: s.cmd.clone(),
+            as_root: s.as_root,
+            persistent: s.persistent.load(std::sync::atomic::Ordering::SeqCst),
+            cwd: s.last_cwd.lock().unwrap().clone(),
+        })
+        .collect();
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "pty.list".to_string(),
+        payload: serde_json::to_value(PtyListResp { terminals })?,
+        err: None,
+    }))
+}
+
 /// 先经 /proc/<pid>/task/<pid>/children 取第一个子进程，再读其
 /// /proc/<child-pid>/cwd（symlink，实时反映 cd 结果）；无子进程（root
 /// 终端直接 spawn bash）则直接读 spawn pid 的 cwd。

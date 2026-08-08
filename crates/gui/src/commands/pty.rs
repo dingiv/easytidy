@@ -5,7 +5,7 @@ use futures::{SinkExt, StreamExt};
 
 use easytidy_protocol::{
     Frame, Message, MsgKind,
-    ops::{PtyOpen, PtyOpenResp, PtyResize, PtyClose, PtyExited},
+    ops::{PtyOpen, PtyOpenResp, PtyResize, PtyClose, PtyExited, PtyList, PtyListResp, PtyTerminalInfo},
 };
 use tracing::error;
 
@@ -14,7 +14,37 @@ use std::collections::HashMap;
 use crate::state::{GuiSession, PtyEvent};
 use crate::commands::socket::{connect_to_container, send_json_request};
 
-/// 打开 PTY 会话（attach 常驻终端；每条会话一条专用连接）
+/// 获取当前所有活跃终端（server 持有的 PTY 会话；多终端面板恢复用——
+/// 重开窗口时逐个 attach_stream 重连，输出经环形缓冲回放）。
+#[tauri::command]
+pub async fn get_terminals(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<Vec<PtyTerminalInfo>, String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    let resp = send_json_request(
+        sess,
+        "pty.list".to_string(),
+        serde_json::to_value(PtyList).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    let list: PtyListResp = serde_json::from_value(resp.payload)
+        .map_err(|e| format!("解析 pty.list 响应失败：{e}"))?;
+    Ok(list.terminals)
+}
+
+/// 打开 PTY 会话（每条会话一条专用连接）。
+///
+/// 多终端语义：
+/// - `persistent=true`：新建**独立持久会话**（server 持有，不随连接断开清理；
+///   多开终端入口）
+/// - `attach_stream_id=Some(n)`：附接已有会话（重开窗口恢复面板；server
+///   回放当前屏幕）
+/// - 均缺省（旧语义）：attach 身份默认常驻会话
 #[tauri::command]
 pub async fn pty_open(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -24,6 +54,10 @@ pub async fn pty_open(
     rows: u16,
     // 以 root 运行（root 终端；Tauri 参数名 camelCase → 前端传 asRoot）
     as_root: bool,
+    // 新建独立持久会话（多终端；Tauri 参数名 camelCase → 前端传 persistent）
+    persistent: bool,
+    // 附接已有会话（多终端恢复；前端传 attachStreamId）
+    attach_stream_id: Option<u32>,
 ) -> Result<u32, String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container_name = sess.container_name.clone();
@@ -50,9 +84,11 @@ pub async fn pty_open(
         // ⚠️ 曾硬编码 false 且命令缺 as_root 参数——前端 asRoot 被静默忽略,
         // root 终端 attach 到 node 会话（2026-08-08 实测）
         as_root,
-        // 接线常驻终端：GUI 终端复用以容器为单位的常驻会话
+        // 多终端：新开 = 独立持久会话；恢复 = 附接已有会话
         // （server 持有句柄，连接断开不清理；重开窗口回放当前屏幕）
-        attach: true,
+        attach: false,
+        persistent,
+        attach_stream: attach_stream_id,
     };
 
     // 在此连接上发送 pty.open 并接收响应

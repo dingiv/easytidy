@@ -21,6 +21,7 @@ import {
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import { useTerminalStore } from '../stores/terminalStore';
 import { useUiStore } from '../stores/uiStore';
+import type { TerminalInfo } from '../types';
 import { Terminal } from './Terminal';
 import { FileBrowser } from './FileBrowser';
 import { FileEditor } from './FileEditor';
@@ -39,20 +40,51 @@ interface Pane {
   title: string;
   /** 终端身份（root 终端独立会话） */
   asRoot?: boolean;
+  /** 终端会话 stream_id（null = 尚未建立/新开；attach 重连用） */
+  streamId?: number | null;
   /** 编辑器/图片面板：文件路径 */
   path?: string;
 }
 
 const AUTO_COLLOPSE_WIDTH = 150
 
+/** 终端标签：显示命令（默认登录 shell 按身份命名） */
+function terminalTitle(t: TerminalInfo): string {
+  const cmd = t.cmd || (t.as_root ? 'root' : 'node');
+  return cmd.length > 24 ? `${cmd.slice(0, 24)}…` : cmd;
+}
+
 function PerContainerInner({ containerName }: PerContainerProps) {
   const [panes, setPanes] = useState<Pane[]>(() => [
-    // 默认打开一个 node 终端
-    { id: useUiStore.getState().nextPaneId(), kind: 'terminal', title: '终端', asRoot: false },
+    // 默认打开一个 node 终端（新开持久会话；挂载后按 get_terminals 校正）
+    { id: useUiStore.getState().nextPaneId(), kind: 'terminal', title: '终端', asRoot: false, streamId: null },
   ]);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
   // 初始激活第一个 pane（惰性：首个渲染后设置）
   const activeId = activePaneId ?? panes[0]?.id ?? null;
+
+  // 多终端恢复：挂载时查 server 当前活跃终端 → 每个会话开一个面板（附接重连）；
+  // 无活跃会话 → 保持默认单个 node 终端（新建）。生命周期由 server 持有，
+  // 重开窗口/刷新后按此恢复全部终端。
+  useEffect(() => {
+    (async () => {
+      try {
+        const terminals = await invoke<TerminalInfo[]>('get_terminals');
+        if (terminals.length === 0) return;
+        const restored: Pane[] = terminals.map((t) => ({
+          id: useUiStore.getState().nextPaneId(),
+          kind: 'terminal',
+          title: terminalTitle(t),
+          asRoot: t.as_root,
+          streamId: t.stream_id,
+        }));
+        setPanes(restored);
+        setActivePaneId(null); // 激活第一个
+      } catch (err) {
+        console.error('get_terminals failed（保持默认终端）:', err);
+      }
+    })();
+  }, []);
 
   // 侧边栏：折叠 + 宽度（拖拽调宽，低于 200px 自动折叠）
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -94,24 +126,24 @@ function PerContainerInner({ containerName }: PerContainerProps) {
       const { activeId: aid, panes: ps } = followRef.current;
       const activePane = ps.find((p) => p.id === aid);
       if (!activePane || activePane.kind !== 'terminal') return;
-      const streamId = useTerminalStore
-        .getState()
-        .getStream(activePane.asRoot ?? false).streamId;
-      if (streamId === null) return;
+      const sid = activePane.streamId ?? null;
+      if (sid === null) return;
       try {
-        const cwd = await invoke<string>('pty_cwd', { streamId });
+        const cwd = await invoke<string>('pty_cwd', { streamId: sid });
         if (cwd) useFileBrowserStore.getState().navigate(cwd);
       } catch (err) {
         console.error('pty_cwd (sync) failed:', err);
       }
     };
     syncOnce();
-    // 订阅 cwd 变化（server 推送更新 store）
+    // 订阅 cwd 变化（server 推送更新 store；按 stream_id 取激活终端）
     const unsub = useTerminalStore.subscribe((state) => {
       const { activeId: aid, panes: ps } = followRef.current;
       const activePane = ps.find((p) => p.id === aid);
       if (!activePane || activePane.kind !== 'terminal') return;
-      const cwd = state.streams[activePane.asRoot ? 'root' : 'user'].cwd;
+      const sid = activePane.streamId ?? null;
+      if (sid === null) return;
+      const cwd = state.cwdByStream[sid];
       if (cwd && cwd !== useFileBrowserStore.getState().currentPath) {
         useFileBrowserStore.getState().navigate(cwd);
       }
@@ -127,30 +159,56 @@ function PerContainerInner({ containerName }: PerContainerProps) {
     }
   };
 
-  /** 打开面板：同类（terminal 含身份）已存在则聚焦，否则新建 */
-  const openPane = (kind: Pane['kind'], asRoot?: boolean) => {
+  /** 打开新终端（多实例：每次点击新建一个独立持久会话面板，可同时多开） */
+  const openTerminal = (asRoot: boolean) => {
+    const pane: Pane = {
+      id: useUiStore.getState().nextPaneId(),
+      kind: 'terminal',
+      title: asRoot ? '终端 (root)' : '终端',
+      asRoot,
+      streamId: null, // 新建持久会话，Terminal 建立后经 onStream 回填
+    };
+    setPanes((prev) => [...prev, pane]);
+    setActivePaneId(pane.id);
+  };
+
+  /** 打开面板（非终端类：同类已存在则聚焦，否则新建） */
+  const openPane = (kind: Pane['kind']) => {
     setPanes((prev) => {
-      const existing = prev.find((p) => p.kind === kind && p.asRoot === asRoot);
+      const existing = prev.find((p) => p.kind === kind);
       if (existing) {
         setActivePaneId(existing.id);
         return prev;
       }
-      const title =
-        kind === 'terminal' ? (asRoot ? '终端 (root)' : '终端') :
-        kind === 'passthrough' ? 'Passthrough' : '配置';
+      const title = kind === 'passthrough' ? 'Passthrough' : '配置';
       const pane: Pane = {
         id: useUiStore.getState().nextPaneId(),
         kind,
         title,
-        asRoot,
       };
       setActivePaneId(pane.id);
       return [...prev, pane];
     });
   };
 
-  /** 关闭面板：关闭后激活相邻面板 */
+  /** 终端会话建立后回填面板（新开路径拿到 stream_id） */
+  const bindTerminalStream = (paneId: string, sid: number) => {
+    setPanes((prev) =>
+      prev.map((p) => (p.id === paneId ? { ...p, streamId: sid } : p)),
+    );
+  };
+
+  /** 关闭面板：关闭后激活相邻面板；终端面板 = 关闭该终端（pty.close
+   *  终结会话，生命周期由 server 持有——不影响其他终端/连接） */
   const closePane = (id: string) => {
+    const pane = panes.find((p) => p.id === id);
+    if (pane && pane.kind === 'terminal' && pane.streamId != null) {
+      const sid = pane.streamId;
+      invoke('pty_close', { streamId: sid }).catch((err) =>
+        console.error('pty_close failed:', err),
+      );
+      useTerminalStore.getState().clearCwd(sid);
+    }
     setPanes((prev) => {
       const idx = prev.findIndex((p) => p.id === id);
       if (idx === -1) return prev;
@@ -237,14 +295,14 @@ function PerContainerInner({ containerName }: PerContainerProps) {
               <Dropdown
                 menu={{
                   items: [
-                    { key: 'user', label: 'node' },
-                    { key: 'root', label: 'root' },
+                    { key: 'user', label: '新建终端 (node)' },
+                    { key: 'root', label: '新建终端 (root)' },
                   ],
-                  onClick: ({ key }) => openPane('terminal', key === 'root'),
+                  onClick: ({ key }) => openTerminal(key === 'root'),
                 }}
                 placement="bottomLeft"
               >
-                <Tooltip title="打开终端（node/root）" mouseEnterDelay={4}>
+                <Tooltip title="新建终端（多实例，node/root）" mouseEnterDelay={4}>
                   <button className="tool-button">
                     <CodeOutlined />
                     <DownOutlined style={{ fontSize: 10 }} />
@@ -305,7 +363,14 @@ function PerContainerInner({ containerName }: PerContainerProps) {
                   overflow: p.kind === 'terminal' ? 'hidden' : undefined,
                 }}
               >
-                {p.kind === 'terminal' && <Terminal asRoot={p.asRoot ?? false} />}
+                {p.kind === 'terminal' && (
+                  <Terminal
+                    asRoot={p.asRoot ?? false}
+                    streamId={p.streamId ?? null}
+                    onStream={(sid) => bindTerminalStream(p.id, sid)}
+                    onExit={() => closePane(p.id)}
+                  />
+                )}
                 {p.kind === 'passthrough' && <PassthroughManager />}
                 {p.kind === 'config' && <ConfigManager containerName={containerName} />}
                 {p.kind === 'editor' && p.path && (

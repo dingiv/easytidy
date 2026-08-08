@@ -4,25 +4,10 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Spin, Typography } from 'antd';
+import { mimeForPath } from './mime';
 
 interface ImageViewerProps {
   path: string;
-}
-
-/** 按扩展名推断 mime（data: URI 需要） */
-function mimeForPath(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() ?? '';
-  switch (ext) {
-    case 'png': return 'image/png';
-    case 'jpg':
-    case 'jpeg': return 'image/jpeg';
-    case 'gif': return 'image/gif';
-    case 'webp': return 'image/webp';
-    case 'svg': return 'image/svg+xml';
-    case 'bmp': return 'image/bmp';
-    case 'ico': return 'image/x-icon';
-    default: return 'application/octet-stream';
-  }
 }
 
 export function ImageViewer({ path }: ImageViewerProps) {

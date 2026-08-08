@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "io.github.dingiv.easytidy",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "bash ../scripts/dev-ui.sh",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "bash ../scripts/build-ui.sh",
     "frontendDist": "ui/dist"
   },
   "app": {

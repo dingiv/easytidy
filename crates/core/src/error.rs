@@ -14,6 +14,8 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("配置文件解析失败：{0}")]
     Config(String),
+    #[error("{0}")]
+    Lock(String),
     #[error("容器不存在：{0}")]
     NotFound(String),
 }
