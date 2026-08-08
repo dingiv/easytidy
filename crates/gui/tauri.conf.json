@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "io.github.dingiv.easytidy",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm --dir ui dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
-    "frontendDist": "../dist"
+    "beforeBuildCommand": "pnpm --dir ui build",
+    "frontendDist": "ui/dist"
   },
   "app": {
     "withGlobalTauri": true,

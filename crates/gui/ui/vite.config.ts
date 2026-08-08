@@ -25,8 +25,8 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. 忽略 Rust 侧（src-tauri 已上移为 gui/ 顶层 src/,由 cargo 管理）
+      ignored: ["**/target/**"],
     },
   },
 }));

@@ -1,11 +1,9 @@
-[workspace]
-
 [package]
 name = "easytidy-gui"
-version = "0.1.0"
+version.workspace = true
 description = "easytidy GUI manager"
 authors = ["easytidy contributors"]
-edition = "2021"
+edition.workspace = true
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
@@ -20,16 +18,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-easytidy-core = { path = "../../core" }
-easytidy-protocol = { path = "../../protocol" }
-dirs = "5"
+serde = { workspace = true }
+serde_json = { workspace = true }
+easytidy-core = { path = "../core" }
+easytidy-protocol = { path = "../protocol" }
+dirs = { workspace = true }
 rfd = "0.15"
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-futures = "0.3"
-tokio-util = { version = "0.7", features = ["codec"] }
+tokio = { workspace = true, features = ["full"] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+tokio-util = { workspace = true }
 base64 = "0.22"

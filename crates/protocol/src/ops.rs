@@ -460,6 +460,7 @@ mod tests {
             cols: 80,
             rows: 24,
             as_root: false,
+            attach: false,
         };
 
         let json = serde_json::to_string(&op).expect("serialize failed");

@@ -87,7 +87,7 @@ struct PtySession {
     ring: Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
     /// 订阅连接的输出通道（reader 广播；连接断开时按连接 token 退订——
     /// UnboundedSender 无 PartialEq，用连接级唯一 token 标识）
-    subs: Arc<std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<Frame>)>>>,
+    subs: Arc<Subscribers>,
     /// 常驻标志：不随连接断开清理（attach 终端）；连接断开仅退订
     persistent: std::sync::atomic::AtomicBool,
     /// spawn 的进程 pid（pty.cwd 经 /proc/<pid>/cwd 查询实时工作目录）
@@ -225,6 +225,9 @@ fn mime_for_path(path: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+
+/// PTY 订阅者（连接 token + 输出通道）
+type Subscribers = std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<Frame>)>>;
 
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
 const RING_MAX: usize = 128 * 1024;
@@ -1105,8 +1108,8 @@ async fn handle_pty_open(
         .unwrap()
         .get(attach_key)
         .copied();
-    if req.attach && default_sid.is_some() {
-        let default_sid = default_sid.unwrap();
+    if req.attach {
+        if let Some(default_sid) = default_sid {
         let sessions = state.sessions.read().await;
         if let Some(session) = sessions.get(&default_sid) {
             // 用请求尺寸立即同步 PTY：attach 客户端尺寸可能与旧会话不同，
@@ -1159,6 +1162,7 @@ async fn handle_pty_open(
                 })?,
                 err: None,
             }));
+        }
         }
     }
 
@@ -1843,9 +1847,13 @@ async fn handle_fs_write(msg: Message) -> Result<Frame> {
         // 分块上传续写（宿主→容器拖入的大文件分块写）
         Some(offset) => {
             use std::io::{Seek, SeekFrom, Write};
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
+            let mut opts = std::fs::OpenOptions::new();
+            opts.create(true).write(true);
+            // 首块（offset=0）截断重建，续写不截断（分块上传语义）
+            if offset == 0 {
+                opts.truncate(true);
+            }
+            let mut file = opts
                 .open(&req.path)
                 .with_context(|| format!("Failed to open file for write: {}", req.path))?;
             file.seek(SeekFrom::Start(offset))
@@ -2428,6 +2436,7 @@ mod tests {
         // Spawn server in background
         let _state = Arc::new(ServerState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            default_terminal: Arc::new(std::sync::RwLock::new(HashMap::new())),
             children: Arc::new(RwLock::new(HashMap::new())),
             next_stream_id: Arc::new(AtomicU32::new(1)),
             next_conn_id: Arc::new(AtomicU64::new(1)),
