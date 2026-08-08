@@ -1,9 +1,11 @@
-// 容器配置管理器（主组件）：状态管理 + 保存并重启 + Tabs 组装。
-// 各面板拆分为 components/config/ 下的独立组件（MountsPane/NetworkPane/
-// EnvPane/UserPane/ContainerPane），纯函数在 config/utils.ts。
+// 容器配置管理器（zustand 驱动）。
+//
+// 状态在 stores/configStore：saved/effective/edit/hostUser + **dirty 标志位**
+// （编辑动作显式置位,不再深比较推断——比较法对引擎注入 env/mounts/
+// userns 回显的过滤有漏网,未修改也误报"配置已修改",2026-08-08 实测）。
+// 保存即"保存并重启容器",成功后重载,不存在"已保存未生效"状态。
 
-import { useEffect, useMemo, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
+import { useEffect } from 'react';
 import {
   App as AntApp,
   Alert,
@@ -23,22 +25,9 @@ import {
   SettingOutlined,
   UserOutlined,
 } from '@ant-design/icons';
-import type {
-  ContainerConfig,
-  ContainerConfigResult,
-  ContainerConfigView,
-  HostUser,
-  MountConfig,
-  NetworkMode,
-  PortMapping,
-} from '../types';
-import {
-  configsEqual,
-  normalizeConfig,
-  normalizeView,
-  validateEnv,
-  viewMatchesSaved,
-} from './config/utils';
+import type { ContainerConfig } from '../types';
+import { validateEnv } from './config/utils';
+import { useConfigStore } from '../stores/configStore';
 import { MountsPane } from './config/MountsPane';
 import { NetworkPane } from './config/NetworkPane';
 import { EnvPane } from './config/EnvPane';
@@ -52,112 +41,45 @@ interface ConfigManagerProps {
 
 function ConfigManagerInner({ containerName }: ConfigManagerProps) {
   const { message } = AntApp.useApp();
-
-  // 已保存（配置文件侧）vs 实际生效（podman 侧）
-  const [saved, setSaved] = useState<ContainerConfig | null>(null);
-  const [effective, setEffective] = useState<ContainerConfigView | null>(null);
-  // 宿主用户（uid 映射语义对照表数据源；null = 探测失败）
-  const [hostUser, setHostUser] = useState<HostUser | null>(null);
-  // 本地编辑态
-  const [edit, setEdit] = useState<ContainerConfig | null>(null);
-
-  const [loading, setLoading] = useState(true);
-  const [applying, setApplying] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { effective, hostUser, edit, loading, applying, error, dirty, load, update, apply, clearError } =
+    useConfigStore();
 
   useEffect(() => {
-    loadConfig();
+    load(containerName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerName]);
 
-  const loadConfig = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const result = await invoke<ContainerConfigResult>('get_container_config', {
-        name: containerName,
-      });
-      const savedCfg = normalizeConfig(result.config);
-      setSaved(savedCfg);
-      setEffective(result.effective ? normalizeView(result.effective) : null);
-      setHostUser(result.host_user ?? null);
-      setEdit(normalizeConfig(result.config));
-    } catch (err: any) {
-      setError(err?.message || 'Failed to load container config');
-      console.error('get_container_config failed:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  // ---------- 编辑回调（统一走 store.update → dirty 置位） ----------
 
-  const dirty = useMemo(
-    () => !!edit && !!saved && !configsEqual(edit, saved),
-    [edit, saved],
-  );
-  const pendingRestart = useMemo(
-    () => !!saved && !!effective && !viewMatchesSaved(saved, effective),
-    [saved, effective],
-  );
-
-  // ---------- 编辑回调（各面板经 props 驱动 edit 态） ----------
-
-  const addMount = (m: MountConfig) => {
-    setEdit((prev) => (prev ? { ...prev, mounts: [...prev.mounts, m] } : prev));
-  };
-
-  const removeMount = (idx: number) => {
-    setEdit((prev) => (prev ? { ...prev, mounts: prev.mounts.filter((_, i) => i !== idx) } : prev));
-  };
-
-  const setNetworkMode = (mode: NetworkMode) => {
-    setEdit((prev) => (prev ? { ...prev, network: { ...prev.network, mode } } : prev));
-  };
-
-  const addPort = (p: PortMapping) => {
-    setEdit((prev) =>
-      prev ? { ...prev, network: { ...prev.network, ports: [...prev.network.ports, p] } } : prev,
-    );
-  };
-
-  const removePort = (idx: number) => {
-    setEdit((prev) =>
-      prev
-        ? { ...prev, network: { ...prev.network, ports: prev.network.ports.filter((_, i) => i !== idx) } }
-        : prev,
-    );
-  };
-
-  const addEnv = (key: string, value: string) => {
-    setEdit((prev) => (prev ? { ...prev, env: [...prev.env, `${key}=${value}`] } : prev));
-  };
-
-  const removeEnv = (idx: number) => {
-    setEdit((prev) => (prev ? { ...prev, env: prev.env.filter((_, i) => i !== idx) } : prev));
-  };
-
-  const setUserHome = (v: boolean) => {
-    setEdit((prev) => (prev ? { ...prev, user_home: v } : prev));
-  };
-
-  const setEntry = (v: string) => {
-    setEdit((prev) => (prev ? { ...prev, entry: v } : prev));
-  };
-
-  const setSilentBoot = (v: boolean) => {
-    setEdit((prev) => (prev ? { ...prev, silent_boot: v } : prev));
-  };
+  const addMount = (m: ContainerConfig['mounts'][number]) =>
+    update((prev) => ({ ...prev, mounts: [...prev.mounts, m] }));
+  const removeMount = (idx: number) =>
+    update((prev) => ({ ...prev, mounts: prev.mounts.filter((_, i) => i !== idx) }));
+  const setNetworkMode = (mode: ContainerConfig['network']['mode']) =>
+    update((prev) => ({ ...prev, network: { ...prev.network, mode } }));
+  const addPort = (p: ContainerConfig['network']['ports'][number]) =>
+    update((prev) => ({ ...prev, network: { ...prev.network, ports: [...prev.network.ports, p] } }));
+  const removePort = (idx: number) =>
+    update((prev) => ({
+      ...prev,
+      network: { ...prev.network, ports: prev.network.ports.filter((_, i) => i !== idx) },
+    }));
+  const addEnv = (key: string, value: string) =>
+    update((prev) => ({ ...prev, env: [...prev.env, `${key}=${value}`] }));
+  const removeEnv = (idx: number) =>
+    update((prev) => ({ ...prev, env: prev.env.filter((_, i) => i !== idx) }));
+  const setUserHome = (v: boolean) => update((prev) => ({ ...prev, user_home: v }));
+  const setEntry = (v: string) => update((prev) => ({ ...prev, entry: v }));
+  const setSilentBoot = (v: boolean) => update((prev) => ({ ...prev, silent_boot: v }));
 
   // ---------- 保存并重启 ----------
 
   const handleApply = async () => {
     if (!edit) return;
+    // 提交前校验（编辑操作已校验,此处防陈旧状态）
     for (const m of edit.mounts) {
-      if (!m.host_path.trim()) {
-        message.error('存在宿主路径为空的挂载项');
-        return;
-      }
-      if (!m.container_path.trim()) {
-        message.error('存在容器路径为空的挂载项');
+      if (!m.host_path.trim() || !m.container_path.trim()) {
+        message.error('存在路径为空的挂载项');
         return;
       }
     }
@@ -171,7 +93,6 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
         return;
       }
     }
-    // env 全量二次校验（防陈旧状态；与 EnvPane 添加时同规则）
     const envKeys = new Set<string>();
     for (const kv of edit.env) {
       const i = kv.indexOf('=');
@@ -187,26 +108,9 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
       }
       envKeys.add(key);
     }
-    const payload: ContainerConfig = {
-      ...edit,
-      entry: edit.entry && edit.entry.trim() ? edit.entry.trim() : null,
-    };
-    setApplying(true);
-    setError(null);
-    try {
-      const newId = await invoke<string>('apply_container_config', {
-        name: containerName,
-        config: payload,
-      });
-      console.log(`container recreated, new id: ${newId}`);
+    await apply(containerName);
+    if (!useConfigStore.getState().error) {
       message.success('配置已应用，容器已重启');
-      await loadConfig();
-    } catch (err: any) {
-      const msg = err?.message || '应用配置失败';
-      message.error(msg);
-      console.error('apply_container_config failed:', err);
-    } finally {
-      setApplying(false);
     }
   };
 
@@ -217,7 +121,12 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           容器配置
         </Typography.Title>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={loadConfig} loading={loading} disabled={applying}>
+          <Button
+            icon={<ReloadOutlined />}
+            onClick={() => load(containerName)}
+            loading={loading}
+            disabled={applying}
+          >
             刷新
           </Button>
           <Popconfirm
@@ -229,9 +138,9 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
             cancelText="取消"
             okButtonProps={{ danger: true }}
             onConfirm={handleApply}
-            disabled={!edit || applying}
+            disabled={!edit || applying || !dirty}
           >
-            <Button type="primary" icon={<SaveOutlined />} loading={applying} disabled={!edit}>
+            <Button type="primary" icon={<SaveOutlined />} loading={applying} disabled={!edit || !dirty}>
               保存并重启
             </Button>
           </Popconfirm>
@@ -245,29 +154,17 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           message="操作失败"
           description={error}
           closable
-          onClose={() => setError(null)}
+          onClose={clearError}
         />
       )}
 
-      {!loading && saved && edit && (
-        <>
-          {dirty && (
-            <Alert
-              type="warning"
-              showIcon
-              message="有未保存的修改"
-              description="修改将在保存并重启容器后生效。"
-            />
-          )}
-          {!dirty && pendingRestart && (
-            <Alert
-              type="warning"
-              showIcon
-              message="配置已修改，重启后生效"
-              description="已保存的配置与容器当前实际配置不一致，请保存并重启以生效。"
-            />
-          )}
-        </>
+      {!loading && edit && dirty && (
+        <Alert
+          type="warning"
+          showIcon
+          message="有未保存的修改"
+          description="修改将在保存并重启容器后生效。"
+        />
       )}
 
       {loading ? (
@@ -288,11 +185,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
                 </span>
               ),
               children: (
-                <MountsPane
-                  mounts={edit.mounts}
-                  onAdd={addMount}
-                  onRemove={removeMount}
-                />
+                <MountsPane mounts={edit.mounts} onAdd={addMount} onRemove={removeMount} />
               ),
             },
             {
@@ -319,11 +212,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
                 </span>
               ),
               children: (
-                <ContainerPane
-                  edit={edit}
-                  onEntryChange={setEntry}
-                  onSilentBootChange={setSilentBoot}
-                />
+                <ContainerPane edit={edit} onEntryChange={setEntry} onSilentBootChange={setSilentBoot} />
               ),
             },
             {
