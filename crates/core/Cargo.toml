@@ -17,6 +17,7 @@ http-body-util = { workspace = true }
 tower-service = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
 easytidy-protocol = { path = "../protocol" }
 uuid = { workspace = true }
 tempfile = { workspace = true }
