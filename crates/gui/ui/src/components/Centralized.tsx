@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { Tabs } from 'antd';
 import type { ContainerSummary } from '../types';
 import { EnvPanel } from './EnvPanel';
+import logo from '../assets/logo.png';
 
 export function Centralized() {
   const [containers, setContainers] = useState<ContainerSummary[]>([]);
@@ -119,7 +120,10 @@ export function Centralized() {
             children: (
               <>
                 <div className="centralized-header">
-                  <h2>Container Management</h2>
+                  <h2>
+                    <img src={logo} className="app-logo" alt="easytidy" />
+                    Container Management
+                  </h2>
                   <div className="header-actions">
                     <button className="secondary-button" onClick={loadContainers}>
                       Refresh

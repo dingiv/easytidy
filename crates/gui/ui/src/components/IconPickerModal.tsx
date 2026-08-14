@@ -12,11 +12,14 @@ import { mimeForPath } from './mime';
 
 interface IconPickerModalProps {
   open: boolean;
-  /** 自定义应用 id（custom:<name>） */
-  appId: string;
+  /** 自定义应用 id（custom:<name>）；null = 独立选取模式：选定后
+   *  仅经 onPicked 返回宿主路径，由调用方决定用途（新增应用表单用） */
+  appId: string | null;
   onClose: () => void;
-  /** 图标已设置/清除（调用方重新拉取列表） */
+  /** 图标已设置/清除（调用方重新拉取列表；appId 模式下） */
   onChanged: () => void;
+  /** 独立选取模式：返回落盘后的宿主图标路径 */
+  onPicked?: (hostPath: string) => void;
 }
 
 interface FsEntry {
@@ -27,7 +30,7 @@ interface FsEntry {
 
 const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'svg', 'ico', 'webp', 'gif', 'bmp']);
 
-export function IconPickerModal({ open, appId, onClose, onChanged }: IconPickerModalProps) {
+export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: IconPickerModalProps) {
   // 容器内文件浏览状态
   const [cwd, setCwd] = useState('/');
   const [entries, setEntries] = useState<FsEntry[]>([]);
@@ -86,15 +89,24 @@ export function IconPickerModal({ open, appId, onClose, onChanged }: IconPickerM
     }
   };
 
-  /** 入口一：宿主机原生对话框选图标 → 落盘 → 写配置 */
+  /** 图标落盘后统一出口：appId 模式写配置；独立模式经 onPicked 交还调用方 */
+  const applyPickedIcon = async (hostPath: string) => {
+    if (appId) {
+      await invoke('passthrough_set_custom_icon', { id: appId, icon: hostPath });
+      onChanged();
+    } else {
+      onPicked?.(hostPath);
+    }
+    onClose();
+  };
+
+  /** 入口一：宿主机原生对话框选图标 → 落盘 */
   const pickFromHost = async () => {
     setBusy(true);
     setError(null);
     try {
       const hostPath = await invoke<string>('passthrough_pick_host_icon');
-      await invoke('passthrough_set_custom_icon', { id: appId, icon: hostPath });
-      onChanged();
-      onClose();
+      await applyPickedIcon(hostPath);
     } catch (err: any) {
       setError(err?.message || '选择宿主图标失败');
     } finally {
@@ -102,7 +114,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged }: IconPickerM
     }
   };
 
-  /** 入口二：容器内选定图片 → 拉取落盘 → 写配置 */
+  /** 入口二：容器内选定图片 → 拉取落盘 */
   const pickFromContainer = async () => {
     if (!selected) return;
     setBusy(true);
@@ -111,9 +123,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged }: IconPickerM
       const hostPath = await invoke<string>('passthrough_import_container_icon', {
         containerPath: selected,
       });
-      await invoke('passthrough_set_custom_icon', { id: appId, icon: hostPath });
-      onChanged();
-      onClose();
+      await applyPickedIcon(hostPath);
     } catch (err: any) {
       setError(err?.message || '导入容器图标失败');
     } finally {
@@ -122,6 +132,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged }: IconPickerM
   };
 
   const clearIcon = async () => {
+    if (!appId) return; // 独立模式：清除由调用方处理
     setBusy(true);
     setError(null);
     try {
@@ -150,9 +161,11 @@ export function IconPickerModal({ open, appId, onClose, onChanged }: IconPickerM
           <Button onClick={pickFromHost} loading={busy}>
             从宿主机选择…
           </Button>
-          <Button onClick={clearIcon} disabled={busy}>
-            清除图标
-          </Button>
+          {appId && (
+            <Button onClick={clearIcon} disabled={busy}>
+              清除图标
+            </Button>
+          )}
         </div>
 
         <div className="icon-picker-browser">

@@ -1,6 +1,6 @@
 //! Passthrough 命令：宿主 .desktop 导出/撤销/auto-start/自定义应用。
 
-use tracing::info;
+use tracing::{info, warn};
 
 use easytidy_protocol::ops::{
         CfgGet, CfgGetResp, CfgSet,
@@ -50,12 +50,13 @@ fn cli_path() -> String {
     "easytidy".to_string()
 }
 
-/// 获取 passthrough 状态（已导出 .desktop 全文 + 配置的应用条目）。
+/// 获取 passthrough 状态（已导出 .desktop 全文 + 配置的应用条目 + 收藏）。
 ///
 /// 返回（前端契约）：
 /// ```json
 /// { "exported": [{"desktop_file","content"}],
-///   "configured_apps": [{"id","name","cmd","desktop_file"?,"auto_start","icon"?}] }
+///   "configured_apps": [{"id","name","cmd","desktop_file"?,"auto_start","icon"?}],
+///   "pinned": [{"id","name","cmd","icon"?}] }
 /// ```
 /// `configured_apps` 是 passthrough.toml 中有状态条目（auto_start=true 或
 /// custom 应用）；扫描应用若未配置则不在此（前端按 id 匹配查 auto-start）。
@@ -89,10 +90,151 @@ pub async fn passthrough_state(
         })
         .collect();
 
+    // 收藏（pin 到工具栏）：顺序 = pin 顺序
+    let pinned = config_file.pinned(container).map_err(|e| e.to_string())?;
+    let pinned_json: Vec<_> = pinned
+        .into_iter()
+        .map(|a| {
+            serde_json::json!({
+                "id": a.id,
+                "name": a.name,
+                "cmd": a.cmd,
+                "icon": a.icon,
+            })
+        })
+        .collect();
+
+    // 容器自启动模式（systemd user unit 为准："off"|"silent"|"gui"）
+    let boot_mode = easytidy_core::systemd::boot_mode(container).unwrap_or_else(|e| {
+        warn!("查询自启动模式失败：{e}");
+        "off".to_string()
+    });
+
     Ok(serde_json::json!({
         "exported": exported_json,
         "configured_apps": apps_json,
+        "pinned": pinned_json,
+        "boot_mode": boot_mode,
     }))
+}
+
+// ============================================================================
+// 容器自启动命令（systemd user unit：登录时触发）
+// ============================================================================
+
+/// 设置容器自启动模式。
+///
+/// - `"off"`：关闭（卸载 unit + disable）
+/// - `"silent"`：静默（登录后仅后台启动容器）
+/// - `"gui"`：非静默（登录后启动容器 + 拉起 per-container GUI 窗口）
+///
+/// 对应 systemd user unit `easytidy-<name>.service`（WantedBy=default.target）；
+/// ExecStart = `<cli> boot --container <name> [--gui]`，cli 取 passthrough
+/// 探测的绝对路径（systemd 用户单元 PATH 受限）。
+#[tauri::command]
+pub async fn passthrough_set_boot_mode(
+    session: tauri::State<'_, Option<GuiSession>>,
+    mode: String,
+) -> Result<(), String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = sess.container_name.clone();
+    let cli = cli_path();
+
+    // systemctl 调用（阻塞）放 spawn_blocking，避免卡 async runtime
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        match mode.as_str() {
+            "off" => {
+                // disable 后删除文件再 reload（顺序相反会残留失效单元）
+                easytidy_core::systemd::disable_boot_unit(&container).map_err(|e| e.to_string())?;
+                easytidy_core::systemd::remove_boot_unit(&container).map_err(|e| e.to_string())?;
+                easytidy_core::systemd::daemon_reload().map_err(|e| e.to_string())?;
+            }
+            "silent" | "gui" => {
+                let gui = mode == "gui";
+                easytidy_core::systemd::install_boot_unit(&container, &cli, gui)
+                    .map_err(|e| e.to_string())?;
+                easytidy_core::systemd::daemon_reload().map_err(|e| e.to_string())?;
+                easytidy_core::systemd::enable_boot_unit(&container).map_err(|e| e.to_string())?;
+            }
+            other => return Err(format!("未知自启动模式：{other}")),
+        }
+        info!("容器自启动模式已设置：{container} → {mode}（cli={cli}）");
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("自启动设置任务失败：{e}"))?
+}
+
+// ============================================================================
+// 收藏（pin 到工具栏）命令
+// ============================================================================
+
+/// 收藏/取消收藏应用（pin 到 GUI 工具栏）。
+///
+/// pinned=true → upsert 到收藏列表（cmd/icon 一并保存，拉起与显示用最新值）；
+/// pinned=false → 移除。icon_path：扫描应用 = 容器内图标路径（工具栏经
+/// server 拉取显示），自定义应用 = 宿主 ~/.easytidy/icons 路径。
+#[tauri::command]
+pub async fn passthrough_set_pinned(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+    name: String,
+    cmd: String,
+    icon_path: Option<String>,
+    pinned: bool,
+) -> Result<(), String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+    let config_file = passthrough_config_file()?;
+
+    if pinned {
+        let app = easytidy_core::passthrough::PassthroughApp {
+            id: id.clone(),
+            name,
+            cmd: clean_exec(&cmd),
+            desktop_file: (!id.starts_with("custom:")).then(|| id.clone()),
+            auto_start: false,
+            icon: icon_path,
+        };
+        config_file.pin_app(container, app).map_err(|e| e.to_string())?;
+    } else {
+        config_file.unpin_app(container, &id).map_err(|e| e.to_string())?;
+    }
+    info!("passthrough 收藏已更新：{container} {id} pinned={pinned}");
+    Ok(())
+}
+
+/// 拉起收藏的应用（工具栏点击；经 server apps.launch，server 保活）。
+/// 返回进程 pid。
+#[tauri::command]
+pub async fn passthrough_launch(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+) -> Result<u32, String> {
+    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+
+    let config_file = passthrough_config_file()?;
+    let app = config_file
+        .pinned(container)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|a| a.id == id)
+        .ok_or_else(|| format!("收藏的应用不存在：{id}"))?;
+
+    let results = easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&app))
+        .await
+        .map_err(|e| e.to_string())?;
+    match results.first() {
+        Some(r) => match r.pid {
+            Some(pid) => {
+                info!("收藏应用已拉起：{id} (pid={pid})");
+                Ok(pid)
+            }
+            None => Err(r.error.clone().unwrap_or_else(|| "拉起失败".to_string())),
+        },
+        None => Err("server 无响应".to_string()),
+    }
 }
 
 /// passthrough 配置文件（默认路径）

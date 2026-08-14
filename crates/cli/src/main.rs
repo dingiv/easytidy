@@ -153,11 +153,14 @@ enum Commands {
     /// 构建并安装 musl server 二进制（M2 新增）
     BuildServer,
 
-    /// 静默启动（stub for M1）
+    /// 自启动入口（systemd user unit 登录时触发）
     Boot {
-        /// 配置文件路径（由 systemd unit 传入）
+        /// 容器名
         #[arg(long)]
-        config: Option<PathBuf>,
+        container: String,
+        /// 非静默模式：容器启动后拉起 per-container GUI 窗口
+        #[arg(long)]
+        gui: bool,
     },
 
     /// 环境语义操作（docs/13-mutable-env-paradigm.md：新/删/快照/fork/运行/关闭）
@@ -286,9 +289,8 @@ async fn main() -> Result<()> {
                 Commands::Rebuild { container } => cmd_rebuild(podman, container).await,
                 Commands::Rm { container, force } => cmd_rm(podman, container, force).await,
                 Commands::Inspect { container } => cmd_inspect(podman, container).await,
-                        Commands::Boot { config: _ } => {
-                    info!("静默启动（stub）：M1 占位，待 M2 实现");
-                    Ok(())
+                        Commands::Boot { container, gui } => {
+                    cmd_boot(container, gui).await
                 }
                 Commands::Env { cmd } => match cmd {
                     EnvCmd::New { name, flavor, image } => cmd_env_new(podman, name, flavor, image).await,
@@ -422,6 +424,74 @@ async fn cmd_start(podman: Podman, container: String) -> Result<()> {
     println!("容器 {} 启动成功", container);
 
     Ok(())
+}
+
+/// 自启动入口（systemd user unit 登录时触发）。
+///
+/// - 容器未运行 → 启动（`Podman::start` 顺带触发 passthrough auto-start 拉起）
+/// - `gui=true`（非静默模式）→ 等待 server socket 就绪后拉起 per-container GUI
+async fn cmd_boot(container: String, gui: bool) -> Result<()> {
+    let podman = Podman::connect().await?;
+    let containers = podman.list_containers().await?;
+    let info = containers
+        .iter()
+        .find(|c| c.name == container)
+        .ok_or_else(|| anyhow::anyhow!("容器不存在：{container}"))?;
+    if info.status != "running" {
+        podman.start(&container).await?;
+        info!("自启动：容器 {container} 已启动");
+    } else {
+        info!("自启动：容器 {container} 已在运行");
+    }
+
+    if gui {
+        // 等待 server socket 就绪（容器刚启动，server 需初始化）
+        let socket = easytidy_core::host_socket_path(&container)?;
+        let mut ready = false;
+        for _ in 0..40 {
+            if socket.exists() {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        if !ready {
+            bail!("等待容器 server 就绪超时（{}）", socket.display());
+        }
+        // 拉起 per-container GUI（CLI 同目录 / 安装目录 / PATH 探测）
+        let gui_bin = gui_binary_path()
+            .ok_or_else(|| anyhow::anyhow!("找不到 easytidy-gui 可执行文件"))?;
+        std::process::Command::new(&gui_bin)
+            .arg("--container")
+            .arg(&container)
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("拉起 per-container GUI 失败：{e}"))?;
+        info!("非静默启动：已拉起 per-container GUI（{}）", gui_bin.display());
+    }
+    Ok(())
+}
+
+/// 探测 per-container GUI 二进制（① CLI 同目录 ② 安装目录 ③ PATH）。
+fn gui_binary_path() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let sibling = parent.join("easytidy-gui");
+            if sibling.exists() {
+                return Some(sibling);
+            }
+        }
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let installed = PathBuf::from(home).join(".local/share/easytidy/bin/easytidy-gui");
+        if installed.exists() {
+            return Some(installed);
+        }
+    }
+    std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join("easytidy-gui"))
+            .find(|p| p.exists())
+    })
 }
 
 /// 停止容器。

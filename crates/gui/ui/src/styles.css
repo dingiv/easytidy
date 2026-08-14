@@ -316,18 +316,20 @@ button:disabled {
 .passthrough-manager {
   height: 100%;
   overflow: auto;
-  padding: 1rem;
+  padding: 0.6rem 0.8rem;
+  font-size: 13px;
 }
 
 .passthrough-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 1rem;
+  margin-bottom: 0.6rem;
 }
 
 .passthrough-header h3 {
   margin: 0;
+  font-size: 1rem;
 }
 
 .auto-start-status {
@@ -340,14 +342,14 @@ button:disabled {
 .apps-list {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: 0.3rem;
 }
 
 .app-item {
   display: flex;
   align-items: center;
-  gap: 1rem;
-  padding: 0.8rem 1rem;
+  gap: 0.6rem;
+  padding: 0.4rem 0.7rem;
   background: #181825;
   border-radius: 6px;
   border: 1px solid #45475a;
@@ -367,21 +369,22 @@ button:disabled {
 }
 
 .app-icon {
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: none;
 }
 
 .app-icon img {
-  width: 32px;
-  height: 32px;
+  width: 26px;
+  height: 26px;
   object-fit: contain;
 }
 
 .app-icon span {
-  font-size: 1.5rem;
+  font-size: 1.15rem;
 }
 
 .app-info {
@@ -390,23 +393,37 @@ button:disabled {
 
 .app-name {
   font-weight: bold;
+  font-size: 0.85rem;
 }
 
 .app-comment {
   color: #9399b2;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
 }
 
 .app-desktop-file {
   color: #6c7086;
-  font-size: 0.75rem;
+  font-size: 0.68rem;
   font-family: monospace;
-  margin-top: 0.2rem;
+  margin-top: 0.1rem;
 }
 
 .app-actions {
   display: flex;
-  gap: 0.5rem;
+  align-items: center;
+  gap: 0.3rem;
+  flex: none;
+}
+
+.app-actions .secondary-button {
+  padding: 2px 8px;
+  font-size: 0.75rem;
+}
+
+/* 纯图标小按钮（更换图标等） */
+.app-actions .secondary-button.icon-only {
+  padding: 3px 6px;
+  line-height: 1;
 }
 
 /* per-app auto-start 开关 */
@@ -448,21 +465,22 @@ button:disabled {
 
 /* 自定义应用区 */
 .custom-section {
-  margin-top: 1.2rem;
+  margin-top: 0.8rem;
   border-top: 1px solid #313244;
-  padding-top: 1rem;
+  padding-top: 0.7rem;
 }
 
 .custom-section h4 {
-  margin: 0 0 0.6rem;
-  font-size: 0.9rem;
+  margin: 0 0 0.4rem;
+  font-size: 0.8rem;
   color: #cdd6f4;
 }
 
 .custom-form {
   display: flex;
-  gap: 0.5rem;
-  margin-bottom: 0.8rem;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
 }
 
 .custom-form input {
@@ -471,9 +489,31 @@ button:disabled {
   border: 1px solid #313244;
   border-radius: 6px;
   color: #cdd6f4;
-  padding: 0.45rem 0.7rem;
-  font-size: 0.82rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.78rem;
   min-width: 0;
+}
+
+.custom-form .primary-button {
+  padding: 3px 10px;
+  font-size: 0.78rem;
+  flex: none;
+}
+
+/* 图标下拉按钮（新增应用表单：从宿主机/从容器导入） */
+.custom-form .custom-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  flex: none;
+}
+
+.custom-icon-preview {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  object-fit: contain;
 }
 
 .custom-form input::placeholder {
@@ -1065,4 +1105,97 @@ button:disabled {
 
 .icon-picker-footer .error-message {
   margin-right: auto;
+}
+
+/* 程序 logo（easytidy 品牌图标） */
+.app-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  vertical-align: middle;
+  margin-right: 6px;
+}
+
+/* ============================================================================
+ * 收藏（pin 到工具栏）
+ * ========================================================================== */
+
+/* 收藏栏（工具栏内，分隔线后） */
+.favorites-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 2px;
+}
+
+.favorite-item {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.favorite-item:hover {
+  background: #313244;
+}
+
+.favorite-item img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+.favorite-fallback {
+  font-size: 1.1rem;
+}
+
+/* 悬停 ✕（取消收藏） */
+.favorite-unpin {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  font-size: 9px;
+  color: #f38ba8;
+  background: #181825;
+  border-radius: 50%;
+  padding: 1px;
+  display: none;
+}
+
+.favorite-item:hover .favorite-unpin {
+  display: block;
+}
+
+/* passthrough 行内 pin 按钮（已收藏高亮） */
+.app-actions .secondary-button.pinned {
+  color: #89b4fa;
+}
+
+/* 容器自启动区块（passthrough 管理器） */
+.boot-section {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.6rem;
+  padding: 0.4rem 0.7rem;
+  background: #181825;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+}
+
+.boot-section h4 {
+  margin: 0;
+  font-size: 0.8rem;
+  color: #cdd6f4;
+  flex: none;
+}
+
+.boot-hint {
+  font-size: 0.72rem;
+  color: #6c7086;
 }

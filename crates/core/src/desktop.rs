@@ -223,27 +223,25 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
     content
 }
 
-/// easytidy 品牌图标（内置 SVG，首次导出 GUI 入口时写入宿主图标目录；
-/// M4 打包时替换为正式品牌资产）。容器 + 终端提示符风格。
-const EASYTIDY_ICON_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#89b4fa"/>
-      <stop offset="1" stop-color="#b4befe"/>
-    </linearGradient>
-  </defs>
-  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#g)"/>
-  <rect x="24" y="24" width="80" height="80" rx="10" fill="#1e1e2e" opacity="0.88"/>
-  <path d="M34 46h60M34 62h60M34 78h38" stroke="#cdd6f4" stroke-width="6" stroke-linecap="round" fill="none"/>
-</svg>"##;
+/// easytidy 品牌图标（256×256 PNG，内嵌；与 GUI 应用图标/水印同源——
+/// crates/gui/icons/easytidy256x256.png 的拷贝，core 无法跨 crate 引用）。
+const EASYTIDY_ICON_PNG: &[u8] = include_bytes!("../assets/easytidy.png");
 
-/// 确保 easytidy 品牌图标存在（~/.easytidy/icons/easytidy-gui.svg）
+/// 确保 easytidy 品牌图标存在（~/.easytidy/icons/easytidy-gui.png）
 /// 返回图标绝对路径；写入失败返回 None（不影响快捷方式导出）。
+///
+/// 历史遗留：旧版本写 SVG 线条图标（easytidy-gui.svg，v0.1 设计）——
+/// 已导出的 .desktop 若仍指向它则图标失效/显示旧设计，顺手清理。
 pub fn ensure_gui_icon() -> Option<String> {
     let dir = crate::appdata::icons_dir().ok()?;
-    let path = dir.join("easytidy-gui.svg");
-    if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_SVG).is_err() {
+    let path = dir.join("easytidy-gui.png");
+    if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_PNG).is_err() {
         return None;
+    }
+    // 清理旧版 SVG（同目录同名 .svg；新导出一律指向 PNG）
+    let legacy_svg = dir.join("easytidy-gui.svg");
+    if legacy_svg.exists() {
+        let _ = std::fs::remove_file(&legacy_svg);
     }
     Some(path.to_string_lossy().into_owned())
 }

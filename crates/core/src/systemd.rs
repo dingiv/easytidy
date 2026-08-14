@@ -1,23 +1,26 @@
-//! systemd user unit 生成（静默启动）。
+//! systemd user unit 生成与安装（容器自启动）。
 //!
-//! 功能：
-//! - 生成用户 systemd unit 文件（用于容器静默启动）
-//! - ExecStart = easytidy --config <cfg> boot
-//! - 安装到 $XDG_CONFIG_HOME/systemd/user/
-//! - 支持 enable/disable
+//! 登录时自启动（WantedBy=default.target）：
+//! - 静默启动：`ExecStart = <cli> boot --container <name>`——仅后台启动容器
+//! - 非静默启动：`ExecStart = <cli> boot --container <name> --gui`——
+//!   启动容器后拉起 per-container GUI 窗口
+//! - 关闭：卸载 unit 并 disable
+//!
+//! unit 文件在 `~/.config/systemd/user/easytidy-<name>.service`
+//! （systemd 用户单元规范位置）；enable/disable/daemon-reload 实际执行
+//! `systemctl --user`（GUI/CLI 运行于用户会话，DBus 可用）。
 
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::PathBuf;
+
 use crate::error::{Error, Result};
 
 /// systemd user unit 模板。
 ///
-/// 注意：
-/// - Type=oneshot（单次启动，不常驻）
-/// - RemainAfterExit=yes（启动后视为活跃）
-/// - WantedBy=default.target（登录时启动）
+/// - Type=oneshot（单次启动，不常驻）+ RemainAfterExit=yes（启动后视为活跃）
+/// - After=podman.socket（依赖 rootless podman API）
 const SYSTEMD_UNIT_TEMPLATE: &str = r#"[Unit]
-Description=easytidy container silent boot: {name}
+Description=easytidy container boot: {name}
 Documentation=https://github.com/dingiv/easy-tidy
 After=network-online.target podman.socket
 Wants=network-online.target
@@ -25,144 +28,116 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart={exec} boot
+ExecStart={cli} boot --container {name}{gui_flag}
 Environment=RUST_LOG=info
 
 [Install]
 WantedBy=default.target
 "#;
 
-/// 生成 systemd user unit 内容。
+/// 生成容器自启动 unit 内容。
 ///
-/// 参数：
-/// - name: 容器名
-/// - config_path: 配置文件路径（easytidy --config <cfg>）
-///
-/// 返回 unit 文件内容字符串。
-pub fn generate_systemd_unit(
-    name: &str,
-    config_path: &Path,
-) -> String {
-    let exec = if let Some(cfg) = config_path.to_str() {
-        format!("easytidy --config {}", cfg)
-    } else {
-        "easytidy".to_string()
-    };
-
+/// - `cli_path`：easytidy CLI 绝对路径（systemd 用户单元 PATH 受限，必须绝对）
+/// - `gui`：true = 非静默（启动容器后拉起 per-container GUI）
+pub fn generate_boot_unit(name: &str, cli_path: &str, gui: bool) -> String {
+    let gui_flag = if gui { " --gui" } else { "" };
     SYSTEMD_UNIT_TEMPLATE
         .replace("{name}", name)
-        .replace("{exec}", &exec)
+        .replace("{cli}", cli_path)
+        .replace("{gui_flag}", gui_flag)
 }
 
-/// 安装 systemd user unit 文件。
-///
-/// 参数：
-/// - name: 容器名
-/// - config_path: 配置文件路径
-///
-/// 返回安装后的 unit 文件路径。
-pub fn install_systemd_unit(
-    name: &str,
-    config_path: &Path,
-) -> Result<PathBuf> {
-    let content = generate_systemd_unit(name, config_path);
-
-    // 确定目标路径（$XDG_CONFIG_HOME/systemd/user/）
+/// unit 文件路径（~/.config/systemd/user/easytidy-<name>.service）
+fn unit_path(name: &str) -> Result<PathBuf> {
     let config_home = dirs::config_dir()
         .ok_or_else(|| Error::Config("无法确定 XDG_CONFIG_HOME".to_string()))?;
-
-    let systemd_dir = config_home.join("systemd").join("user");
-    fs::create_dir_all(&systemd_dir)
-        .map_err(|e| Error::Config(format!("创建 systemd 用户目录失败：{e}")))?;
-
-    let unit_path = systemd_dir.join(format!("easytidy-{}.service", name));
-
-    // 写入文件
-    fs::write(&unit_path, content)
-        .map_err(|e| Error::Config(format!("写入 systemd unit 文件失败：{e}")))?;
-
-    tracing::info!("安装 systemd unit：{:?}", unit_path);
-
-    Ok(unit_path)
+    Ok(config_home.join("systemd").join("user").join(format!("easytidy-{name}.service")))
 }
 
-/// 卸载 systemd user unit 文件。
-pub fn uninstall_systemd_unit(name: &str) -> Result<()> {
-    let config_home = dirs::config_dir()
-        .ok_or_else(|| Error::Config("无法确定 XDG_CONFIG_HOME".to_string()))?;
-
-    let unit_path = config_home
-        .join("systemd")
-        .join("user")
-        .join(format!("easytidy-{}.service", name));
-
-    if unit_path.exists() {
-        fs::remove_file(&unit_path)
-            .map_err(|e| Error::Config(format!("删除 systemd unit 文件失败：{e}")))?;
-
-        tracing::info!("卸载 systemd unit：{:?}", unit_path);
+/// 安装自启动 unit（写入 unit 文件；需随后 daemon-reload + enable）。
+pub fn install_boot_unit(name: &str, cli_path: &str, gui: bool) -> Result<PathBuf> {
+    let path = unit_path(name)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| Error::Config(format!("创建 systemd 用户目录失败：{e}")))?;
     }
+    fs::write(&path, generate_boot_unit(name, cli_path, gui))
+        .map_err(|e| Error::Config(format!("写入 systemd unit 失败：{e}")))?;
+    tracing::info!("安装自启动 unit：{:?}", path);
+    Ok(path)
+}
 
+/// 卸载自启动 unit（删除文件；需随后 daemon-reload）。
+pub fn remove_boot_unit(name: &str) -> Result<()> {
+    let path = unit_path(name)?;
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|e| Error::Config(format!("删除 systemd unit 失败：{e}")))?;
+        tracing::info!("卸载自启动 unit：{:?}", path);
+    }
     Ok(())
 }
 
-/// 启用 systemd user unit（需要调用 systemctl daemon-reload）。
-///
-/// 注意：此函数仅生成启用命令，不实际执行（需要 shell 执行）。
-pub fn enable_systemd_unit(name: &str) -> String {
-    format!("systemctl --user enable easytidy-{}.service", name)
+/// 执行 `systemctl --user` 命令（单元生命周期操作）。
+fn run_systemctl(args: &[&str]) -> Result<()> {
+    let output = std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .map_err(|e| Error::Connect(format!("执行 systemctl 失败（用户会话可用？）：{e}")))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Error::Connect(format!(
+            "systemctl {} 失败：{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
 }
 
-/// 禁用 systemd user unit。
-///
-/// 注意：此函数仅生成禁用命令，不实际执行。
-pub fn disable_systemd_unit(name: &str) -> String {
-    format!("systemctl --user disable easytidy-{}.service", name)
+/// daemon-reload（unit 文件变更后必须）。
+pub fn daemon_reload() -> Result<()> {
+    run_systemctl(&["daemon-reload"])
+}
+
+/// 启用自启动（WantedBy=default.target → 登录时触发）。
+pub fn enable_boot_unit(name: &str) -> Result<()> {
+    run_systemctl(&["enable", &format!("easytidy-{name}.service")])
+}
+
+/// 禁用自启动。
+pub fn disable_boot_unit(name: &str) -> Result<()> {
+    run_systemctl(&["disable", &format!("easytidy-{name}.service")])
+}
+
+/// 查询当前自启动模式："off"（未安装）/ "silent"（静默）/ "gui"（非静默）。
+pub fn boot_mode(name: &str) -> Result<String> {
+    let path = unit_path(name)?;
+    if !path.exists() {
+        return Ok("off".to_string());
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|e| Error::Config(format!("读取 systemd unit 失败：{e}")))?;
+    Ok(if content.contains(" --gui") { "gui" } else { "silent" }.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
 
     #[test]
-    fn test_generate_systemd_unit() {
-        let content = generate_systemd_unit(
-            "test-container",
-            &PathBuf::from("/home/user/.config/easytidy/config.toml"),
-        );
-
-        assert!(content.contains("Description=easytidy container silent boot: test-container"));
-        assert!(content.contains("ExecStart=easytidy --config"));
-        assert!(content.contains("boot"));
+    fn test_generate_boot_unit_silent() {
+        let content = generate_boot_unit("chrome", "/usr/bin/easytidy", false);
+        assert!(content.contains("Description=easytidy container boot: chrome"));
+        assert!(content.contains("ExecStart=/usr/bin/easytidy boot --container chrome"));
+        assert!(!content.contains(" --gui"));
         assert!(content.contains("WantedBy=default.target"));
     }
 
     #[test]
-    fn test_install_systemd_unit() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // 模拟 XDG_CONFIG_HOME
-        let target = temp_dir
-            .path()
-            .join("systemd/user/easytidy-test.service");
-
-        // 手动创建目录并写入
-        let content = generate_systemd_unit("test", &PathBuf::from("/tmp/config.toml"));
-        fs::create_dir_all(temp_dir.path().join("systemd/user")).unwrap();
-        fs::write(&target, content).unwrap();
-
-        assert!(target.exists());
-        let loaded = fs::read_to_string(&target).unwrap();
-        assert!(loaded.contains("easytidy container silent boot"));
-    }
-
-    #[test]
-    fn test_enable_disable_commands() {
-        let enable = enable_systemd_unit("test");
-        assert_eq!(enable, "systemctl --user enable easytidy-test.service");
-
-        let disable = disable_systemd_unit("test");
-        assert_eq!(disable, "systemctl --user disable easytidy-test.service");
+    fn test_generate_boot_unit_gui() {
+        let content = generate_boot_unit("chrome", "/usr/bin/easytidy", true);
+        assert!(content.contains("ExecStart=/usr/bin/easytidy boot --container chrome --gui"));
     }
 }

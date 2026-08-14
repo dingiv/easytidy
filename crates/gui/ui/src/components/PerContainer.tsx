@@ -19,9 +19,12 @@ import {
   SettingOutlined,
 } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
+import { useFavoritesStore } from '../stores/favoritesStore';
 import { useTerminalStore } from '../stores/terminalStore';
 import { useUiStore } from '../stores/uiStore';
-import type { TerminalInfo } from '../types';
+import type { PassthroughState, PinnedApp, TerminalInfo } from '../types';
+import logo from '../assets/logo.png';
+import { AppIcon } from './AppIcon';
 import { Terminal } from './Terminal';
 import { FileBrowser } from './FileBrowser';
 import { FileEditor } from './FileEditor';
@@ -55,6 +58,9 @@ function terminalTitle(t: TerminalInfo): string {
 }
 
 function PerContainerInner({ containerName }: PerContainerProps) {
+  const { message } = AntApp.useApp();
+  // 收藏（pin 到工具栏）：PassthroughManager 经 store 同步；此处订阅展示
+  const pinnedApps = useFavoritesStore((s) => s.pinned);
   const [panes, setPanes] = useState<Pane[]>(() => [
     // 默认打开一个 node 终端（新开持久会话；挂载后按 get_terminals 校正）
     { id: useUiStore.getState().nextPaneId(), kind: 'terminal', title: '终端', asRoot: false, streamId: null },
@@ -156,6 +162,46 @@ function PerContainerInner({ containerName }: PerContainerProps) {
       await invoke('container_shutdown');
     } catch (err) {
       console.error('container_shutdown failed:', err);
+    }
+  };
+
+  // 收藏（pin）初始化：挂载时拉取 passthrough_state（工具栏不依赖面板打开）
+  useEffect(() => {
+    (async () => {
+      try {
+        const st = await invoke<PassthroughState>('passthrough_state');
+        useFavoritesStore.getState().setPinned(st.pinned ?? []);
+      } catch (err) {
+        console.error('load pinned failed:', err);
+      }
+    })();
+  }, []);
+
+  /** 点击收藏图标 → 拉起应用（server apps.launch，server 保活） */
+  const launchPinned = async (p: PinnedApp) => {
+    try {
+      const pid = await invoke<number>('passthrough_launch', { id: p.id });
+      message.success(`${p.name} 已启动 (pid=${pid})`);
+    } catch (err: any) {
+      message.error(err?.message || `启动 ${p.name} 失败`);
+      console.error('passthrough_launch failed:', err);
+    }
+  };
+
+  /** 悬停 ✕ → 取消收藏 */
+  const unpinPinned = async (p: PinnedApp) => {
+    try {
+      await invoke('passthrough_set_pinned', {
+        id: p.id,
+        name: p.name,
+        cmd: p.cmd,
+        iconPath: p.icon ?? null,
+        pinned: false,
+      });
+      useFavoritesStore.getState().removePinned(p.id);
+    } catch (err: any) {
+      message.error(err?.message || '取消收藏失败');
+      console.error('passthrough_set_pinned (unpin) failed:', err);
     }
   };
 
@@ -262,7 +308,7 @@ function PerContainerInner({ containerName }: PerContainerProps) {
         >
           {!sidebarCollapsed && (
             <>
-              <div className="menu-title">easytidy - {containerName}</div>
+              <div className="menu-title"><img src={logo} className="app-logo" alt="easytidy" />easytidy - {containerName}</div>
               <div className="per-left-browser">
                 {/* 双击文本文件 → 在右侧面板打开编辑器；跟随终端开关 */}
                 <FileBrowser
@@ -324,6 +370,37 @@ function PerContainerInner({ containerName }: PerContainerProps) {
                   <CloseOutlined />
                 </button>
               </Tooltip>
+
+              <hr />
+
+              {/* 收藏栏：pin 到工具栏的 passthrough 应用；点击拉起，悬停 ✕ 取消收藏 */}
+              {pinnedApps.length > 0 && (
+                <div className="favorites-bar">
+                  {pinnedApps.map((p) => (
+                    <Tooltip key={p.id} title={p.name} mouseEnterDelay={4}>
+                      <div className="favorite-item" onClick={() => launchPinned(p)}>
+                        {p.id.startsWith('custom:') ? (
+                          p.icon ? (
+                            <img src={`file://${p.icon}`} alt="" />
+                          ) : (
+                            <span className="favorite-fallback">⚙️</span>
+                          )
+                        ) : (
+                          <AppIcon path={p.icon} size={22} />
+                        )}
+                        <CloseOutlined
+                          className="favorite-unpin"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            unpinPinned(p);
+                          }}
+                        />
+                      </div>
+                    </Tooltip>
+                  ))}
+                </div>
+              )}
+
             </nav>
           </header>
 

@@ -14,7 +14,7 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use easytidy_protocol::ops::{AppsLaunch, AppsLaunchItem, AppsLaunchResp};
+use easytidy_protocol::ops::{AppsLaunch, AppsLaunchItem, AppsLaunchResp, AppsLaunchResult};
 use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::{Frame, Handshake, Message, MsgKind, PROTOCOL_VERSION};
 use futures::{SinkExt, StreamExt};
@@ -55,6 +55,9 @@ pub struct PassthroughConfig {
     pub schema_version: u32,
     #[serde(default)]
     pub containers: HashMap<String, Vec<PassthroughApp>>,
+    /// 收藏（pin 到 GUI 工具栏）：按容器分组的应用列表，顺序 = 显示顺序
+    #[serde(default)]
+    pub pinned: HashMap<String, Vec<PassthroughApp>>,
 }
 
 impl PassthroughConfig {
@@ -62,6 +65,7 @@ impl PassthroughConfig {
         Self {
             schema_version: 1,
             containers: HashMap::new(),
+            pinned: HashMap::new(),
         }
     }
 }
@@ -149,6 +153,37 @@ impl PassthroughConfigFile {
             *existing = app;
         } else {
             apps.push(app);
+        }
+        self.save(&config)
+    }
+
+    /// 读取某容器的收藏（pin）列表（无条目返回空；顺序 = pin 顺序）
+    pub fn pinned(&self, container: &str) -> Result<Vec<PassthroughApp>> {
+        let config = self.load()?;
+        Ok(config.pinned.get(container).cloned().unwrap_or_default())
+    }
+
+    /// 收藏（pin）应用：按 id upsert（保持顺序），容器条目空则移除键。
+    pub fn pin_app(&self, container: &str, app: PassthroughApp) -> Result<()> {
+        let mut config = self.load()?;
+        let pinned = config.pinned.entry(container.to_string()).or_default();
+        if let Some(existing) = pinned.iter_mut().find(|a| a.id == app.id) {
+            *existing = app;
+        } else {
+            pinned.push(app);
+        }
+        self.save(&config)
+    }
+
+    /// 取消收藏（unpin）：移除指定应用；条目空则移除键。
+    pub fn unpin_app(&self, container: &str, id: &str) -> Result<()> {
+        let mut config = self.load()?;
+        let Some(pinned) = config.pinned.get_mut(container) else {
+            return Ok(());
+        };
+        pinned.retain(|a| a.id != id);
+        if pinned.is_empty() {
+            config.pinned.remove(container);
         }
         self.save(&config)
     }
@@ -261,16 +296,37 @@ pub async fn autostart_apps(container: &str) {
         to_launch.len()
     );
 
-    let socket_path = match crate::host_socket_path(container) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("解析容器 socket 路径失败：{e}");
-            return;
+    // 经 server socket 拉起（连接重试 + 握手 + apps.launch；成功/失败逐条返回）
+    match launch_apps(container, &to_launch).await {
+        Ok(results) => {
+            for r in results {
+                match r.pid {
+                    Some(pid) => tracing::info!("auto-start 拉起成功：{} (pid={pid})", r.name),
+                    None => tracing::warn!(
+                        "auto-start 拉起失败：{}：{}",
+                        r.name,
+                        r.error.as_deref().unwrap_or("unknown")
+                    ),
+                }
+            }
         }
-    };
+        Err(e) => tracing::warn!("auto-start：拉起失败（container={container}）：{e}"),
+    }
+}
 
-    // 连接重试：server 随容器启动，容忍就绪延迟（2s 窗口——
-    // start 挂点是 await 语义，窗口过大拖慢启动路径；超时静默降级）
+/// 经 server socket 拉起应用（apps.launch；server spawn 的子进程独立于
+/// 连接存活）。连接重试 2s 窗口容忍 server 就绪延迟；返回逐条结果
+/// （成功 pid / 失败 error）。
+pub async fn launch_apps(
+    container: &str,
+    apps: &[PassthroughApp],
+) -> Result<Vec<AppsLaunchResult>> {
+    if apps.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let socket_path = crate::host_socket_path(container)?;
+
     let mut framed: Option<Framed<UnixStream, FrameCodec>> = None;
     for _ in 0..8 {
         match UnixStream::connect(&socket_path).await {
@@ -281,14 +337,9 @@ pub async fn autostart_apps(container: &str) {
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(250)).await,
         }
     }
-    let mut framed = match framed {
-        Some(f) => f,
-        None => {
-            // 非 easytidy 容器（无 server）/server 启动失败：静默
-            tracing::warn!("auto-start：连接容器 server 超时（container={container}）");
-            return;
-        }
-    };
+    let mut framed = framed.ok_or_else(|| {
+        Error::Connect(format!("连接容器 server 超时：{}", socket_path.display()))
+    })?;
 
     // hello 握手
     let handshake = Handshake {
@@ -304,15 +355,11 @@ pub async fn autostart_apps(container: &str) {
         err: None,
     });
     if framed.send(hello).await.is_err() {
-        tracing::warn!("auto-start：发送握手失败（container={container}）");
-        return;
+        return Err(Error::Connect("发送握手失败".to_string()));
     }
     match framed.next().await {
         Some(Ok(Frame::Json(_))) => {}
-        _ => {
-            tracing::warn!("auto-start：握手未确认（container={container}）");
-            return;
-        }
+        _ => return Err(Error::Connect("握手未确认".to_string())),
     }
 
     // apps.launch
@@ -321,7 +368,7 @@ pub async fn autostart_apps(container: &str) {
         kind: MsgKind::Req,
         op: "apps.launch".to_string(),
         payload: serde_json::to_value(AppsLaunch {
-            apps: to_launch
+            apps: apps
                 .iter()
                 .map(|a| AppsLaunchItem {
                     name: a.name.clone(),
@@ -333,27 +380,13 @@ pub async fn autostart_apps(container: &str) {
         err: None,
     });
     if framed.send(launch).await.is_err() {
-        tracing::warn!("auto-start：发送 apps.launch 失败（container={container}）");
-        return;
+        return Err(Error::Connect("发送 apps.launch 失败".to_string()));
     }
     match framed.next().await {
-        Some(Ok(Frame::Json(resp))) => {
-            if let Ok(launch_resp) =
-                serde_json::from_value::<AppsLaunchResp>(resp.payload)
-            {
-                for r in launch_resp.results {
-                    match r.pid {
-                        Some(pid) => tracing::info!("auto-start 拉起成功：{} (pid={pid})", r.name),
-                        None => tracing::warn!(
-                            "auto-start 拉起失败：{}：{}",
-                            r.name,
-                            r.error.as_deref().unwrap_or("unknown")
-                        ),
-                    }
-                }
-            }
-        }
-        _ => tracing::warn!("auto-start：apps.launch 响应异常（container={container}）"),
+        Some(Ok(Frame::Json(resp))) => serde_json::from_value::<AppsLaunchResp>(resp.payload)
+            .map(|r| r.results)
+            .map_err(|e| Error::Connect(format!("解析 apps.launch 响应失败：{e}"))),
+        _ => Err(Error::Connect("apps.launch 响应异常".to_string())),
     }
 }
 
@@ -416,6 +449,28 @@ mod tests {
         let apps = f.apps("c").unwrap();
         assert_eq!(apps.len(), 1);
         assert!(!apps[0].auto_start); // custom 保留但关掉
+    }
+
+    #[test]
+    fn test_pin_unpin() {
+        let dir = TempDir::new().unwrap();
+        let f = test_file(&dir);
+        let a = app("chrome", "Chrome", false);
+
+        // pin：按 id upsert 保持顺序
+        f.pin_app("c", a.clone()).unwrap();
+        f.pin_app("c", a.clone()).unwrap(); // 重复 pin = upsert
+        let pinned = f.pinned("c").unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0].id, "chrome");
+
+        // 多容器隔离
+        f.pin_app("other", a.clone()).unwrap();
+        assert_eq!(f.pinned("c").unwrap().len(), 1);
+
+        // unpin：移除；条目空则移除键
+        f.unpin_app("c", "chrome").unwrap();
+        assert!(f.pinned("c").unwrap().is_empty());
     }
 
     #[test]

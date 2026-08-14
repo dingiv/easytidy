@@ -100,6 +100,11 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::passthrough_pick_host_icon,
             commands::passthrough::passthrough_import_container_icon,
             commands::passthrough::passthrough_set_custom_icon,
+            // 收藏（pin 到工具栏）
+            commands::passthrough::passthrough_set_pinned,
+            commands::passthrough::passthrough_launch,
+            // 容器自启动（systemd user unit）
+            commands::passthrough::passthrough_set_boot_mode,
             // 配置（容器内 server 配置读写）
             commands::passthrough::config_get,
             commands::passthrough::config_set,

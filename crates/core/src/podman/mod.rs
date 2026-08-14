@@ -582,6 +582,20 @@ impl Podman {
         format!("{safe}-{ts}")
     }
 
+    /// 确保宿主 socket 目录存在（$XDG_RUNTIME_DIR/easytidy/<name>）。
+    ///
+    /// 容器配置 bind-mount 了该目录（容器内 /run/easytidy），而 bind 挂载
+    /// 要求宿主源目录已存在——开机后 XDG_RUNTIME_DIR 被系统重建、目录消失，
+    /// 未先建目录直接 start 报 runc mount 错误（实测 2026-08-09 重启复现）。
+    async fn ensure_socket_dir(&self, name: &str) -> Result<()> {
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+            .map_err(|_| Error::NoXdgRuntime)?;
+        let dir = PathBuf::from(runtime_dir).join("easytidy").join(name);
+        tokio::fs::create_dir_all(&dir).await
+            .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
+        Ok(())
+    }
+
     /// 启动容器（按名或 ID）。
     ///
     /// 启动成功后触发 passthrough auto-start 拉起（await——不能 spawn：
@@ -589,6 +603,9 @@ impl Podman {
     /// autostart_apps 内部 2s 连接重试兜底 server 就绪延迟，失败仅日志）。
     pub async fn start(&self, name_or_id: &str) -> Result<()> {
         use bollard::container::StartContainerOptions;
+
+        // bind-mount 源目录须已存在：开机后重建（见 ensure_socket_dir）
+        self.ensure_socket_dir(name_or_id).await?;
 
         self.docker.start_container(name_or_id, None::<StartContainerOptions<String>>).await
             .map_err(|e| Error::Connect(format!("启动容器失败：{e}")))?;
@@ -620,6 +637,9 @@ impl Podman {
     /// 原因见 [`Podman::start`]）。
     pub async fn restart(&self, name_or_id: &str) -> Result<()> {
         use bollard::container::RestartContainerOptions;
+
+        // bind-mount 源目录须已存在：开机后重建（见 ensure_socket_dir）
+        self.ensure_socket_dir(name_or_id).await?;
 
         // 默认 10 秒超时
         let opts = RestartContainerOptions {

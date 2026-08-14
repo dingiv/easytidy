@@ -71,10 +71,24 @@ export interface ExportedPassthrough {
   content: string;
 }
 
+/// 收藏（pin 到工具栏）的应用条目
+export interface PinnedApp {
+  id: string;
+  name: string;
+  /// 实际执行命令串
+  cmd: string;
+  /// 图标：扫描应用 = 容器内路径（经 server 拉取显示）；
+  /// 自定义应用 = 宿主 ~/.easytidy/icons 路径
+  icon?: string;
+}
+
 /// Passthrough state from passthrough_state
 export interface PassthroughState {
   exported: ExportedPassthrough[];
   configured_apps: PassthroughApp[];
+  pinned: PinnedApp[];
+  /// 容器自启动模式（systemd user unit）：off 关闭 / silent 静默 / gui 非静默
+  boot_mode?: 'off' | 'silent' | 'gui';
 }
 
 /// Mount config for the container config manager
