@@ -1,0 +1,706 @@
+//! PTY 服务：open/attach/回放/resize/close/枚举/cwd 跟随。
+use crate::state::{PtySession, RING_MAX, ServerState};
+use crate::setup::{build_su_command, user_map, current_euid, fixup_xdg_data_dirs_value};
+
+use std::collections::HashMap;
+use std::io::Read;
+use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::thread;
+
+use anyhow::{Context, Result};
+use easytidy_protocol::{
+    Frame, Message, MsgKind, PtyClose, PtyCwd, PtyCwdResp,
+    PtyListResp, PtyOpen, PtyOpenResp, PtyResize, PtyTerminalInfo, RpcError,
+};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use serde_json::json;
+use tokio::process::Command as TokioCommand;
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
+
+/// 把连接订阅到已有 PTY 会话：按请求尺寸同步 PTY + 清屏回放环形缓冲 + 登记订阅。
+/// 返回 None = 会话不存在（调用方回退新建路径）。
+///
+/// ⚠️ 回放前缀"清屏 + 光标复位"：ring 是从字节流中间截取的片段（128KB
+/// 裁剪/半截 ESC 序列），直接回放会让 xterm 从错误状态开始渲染 → 光标漂移、
+/// 提示符残缺错位（实测乱码）。合并**单帧**发送：分块回放导致 xterm 逐块
+/// 渲染 → 切回 tab 时"先少量文字再迅速补齐"的闪烁（实测）。DECSET 2026
+/// （同步输出）包裹整帧：xterm 6.0 原生将整帧原子渲染，清除回放过程的
+/// 逐块重绘闪烁（社区标准做法，调研 2026-08-07）。
+pub(crate) async fn attach_to_session(
+    state: &Arc<ServerState>,
+    stream_id: u32,
+    cols: u16,
+    rows: u16,
+    event_tx: &mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
+    msg_id: u64,
+) -> Result<Option<Frame>> {
+    let sessions = state.sessions.read().await;
+    let Some(session) = sessions.get(&stream_id) else {
+        return Ok(None);
+    };
+
+    // 用请求尺寸立即同步 PTY：attach 客户端尺寸可能与旧会话不同，
+    // 不 resize 则 shell 按旧行列换行 → 提示符截断错位（实测）
+    {
+        let master = session.master.lock().unwrap();
+        let _ = master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
+    }
+
+    // 回放环形缓冲（恢复当前屏幕）→ 订阅
+    {
+        const SYNC_START: &[u8] = b"\x1b[?2026h";
+        const SYNC_END: &[u8] = b"\x1b[?2026l";
+        let prefix = b"\x1b[2J\x1b[H";
+        let ring = session.ring.lock().unwrap();
+        let mut pending: Vec<u8> =
+            Vec::with_capacity(SYNC_START.len() + prefix.len() + ring.len() + SYNC_END.len());
+        pending.extend_from_slice(SYNC_START);
+        pending.extend_from_slice(prefix);
+        pending.extend(ring.iter().copied());
+        pending.extend_from_slice(SYNC_END);
+        // ring 不清空：多客户端 attach 各自从"清屏 + 全量 ring"渲染，
+        // 渲染幂等；清空会破坏后续 attach 的回放
+        drop(ring);
+        let _ = event_tx.send(Frame::Raw {
+            stream_id,
+            data: pending,
+        });
+    }
+    session.subs.lock().unwrap().push((conn_token, (*event_tx).clone()));
+    info!("PTY attach: stream_id={}", stream_id);
+    Ok(Some(Frame::Json(Message {
+        id: msg_id,
+        kind: MsgKind::Resp,
+        op: "pty.open".to_string(),
+        payload: serde_json::to_value(PtyOpenResp { stream_id })?,
+        err: None,
+    })))
+}
+
+/// Handle PTY open
+pub(crate) async fn handle_pty_open(
+    msg: Message,
+    state: &Arc<ServerState>,
+    event_tx: mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
+) -> Result<Frame> {
+    let req: PtyOpen = serde_json::from_value(msg.payload)
+        .context("Failed to parse PtyOpen")?;
+
+    // 接线常驻终端：server 按身份各持一个 attach 终端（persistent 会话，
+    // 不随连接断开清理；key: "user"=node 常规 / "root"=root）。
+    // 已有 → 订阅 + 回放环形缓冲 → 复用同一 stream_id；无 → 走新建路径并登记。
+    // ⚠️ guard 先取值再 await：std RwLock guard 在 if-let scrutinee 中存活
+    // 整个语句，跨 await 导致 future 非 Send
+    let attach_key = if req.as_root { "root" } else { "user" };
+    let default_sid = state
+        .default_terminal
+        .read()
+        .unwrap()
+        .get(attach_key)
+        .copied();
+    // 多终端：按 stream_id 附接已有会话（GUI 重开窗口恢复面板）
+    if let Some(sid) = req.attach_stream {
+        if let Some(resp) =
+            attach_to_session(state, sid, req.cols, req.rows, &event_tx, conn_token, msg.id).await?
+        {
+            return Ok(resp);
+        }
+        info!("attach_stream {} 不存在，回退新建路径", sid);
+    }
+    // 单终端 attach 语义：复用身份默认常驻会话
+    if req.attach {
+        if let Some(default_sid) = default_sid {
+            if let Some(resp) = attach_to_session(
+                state,
+                default_sid,
+                req.cols,
+                req.rows,
+                &event_tx,
+                conn_token,
+                msg.id,
+            )
+            .await?
+            {
+                return Ok(resp);
+            }
+        }
+    }
+
+    let pty_system = native_pty_system();
+    let pty_size = PtySize {
+        rows: req.rows,
+        cols: req.cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let pty_pair = pty_system
+        .openpty(pty_size)
+        .context("Failed to open PTY")?;
+
+    // 用户映射生效且非 as_root 时经 su 降权到容器内用户 node（distrobox 式）：
+    // - cmd 为空：`su - <name>`（登录 shell，HOME/环境由 su 设置）
+    // - cmd 非空：`su <name> -c '<shell 转义后的完整命令>'`（cmd + argv[1..] 单引号转义拼接）
+    // as_root=true（setup/包管理）：直接以容器 root 运行（rootless 下 = 宿主用户权）
+    // 映射未生效（env 缺失/用户创建失败）：维持现状（/bin/sh root）。
+    let mut cmd_builder = if req.as_root {
+        // root 交互 shell 优先 bash（与 node 终端体验一致；PTY 对端自动交互）。
+        // 仅旧容器（User=root）会收到 as_root 请求——新容器的 root 终端由
+        // 宿主侧 exec 通道提供，不经 server
+        let cmd = if req.cmd.is_empty() {
+            if Path::new("/bin/bash").exists() {
+                "/bin/bash".to_string()
+            } else {
+                "/bin/sh".to_string()
+            }
+        } else {
+            req.cmd.clone()
+        };
+        let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
+
+        let mut b = CommandBuilder::new(cmd);
+        for arg in &argv[1..] {
+            b.arg(arg);
+        }
+        b
+    } else if let Some(user) = user_map() {
+        if current_euid().unwrap_or(0) == user.uid {
+            // node 容器（server=node）：直接 spawn，免 su——login 语义经
+            // shell 的 -l（HOME/SHELL 由 podman User=node 按 passwd 设置）
+            let cmd = if req.cmd.is_empty() {
+                if Path::new("/bin/bash").exists() {
+                    "/bin/bash".to_string()
+                } else {
+                    "/bin/sh".to_string()
+                }
+            } else {
+                req.cmd.clone()
+            };
+            let mut argv = if req.cmd.is_empty() {
+                vec![cmd.clone(), "-l".to_string()]
+            } else {
+                req.argv.clone()
+            };
+            if argv.is_empty() {
+                argv.push(cmd.clone());
+            }
+            let mut b = CommandBuilder::new(cmd);
+            for arg in &argv[1..] {
+                b.arg(arg);
+            }
+            if req.cwd == "/" {
+                b.cwd(&user.home); // login 落 home（与 su - 行为对齐）
+            }
+            b
+        } else {
+            // root 容器（旧模型）：经 su 降权到 node
+            if req.cmd.is_empty() {
+                let mut b = CommandBuilder::new("su");
+                b.arg("-");
+                b.arg(&user.name);
+                b
+            } else {
+                let full = build_su_command(&req.cmd, &req.argv);
+                let mut b = CommandBuilder::new("su");
+                b.arg("-c");
+                b.arg(full);
+                b.arg(&user.name);
+                b
+            }
+        }
+    } else {
+        let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
+        let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
+
+        let mut b = CommandBuilder::new(cmd);
+        for arg in &argv[1..] {
+            b.arg(arg);
+        }
+        b
+    };
+
+    // Set environment variables。XDG_DATA_DIRS 必须含系统默认目录（旧 flavor 注入
+    // 纯覆盖值导致 gdk-pixbuf 找不到系统 loaders.cache，PNG 图标解码失败、GTK
+    // 断言崩溃——Chrome 保存图片实测），此处对固化 env 做防御性修正。
+    for (k, v) in &req.env {
+        if k == "XDG_DATA_DIRS" {
+            cmd_builder.env(k, fixup_xdg_data_dirs_value(v));
+        } else {
+            cmd_builder.env(k, v);
+        }
+    }
+    // TERM 注入：交互 shell 必需（clear 等依赖），客户端 env 未必携带
+    // （实测 "TERM environment variable not set"）
+    if !req.env.contains_key("TERM") {
+        cmd_builder.env("TERM", "xterm-256color");
+    }
+
+    // Set working directory
+    cmd_builder.cwd(&req.cwd);
+
+    let slave = pty_pair.slave;
+    let master = pty_pair.master;
+
+    // Take writer BEFORE we wrap master in Arc<Mutex<>>
+    let writer = master.take_writer()
+        .context("Failed to take PTY writer")?;
+
+    // Clone reader for the reader thread
+    let reader = master.try_clone_reader()
+        .context("Failed to clone PTY reader")?;
+
+    // Wrap master in Arc<Mutex<>> for resize operations
+    let master = Arc::new(std::sync::Mutex::new(master));
+
+    // Spawn the command - child is moved to reader thread
+    let child = slave
+        .spawn_command(cmd_builder)
+        .context("Failed to spawn PTY child")?;
+    let spawn_pid = child.process_id().unwrap_or(0);
+
+    // Allocate stream ID
+    let stream_id = state.next_stream_id.fetch_add(1, Ordering::SeqCst);
+
+    // 常驻会话：attach（登记为身份默认终端，供复用）或 persistent（多终端
+    // 实例，独立会话不登记——GUI 经 pty.list/attach_stream 恢复）
+    let persistent = req.attach || req.persistent;
+    if req.attach {
+        let mut def = state.default_terminal.write().unwrap();
+        def.insert(attach_key.to_string(), stream_id);
+        info!("常驻终端已登记：{attach_key} → stream_id={stream_id}");
+    } else if req.persistent {
+        info!("多终端会话已创建：stream_id={stream_id} as_root={}", req.as_root);
+    }
+
+    // Create session
+    let session = Arc::new(PtySession {
+        writer: Arc::new(std::sync::Mutex::new(writer)),
+        master: master.clone(),
+        ring: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+        subs: Arc::new(std::sync::Mutex::new(vec![(conn_token, event_tx.clone())])),
+        persistent: std::sync::atomic::AtomicBool::new(persistent),
+        spawn_pid,
+        last_cwd: std::sync::Mutex::new(None),
+        cmd: req.cmd.clone(),
+        as_root: req.as_root,
+    });
+
+    // Store session
+    {
+        let mut sessions = state.sessions.write().await;
+        sessions.insert(stream_id, session);
+    }
+
+    // Drop the slave after spawn (else master never sees EOF)
+    drop(slave);
+
+    info!("PTY opened: stream_id={}, cmd={}", stream_id, req.cmd);
+
+    // Spawn PTY reader thread (owns the child for reaping)
+    let msg_id = state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64;
+    let stream_id_copy = stream_id;
+    let session_for_reader = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&stream_id).cloned().unwrap()
+    };
+    let default_terminal = state.default_terminal.clone();
+    thread::spawn(move || {
+        pty_reader_thread(
+            stream_id_copy,
+            reader,
+            child,
+            msg_id,
+            session_for_reader,
+            default_terminal,
+        );
+    });
+
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "pty.open".to_string(),
+        payload: serde_json::to_value(PtyOpenResp { stream_id })?,
+        err: None,
+    }))
+}
+
+/// PTY reader thread (runs in a separate thread because PTY I/O is synchronous)
+///
+/// 输出路径：写入环形缓冲（新 attach 客户端回放）+ 广播所有订阅连接
+/// （send 失败 = 连接断开 → 退订该连接；常驻会话保留继续缓冲）。
+pub(crate) fn pty_reader_thread(
+    stream_id: u32,
+    reader: Box<dyn std::io::Read + Send>,
+    mut child: Box<dyn portable_pty::Child + Send>,
+    msg_id: u64,
+    session: Arc<PtySession>,
+    default_terminal: Arc<std::sync::RwLock<HashMap<String, u32>>>,
+) {
+    info!("PTY reader thread started: stream_id={}", stream_id);
+
+    let mut reader = std::io::BufReader::new(reader);
+    let mut buf = [0u8; 8192];
+
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => {
+                info!("PTY EOF: stream_id={}", stream_id);
+                break;
+            }
+            Ok(n) => {
+                debug!("PTY read {} bytes: stream_id={}", n, stream_id);
+                let data = buf[..n].to_vec();
+
+                // 环形缓冲（回放；上限裁剪）
+                {
+                    let mut ring = session.ring.lock().unwrap();
+                    ring.extend(&data);
+                    while ring.len() > RING_MAX {
+                        ring.pop_front();
+                    }
+                }
+
+                // 广播订阅者（send 失败 = 连接断开 → 退订）
+                let frame = Frame::Raw {
+                    stream_id,
+                    data,
+                };
+                let mut subs = session.subs.lock().unwrap();
+                subs.retain(|(_, tx)| tx.send(frame.clone()).is_ok());
+            }
+            Err(e) => {
+                error!("PTY read error: stream_id={}, {}", stream_id, e);
+                break;
+            }
+        }
+    }
+
+    // Try to reap child to get exit code
+    // Note: portable_pty::ExitStatus doesn't expose code() method directly
+    // For v0, we use success=0, error=-1
+    // su -c 场景存在"子命令退出 → master EOF → su 尚未退出"的竞态：EOF 后先
+    // 短暂等待子进程自然退出（否则 kill 会吞掉输出/退出码，实测快速命令丢输出）
+    let exit_code = match child.try_wait() {
+        Ok(Some(status)) => {
+            if status.success() { 0 } else { -1 }
+        }
+        Ok(None) => {
+            // EOF 后给子进程一个自然退出的宽限窗口
+            let mut grace = std::time::Duration::from_millis(300);
+            let exit = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break Some(status),
+                    Ok(None) => {
+                        if grace.is_zero() {
+                            break None;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        grace = grace.saturating_sub(std::time::Duration::from_millis(50));
+                    }
+                    Err(e) => {
+                        error!("Failed to wait for PTY child: {}", e);
+                        break None;
+                    }
+                }
+            };
+            match exit {
+                Some(status) => {
+                    if status.success() { 0 } else { -1 }
+                }
+                None => {
+                    info!("PTY child still running at EOF, killing");
+                    let _ = child.kill();
+                    match child.wait() {
+                        Ok(status) => {
+                            if status.success() { 0 } else { -1 }
+                        }
+                        Err(_) => -1,
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            error!("Failed to wait for PTY child: {}", e);
+            -1
+        }
+    };
+
+    // Send pty.exited event to all subscribers（连接侧 GUI/CLI 据此显示退出）
+    let evt = Frame::Json(Message {
+        id: msg_id,
+        kind: MsgKind::Evt,
+        op: "pty.exited".to_string(),
+        payload: serde_json::json!({
+            "stream_id": stream_id,
+            "code": exit_code,
+        }),
+        err: None,
+    });
+    {
+        let mut subs = session.subs.lock().unwrap();
+        for (_, tx) in subs.iter() {
+            let _ = tx.send(evt.clone());
+        }
+        subs.clear();
+    }
+
+    // 常驻终端自然退出（用户 exit/进程结束）→ 清除登记，下次 attach 新建
+    {
+        let mut def = default_terminal.write().unwrap();
+        if let Some((key, _)) = def.iter().find(|(_, v)| **v == stream_id) {
+            let key = key.clone();
+            def.remove(&key);
+            info!("常驻终端已退出并清除登记：{key} → stream_id={stream_id}");
+        }
+    }
+
+    info!("PTY reader thread ended: stream_id={}, exit_code={}", stream_id, exit_code);
+}
+
+/// 读取进程 cwd：先直接读（server 的直接子进程可读，如 root 终端 bash）；
+/// ptrace 拒绝（node 属主进程，root 缺 CAP_SYS_PTRACE 时）→ 经 `su node`
+/// 执行 readlink——同 uid 可读（node 属主进程对 node 自己无 ptrace 限制）。
+pub(crate) async fn read_cwd(pid: u32) -> Option<String> {
+    let direct = std::fs::read_link(format!("/proc/{pid}/cwd"))
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned());
+    if direct.is_some() {
+        return direct;
+    }
+    // ptrace 拒绝 → 以 node 身份读取
+    if let Some(user) = user_map() {
+        let out = TokioCommand::new("su")
+            .args(["-c", &format!("readlink /proc/{pid}/cwd"), &user.name])
+            .output()
+            .await
+            .ok()?;
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Handle pty.cwd：查询会话主进程的实时工作目录。
+///
+/// spawn 的可能是 su（su - node 场景），其子进程（bash）才是 shell——
+/// 列出所有活跃 PTY 会话（GUI get_terminals：多终端面板恢复）。
+///
+/// 返回全部会话（含 CLI 临时会话）——GUI 按需 attach；附 cmd/as_root/
+/// persistent 供标签展示。
+pub(crate) async fn handle_pty_list(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let sessions = state.sessions.read().await;
+    let terminals: Vec<PtyTerminalInfo> = sessions
+        .iter()
+        .map(|(sid, s)| PtyTerminalInfo {
+            stream_id: *sid,
+            cmd: s.cmd.clone(),
+            as_root: s.as_root,
+            persistent: s.persistent.load(std::sync::atomic::Ordering::SeqCst),
+            cwd: s.last_cwd.lock().unwrap().clone(),
+        })
+        .collect();
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "pty.list".to_string(),
+        payload: serde_json::to_value(PtyListResp { terminals })?,
+        err: None,
+    }))
+}
+
+/// 先经 /proc/<pid>/task/<pid>/children 取第一个子进程，再读其
+/// /proc/<child-pid>/cwd（symlink，实时反映 cd 结果）；无子进程（root
+/// 终端直接 spawn bash）则直接读 spawn pid 的 cwd。
+pub(crate) async fn handle_pty_cwd(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: PtyCwd = serde_json::from_value(msg.payload)
+        .context("Failed to parse PtyCwd")?;
+
+    let sessions = state.sessions.read().await;
+    let Some(session) = sessions.get(&req.stream_id) else {
+        return Ok(Frame::Json(Message {
+            id: msg.id,
+            kind: MsgKind::Resp,
+            op: "pty.cwd".to_string(),
+            payload: json!(null),
+            err: Some(RpcError {
+                code: "not_found".to_string(),
+                message: format!("PTY stream {} not found", req.stream_id),
+            }),
+        }));
+    };
+    // 复用 session_cwd（su 场景取子进程 bash；ptrace 拒绝时经 su node）
+    let cwd = session_cwd(session).await.unwrap_or_default();
+
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "pty.cwd".to_string(),
+        payload: serde_json::to_value(PtyCwdResp { cwd })?,
+        err: None,
+    }))
+}
+
+/// Handle PTY resize
+pub(crate) async fn handle_pty_resize(
+    msg: Message,
+    state: &Arc<ServerState>,
+) -> Result<Frame> {
+    let req: PtyResize = serde_json::from_value(msg.payload)
+        .context("Failed to parse PtyResize")?;
+
+    let sessions = state.sessions.read().await;
+    if let Some(session) = sessions.get(&req.stream_id) {
+        let master = session.master.lock().unwrap();
+        master.resize(PtySize {
+            rows: req.rows,
+            cols: req.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        }).context("Failed to resize PTY")?;
+
+        Ok(Frame::Json(Message {
+            id: msg.id,
+            kind: MsgKind::Resp,
+            op: "pty.resize".to_string(),
+            payload: json!(null),
+            err: None,
+        }))
+    } else {
+        Ok(Frame::Json(Message {
+            id: msg.id,
+            kind: MsgKind::Resp,
+            op: "pty.resize".to_string(),
+            payload: json!(null),
+            err: Some(RpcError {
+                code: "not_found".to_string(),
+                message: format!("PTY stream {} not found", req.stream_id),
+            }),
+        }))
+    }
+}
+
+/// Handle PTY close
+pub(crate) async fn handle_pty_close(
+    msg: Message,
+    state: &Arc<ServerState>,
+) -> Result<Frame> {
+    let req: PtyClose = serde_json::from_value(msg.payload)
+        .context("Failed to parse PtyClose")?;
+
+    // 显式关闭（pty.close）：常驻终端也一并终结并清除登记
+    {
+        let mut def = state.default_terminal.write().unwrap();
+        if let Some((key, _)) = def.iter().find(|(_, v)| **v == req.stream_id) {
+            let key = key.clone();
+            def.remove(&key);
+            info!("常驻终端已显式关闭并清除登记：{key} → stream_id={}", req.stream_id);
+        }
+    }
+
+    let mut sessions = state.sessions.write().await;
+    if let Some(_session) = sessions.remove(&req.stream_id) {
+        // Dropping the session will close the writer, causing PTY to see EOF
+        // The reader thread will naturally exit after reaping the child
+
+        Ok(Frame::Json(Message {
+            id: msg.id,
+            kind: MsgKind::Resp,
+            op: "pty.close".to_string(),
+            payload: json!(null),
+            err: None,
+        }))
+    } else {
+        Ok(Frame::Json(Message {
+            id: msg.id,
+            kind: MsgKind::Resp,
+            op: "pty.close".to_string(),
+            payload: json!(null),
+            err: Some(RpcError {
+                code: "not_found".to_string(),
+                message: format!("PTY stream {} not found", req.stream_id),
+            }),
+        }))
+    }
+}
+
+/// Handle raw data from client (write to PTY)
+pub(crate) async fn handle_raw_data(
+    stream_id: u32,
+    data: &[u8],
+    state: &Arc<ServerState>,
+) -> Result<()> {
+    let sessions = state.sessions.read().await;
+    if let Some(session) = sessions.get(&stream_id) {
+        let writer = session.writer.clone();
+        // TTY 事件检测（用户在终端敲回车执行命令）：输入含换行即"TTY 事件"
+        let has_enter = data.contains(&b'\n') || data.contains(&b'\r');
+        let data = data.to_vec();
+
+        // Write in spawn_blocking to avoid blocking async runtime
+        tokio::task::spawn_blocking(move || {
+            let mut writer_guard = writer.lock().unwrap();
+            if let Err(e) = writer_guard.write_all(&data) {
+                error!("Failed to write to PTY writer: {}", e);
+            }
+            let _ = writer_guard.flush();
+        }).await
+        .context("spawn_blocking join error")?;
+
+        // TTY 事件驱动 cwd 检测（"高人方案"机制三：TTY 事件触发 + /proc 读取）。
+        // server 持有 PTY master，用户敲回车（执行命令）的输入经此转发——
+        // 此时读一次 bash cwd，变化则广播 pty.cwdChanged（主动推送，
+        // 毫秒级响应，替代 GUI 轮询）。
+        if has_enter {
+            if let Some(cwd) = session_cwd(session).await {
+                let mut guard = session.last_cwd.lock().unwrap();
+                if *guard != Some(cwd.clone()) {
+                    *guard = Some(cwd.clone());
+                    info!("cwd 变化：stream_id={stream_id} → {cwd}");
+                    // 广播给订阅连接（GUI 的 pty reader 消费）
+                    let evt = Frame::Json(Message {
+                        id: state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64,
+                        kind: MsgKind::Evt,
+                        op: "pty.cwdChanged".to_string(),
+                        payload: serde_json::json!({
+                            "stream_id": stream_id,
+                            "cwd": cwd,
+                        }),
+                        err: None,
+                    });
+                    let mut subs = session.subs.lock().unwrap();
+                    subs.retain(|(_, tx)| tx.send(evt.clone()).is_ok());
+                }
+            }
+        }
+    } else {
+        warn!("PTY session {} not found for write", stream_id);
+    }
+    Ok(())
+}
+
+/// 读取会话主进程的实时 cwd（su 场景取子进程 bash；ptrace 拒绝时经 su node）
+pub(crate) async fn session_cwd(session: &Arc<PtySession>) -> Option<String> {
+    let spawn_pid = session.spawn_pid;
+    let children_path = format!("/proc/{spawn_pid}/task/{spawn_pid}/children");
+    let child_pid = std::fs::read_to_string(children_path)
+        .ok()
+        .and_then(|c| c.split_whitespace().next().map(|s| s.parse::<u32>().unwrap_or(0)));
+    match child_pid {
+        Some(pid) => read_cwd(pid).await,
+        None => read_cwd(spawn_pid).await,
+    }
+}

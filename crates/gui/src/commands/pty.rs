@@ -144,6 +144,7 @@ async fn open_exec_root_terminal(
 ///   回放当前屏幕）
 /// - 均缺省（旧语义）：attach 身份默认常驻会话
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC 契约:参数名即前端 invoke 键,不宜包结构体
 pub async fn pty_open(
     session: tauri::State<'_, Option<GuiSession>>,
     on_event: tauri::ipc::Channel<PtyEvent>,

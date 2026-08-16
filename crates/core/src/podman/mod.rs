@@ -106,6 +106,8 @@ chown {uid}:{gid} /home/node
 mkdir -p /etc/sudoers.d
 printf 'node ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/easytidy-node
 chmod 440 /etc/sudoers.d/easytidy-node
+mkdir -p /home/easytidy
+chown {uid}:{gid} /home/easytidy
 "#
         );
 
@@ -829,7 +831,7 @@ chmod 440 /etc/sudoers.d/easytidy-node
                 ..Default::default()
             }))
             .await
-            .map_err(|e| Error::Api(e))?;
+            .map_err(Error::Api)?;
 
         Ok(images
             .into_iter()
@@ -862,7 +864,7 @@ chmod 440 /etc/sudoers.d/easytidy-node
                 None,
             )
             .await
-            .map_err(|e| Error::Api(e))?;
+            .map_err(Error::Api)?;
         tracing::info!("镜像已删除：{name}");
         Ok(())
     }

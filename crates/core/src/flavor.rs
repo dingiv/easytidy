@@ -285,10 +285,9 @@ pub fn ensure_presets() {
     let _ = std::fs::create_dir_all(&dir);
     for (name, content) in PRESET_FLAVORS {
         let path = dir.join(format!("{name}.toml"));
-        if !path.exists() {
-            if std::fs::write(&path, content).is_ok() {
+        if !path.exists()
+            && std::fs::write(&path, content).is_ok() {
                 tracing::info!("预设 flavor 已写入：{path:?}");
             }
-        }
     }
 }

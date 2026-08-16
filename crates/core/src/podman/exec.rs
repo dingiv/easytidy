@@ -69,7 +69,7 @@ impl Podman {
                 },
             )
             .await
-            .map_err(|e| Error::Api(e))?;
+            .map_err(Error::Api)?;
 
         match self
             .docker
@@ -82,7 +82,7 @@ impl Podman {
                 }),
             )
             .await
-            .map_err(|e| Error::Api(e))?
+            .map_err(Error::Api)?
         {
             StartExecResults::Attached { output, input } => {
                 // 统一读侧类型：LogOutput → Vec<u8>（TTY 下 stdout/stderr 合流）
@@ -121,7 +121,7 @@ impl Podman {
                 },
             )
             .await
-            .map_err(|e| Error::Api(e))
+            .map_err(Error::Api)
     }
 
     /// 查询 exec 进程退出码（未退出返回 None）。
@@ -130,7 +130,7 @@ impl Podman {
             .docker
             .inspect_exec(exec_id)
             .await
-            .map_err(|e| Error::Api(e))?;
+            .map_err(Error::Api)?;
         Ok(info.exit_code.map(|c| c as i32))
     }
 
@@ -141,7 +141,7 @@ impl Podman {
     ) -> Result<()> {
         use tokio::io::AsyncWriteExt;
         let mut w = input.lock().await;
-        w.write_all(data).await.map_err(|e| Error::Io(e))
+        w.write_all(data).await.map_err(Error::Io)
     }
 }
 
