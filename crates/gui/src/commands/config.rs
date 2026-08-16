@@ -27,8 +27,7 @@ use easytidy_core::podman::Podman;
 #[tauri::command]
 pub async fn get_container_config(name: String) -> Result<serde_json::Value, String> {
     // configfile 期望配置
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
     let config_file = ConfigFile::with_path(config_path);
     let config = config_file
         .get_container(&name)
@@ -67,8 +66,8 @@ pub async fn apply_container_config(
     name: String,
     config: serde_json::Value,
 ) -> Result<String, String> {
-    let mut container_config: ContainerConfig = serde_json::from_value(config)
-        .map_err(|e| format!("解析容器配置失败：{}", e))?;
+    let mut container_config: ContainerConfig =
+        serde_json::from_value(config).map_err(|e| format!("解析容器配置失败：{}", e))?;
     container_config.name = name.clone();
 
     // 直接调用 core（不依赖 GuiSession）：commit → 删旧 → 同名重建（新配置）→ 启动
@@ -79,8 +78,7 @@ pub async fn apply_container_config(
         .map_err(|e| e.to_string())?;
 
     // 更新 configfile（与重建后的容器保持一致）
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| format!("解析配置路径失败：{e}"))?;
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
     let config_file = ConfigFile::with_path(config_path);
     config_file
         .register_container(container_config)

@@ -130,6 +130,8 @@ pub(crate) async fn perform_graceful_shutdown(state: Arc<ServerState>) -> Result
 mod tests {
     use std::{collections::HashMap, sync::atomic::*};
 
+use crate::setup::*;
+
 use super::*;
     use easytidy_protocol::FrameCodec;
     use tempfile::NamedTempFile;

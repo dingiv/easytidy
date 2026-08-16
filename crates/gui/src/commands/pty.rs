@@ -8,19 +8,21 @@
 //!   userns 有所有权，可自由以 root 起进程（`podman exec -u root` 同机制）。
 //!   代价：不持久化（窗口关即断）、无 cwd 跟随。
 
-use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
+use std::sync::Arc;
 
 use easytidy_protocol::{
+    ops::{
+        PtyClose, PtyExited, PtyList, PtyListResp, PtyOpen, PtyOpenResp, PtyResize, PtyTerminalInfo,
+    },
     Frame, Message, MsgKind,
-    ops::{PtyOpen, PtyOpenResp, PtyResize, PtyClose, PtyExited, PtyList, PtyListResp, PtyTerminalInfo},
 };
 use tracing::error;
 
 use std::collections::HashMap;
 
-use crate::state::{ExecHandle, GuiSession, PtyEvent, EXEC_STREAM_ID_BASE};
 use crate::commands::socket::{connect_to_container, send_json_request};
+use crate::state::{ExecHandle, GuiSession, PtyEvent, EXEC_STREAM_ID_BASE};
 
 /// 获取当前所有活跃终端（server 持有的 PTY 会话；多终端面板恢复用——
 /// 重开窗口时逐个 attach_stream 重连，输出经环形缓冲回放）。
@@ -31,7 +33,10 @@ use crate::commands::socket::{connect_to_container, send_json_request};
 pub async fn get_terminals(
     session: tauri::State<'_, Option<GuiSession>>,
 ) -> Result<Vec<PtyTerminalInfo>, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     let resp = send_json_request(
         sess,
@@ -43,8 +48,8 @@ pub async fn get_terminals(
     if let Some(err) = resp.err {
         return Err(format!("{} {}", err.code, err.message));
     }
-    let list: PtyListResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 pty.list 响应失败：{e}"))?;
+    let list: PtyListResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 pty.list 响应失败：{e}"))?;
     Ok(list.terminals)
 }
 
@@ -158,7 +163,10 @@ pub async fn pty_open(
     // 附接已有会话（多终端恢复；前端传 attachStreamId）
     attach_stream_id: Option<u32>,
 ) -> Result<u32, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container_name = sess.container_name.clone();
 
     // root 终端：宿主 exec 通道（新容器 server 以 node 运行无 root；
@@ -167,7 +175,12 @@ pub async fn pty_open(
         // 发号 = 当前最大 exec id + 1（关闭中间会话后不复用，防撞号）
         let next = {
             let execs = sess.active_execs.lock().await;
-            execs.keys().copied().max().unwrap_or(EXEC_STREAM_ID_BASE - 1) + 1
+            execs
+                .keys()
+                .copied()
+                .max()
+                .unwrap_or(EXEC_STREAM_ID_BASE - 1)
+                + 1
         };
         return open_exec_root_terminal(sess, on_event, cmd, cols, rows, next).await;
     }
@@ -246,7 +259,10 @@ pub async fn pty_open(
         loop {
             match stream.next().await {
                 Some(Ok(frame)) => match frame {
-                    Frame::Raw { stream_id: sid, data } => {
+                    Frame::Raw {
+                        stream_id: sid,
+                        data,
+                    } => {
                         if sid == stream_id {
                             let event = PtyEvent {
                                 kind: "data".to_string(),
@@ -276,11 +292,7 @@ pub async fn pty_open(
                             }
                         } else if msg.op == "pty.cwdChanged" {
                             // server 主动推送（TTY 事件驱动：输入回车时检测 cwd 变化）
-                            if let Some(cwd) = msg
-                                .payload
-                                .get("cwd")
-                                .and_then(|c| c.as_str())
-                            {
+                            if let Some(cwd) = msg.payload.get("cwd").and_then(|c| c.as_str()) {
                                 let event = PtyEvent {
                                     kind: "cwdChanged".to_string(),
                                     data: None,
@@ -315,7 +327,10 @@ pub async fn pty_write(
     stream_id: u32,
     data: Vec<u8>,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     // exec 型（root 终端，宿主 exec 通道）
     let maybe_exec = {
@@ -351,7 +366,10 @@ pub async fn pty_resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     // exec 型（root 终端）
     let maybe_exec = {
@@ -402,7 +420,10 @@ pub async fn pty_close(
     session: tauri::State<'_, Option<GuiSession>>,
     stream_id: u32,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     // exec 型（root 终端）：移除句柄 → input Arc drop → stdin EOF → 退出
     {
@@ -421,9 +442,7 @@ pub async fn pty_close(
         return Ok(());
     };
 
-    let close = PtyClose {
-        stream_id,
-    };
+    let close = PtyClose { stream_id };
     sink.lock()
         .await
         .send(Frame::Json(Message {
@@ -455,7 +474,10 @@ pub async fn pty_ping(
     session: tauri::State<'_, Option<GuiSession>>,
     stream_id: u32,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     // 流已关闭时静默忽略（ping 可能在退出竞态中触发）
     let maybe_sink = {
@@ -487,7 +509,10 @@ pub async fn pty_cwd(
     session: tauri::State<'_, Option<GuiSession>>,
     stream_id: u32,
 ) -> Result<String, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     let req = easytidy_protocol::ops::PtyCwd { stream_id };
     let resp = send_json_request(
@@ -500,8 +525,7 @@ pub async fn pty_cwd(
     if let Some(err) = resp.err {
         return Err(format!("{} {}", err.code, err.message));
     }
-    let cwd_resp: easytidy_protocol::ops::PtyCwdResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 pty.cwd 响应失败：{e}"))?;
+    let cwd_resp: easytidy_protocol::ops::PtyCwdResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 pty.cwd 响应失败：{e}"))?;
     Ok(cwd_resp.cwd)
 }
-

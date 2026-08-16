@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use easytidy_protocol::ops::{
-        FsList, FsListResp, FsRead, FsReadResp, FsWrite, FsCopy, FsCopyResp, FsMkdir,
-    };
+    FsCopy, FsCopyResp, FsList, FsListResp, FsMkdir, FsRead, FsReadResp, FsWrite,
+};
 
-use crate::state::GuiSession;
 use crate::commands::socket::send_json_request;
+use crate::state::GuiSession;
 
 // ============================================================================
 // 文件系统命令
@@ -29,22 +29,33 @@ pub async fn fs_list(
     session: tauri::State<'_, Option<GuiSession>>,
     path: String,
 ) -> Result<Vec<FsEntry>, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     let list_req = FsList { path };
-    let resp = send_json_request(sess, "fs.list".to_string(),
-        serde_json::to_value(list_req).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    let resp = send_json_request(
+        sess,
+        "fs.list".to_string(),
+        serde_json::to_value(list_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let list_resp: FsListResp = serde_json::from_value(resp.payload)
         .map_err(|e| format!("解析 fs.list 响应失败：{}", e))?;
 
-    let entries: Vec<FsEntry> = list_resp.entries.into_iter().map(|e| FsEntry {
-        name: e.name,
-        is_dir: matches!(e.entry_type, easytidy_protocol::ops::FsEntryType::Dir),
-        size: e.size,
-        mtime: 0, // TODO: 从 FsStatResp 获取
-    }).collect();
+    let entries: Vec<FsEntry> = list_resp
+        .entries
+        .into_iter()
+        .map(|e| FsEntry {
+            name: e.name,
+            is_dir: matches!(e.entry_type, easytidy_protocol::ops::FsEntryType::Dir),
+            size: e.size,
+            mtime: 0, // TODO: 从 FsStatResp 获取
+        })
+        .collect();
 
     Ok(entries)
 }
@@ -55,12 +66,23 @@ pub async fn fs_read(
     session: tauri::State<'_, Option<GuiSession>>,
     path: String,
 ) -> Result<String, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    let read_req = FsRead { path, offset: None, len: None };
-    let resp = send_json_request(sess, "fs.read".to_string(),
-        serde_json::to_value(read_req).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    let read_req = FsRead {
+        path,
+        offset: None,
+        len: None,
+    };
+    let resp = send_json_request(
+        sess,
+        "fs.read".to_string(),
+        serde_json::to_value(read_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let read_resp: FsReadResp = serde_json::from_value(resp.payload)
         .map_err(|e| format!("解析 fs.read 响应失败：{}", e))?;
@@ -75,24 +97,28 @@ pub async fn fs_write(
     path: String,
     data_b64: String,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     let write_req = FsWrite {
         path,
         data_b64,
         offset: None, // 全量覆盖（编辑器保存）
     };
-    send_json_request(sess, "fs.write".to_string(),
-        serde_json::to_value(write_req).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    send_json_request(
+        sess,
+        "fs.write".to_string(),
+        serde_json::to_value(write_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
 
-pub(crate) async fn fetch_container_file(
-    sess: &GuiSession,
-    path: &str,
-) -> Result<Vec<u8>, String> {
+pub(crate) async fn fetch_container_file(sess: &GuiSession, path: &str) -> Result<Vec<u8>, String> {
     let read_req = FsRead {
         path: path.to_string(),
         offset: None,
@@ -108,8 +134,8 @@ pub(crate) async fn fetch_container_file(
     if let Some(err) = resp.err {
         return Err(format!("{} {}", err.code, err.message));
     }
-    let read_resp: FsReadResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 fs.read 响应失败：{e}"))?;
+    let read_resp: FsReadResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 fs.read 响应失败：{e}"))?;
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD
         .decode(read_resp.data_b64)
@@ -199,7 +225,10 @@ pub async fn import_files(
     use base64::Engine as _;
     use std::io::{BufReader, Read};
 
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     const CHUNK: usize = 4 * 1024 * 1024;
 
     // 递归收集：目录列表 + 文件列表
@@ -289,7 +318,10 @@ pub async fn fetch_file_b64(
     path: String,
 ) -> Result<String, String> {
     use base64::Engine as _;
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     const CHUNK: u64 = 4 * 1024 * 1024;
 
     let mut out = String::new();
@@ -338,7 +370,10 @@ pub async fn export_file_dialog(
 ) -> Result<String, String> {
     use base64::Engine as _;
     use std::io::Write;
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     const CHUNK: u64 = 4 * 1024 * 1024;
 
     let name = path.rsplit('/').next().unwrap_or("file").to_string();
@@ -353,8 +388,8 @@ pub async fn export_file_dialog(
     .map_err(|e| format!("保存对话框失败：{e}"))?
     .ok_or_else(|| "已取消".to_string())?;
 
-    let file = std::fs::File::create(&dest)
-        .map_err(|e| format!("创建宿主文件失败（{dest}）：{e}"))?;
+    let file =
+        std::fs::File::create(&dest).map_err(|e| format!("创建宿主文件失败（{dest}）：{e}"))?;
     let mut writer = std::io::BufWriter::new(file);
     let mut offset: u64 = 0;
     loop {
@@ -403,7 +438,10 @@ pub async fn fs_copy(
     src: String,
     dst: String,
 ) -> Result<u64, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     let req = FsCopy { src, dst };
     let resp = send_json_request(
@@ -416,7 +454,7 @@ pub async fn fs_copy(
     if let Some(err) = resp.err {
         return Err(format!("{} {}", err.code, err.message));
     }
-    let copy_resp: FsCopyResp = serde_json::from_value(resp.payload)
-        .map_err(|e| format!("解析 fs.copy 响应失败：{e}"))?;
+    let copy_resp: FsCopyResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 fs.copy 响应失败：{e}"))?;
     Ok(copy_resp.bytes_copied)
 }

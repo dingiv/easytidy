@@ -30,16 +30,14 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             .add_directive("easytidy_gui=info".parse().unwrap())
             .add_directive("easytidy_core=info".parse().unwrap())
             .add_directive("easytidy=info".parse().unwrap());
-        let file_layer = easytidy_core::appdata::app_data_dir()
-            .ok()
-            .map(|dir| {
-                let dir = dir.join("logs");
-                let _ = std::fs::create_dir_all(&dir);
-                let appender = tracing_appender::rolling::never(&dir, "easytidy-gui.log");
-                tracing_subscriber::fmt::layer()
-                    .with_writer(appender)
-                    .with_ansi(false)
-            });
+        let file_layer = easytidy_core::appdata::app_data_dir().ok().map(|dir| {
+            let dir = dir.join("logs");
+            let _ = std::fs::create_dir_all(&dir);
+            let appender = tracing_appender::rolling::never(&dir, "easytidy-gui.log");
+            tracing_subscriber::fmt::layer()
+                .with_writer(appender)
+                .with_ansi(false)
+        });
         tracing_subscriber::registry()
             .with(filter)
             .with(tracing_subscriber::fmt::layer())

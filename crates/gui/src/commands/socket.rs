@@ -1,15 +1,15 @@
 //! 容器 server socket 连接与请求（共享连接 + 专用 PTY 连接）。
 
-use std::sync::atomic::Ordering;
+use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
+use std::sync::atomic::Ordering;
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
-use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use easytidy_core::podman::Podman;
 use easytidy_protocol::{
-    Frame, FrameCodec, Message, MsgKind, Handshake, HandshakeAck, PROTOCOL_VERSION,
+    Frame, FrameCodec, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION,
 };
 
 use crate::state::GuiSession;
@@ -36,10 +36,10 @@ pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStr
     let socket_path = easytidy_core::host_socket_path(container_name)?;
     info!("连接到 socket：{}", socket_path.display());
 
-    let stream = UnixStream::connect(&socket_path)
-        .await
-        .context(format!("连接 socket 失败（容器可能未就绪）：{}",
-            socket_path.display()))?;
+    let stream = UnixStream::connect(&socket_path).await.context(format!(
+        "连接 socket 失败（容器可能未就绪）：{}",
+        socket_path.display()
+    ))?;
 
     // 握手
     let codec = FrameCodec::new();
@@ -48,8 +48,14 @@ pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStr
     let handshake = Handshake {
         v: PROTOCOL_VERSION,
         client: "easytidy-gui".to_string(),
-        wants: vec!["pty".to_string(), "fs".to_string(), "apps".to_string(),
-                    "passthrough".to_string(), "config".to_string(), "lifecycle".to_string()],
+        wants: vec![
+            "pty".to_string(),
+            "fs".to_string(),
+            "apps".to_string(),
+            "passthrough".to_string(),
+            "config".to_string(),
+            "lifecycle".to_string(),
+        ],
     };
     let handshake_msg = Message {
         id: 1,
@@ -58,10 +64,14 @@ pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStr
         payload: serde_json::to_value(handshake)?,
         err: None,
     };
-    framed.send(Frame::Json(handshake_msg)).await
+    framed
+        .send(Frame::Json(handshake_msg))
+        .await
         .context("发送握手失败")?;
 
-    let ack_frame = framed.next().await
+    let ack_frame = framed
+        .next()
+        .await
         .context("接收握手确认失败")?
         .context("握手确认帧为空")?;
 
@@ -74,14 +84,16 @@ pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStr
         return Err(anyhow::anyhow!("握手响应格式错误"));
     }
 
-    let ack: HandshakeAck = serde_json::from_value(ack_msg.payload)
-        .context("解析握手确认失败")?;
+    let ack: HandshakeAck = serde_json::from_value(ack_msg.payload).context("解析握手确认失败")?;
 
     debug!("握手成功：server={}, v={}", ack.server, ack.v);
 
     if ack.v != PROTOCOL_VERSION {
-        return Err(anyhow::anyhow!("协议版本不匹配：客户端={}，服务端={}",
-            PROTOCOL_VERSION, ack.v));
+        return Err(anyhow::anyhow!(
+            "协议版本不匹配：客户端={}，服务端={}",
+            PROTOCOL_VERSION,
+            ack.v
+        ));
     }
 
     Ok(framed)
@@ -104,25 +116,30 @@ pub async fn ensure_session_connected(session: &GuiSession) -> Result<()> {
 
 /// 发送 JSON 请求并接收响应
 /// 在共享 session socket 上发一次请求并等待响应。
-pub async fn try_send_json_request(
-    session: &GuiSession,
-    msg: &Message,
-) -> Result<Message> {
+pub async fn try_send_json_request(session: &GuiSession, msg: &Message) -> Result<Message> {
     let mut socket_guard = session.socket.lock().await;
     let socket = socket_guard.as_mut().context("Socket 未初始化")?;
 
-    socket.send(Frame::Json(msg.clone())).await
+    socket
+        .send(Frame::Json(msg.clone()))
+        .await
         .context("发送请求失败")?;
 
     // 接收响应
-    let response = socket.next().await
+    let response = socket
+        .next()
+        .await
         .context("接收响应失败")?
         .context("响应帧为空")?;
 
     match response {
         Frame::Json(resp_msg) => {
             if let Some(ref err) = resp_msg.err {
-                Err(anyhow::anyhow!("服务器错误：{} - {}", err.code, err.message))
+                Err(anyhow::anyhow!(
+                    "服务器错误：{} - {}",
+                    err.code,
+                    err.message
+                ))
             } else {
                 Ok(resp_msg)
             }

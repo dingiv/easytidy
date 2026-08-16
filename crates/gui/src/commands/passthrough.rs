@@ -2,14 +2,12 @@
 
 use tracing::{info, warn};
 
-use easytidy_protocol::ops::{
-        CfgGet, CfgGetResp, CfgSet,
-    };
+use easytidy_protocol::ops::{CfgGet, CfgGetResp, CfgSet};
 
-use crate::state::GuiSession;
-use crate::commands::socket::send_json_request;
 use crate::commands::apps::AppInfoFrontend;
 use crate::commands::fs::fetch_container_file;
+use crate::commands::socket::send_json_request;
+use crate::state::GuiSession;
 
 /// easytidy 品牌图标（导出图标水印；内嵌 PNG）
 const EASYTIDY_BRAND_ICON: &[u8] = include_bytes!("../../icons/easytidy256x256.png");
@@ -64,11 +62,14 @@ fn cli_path() -> String {
 pub async fn passthrough_state(
     session: tauri::State<'_, Option<GuiSession>>,
 ) -> Result<serde_json::Value, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let exported = easytidy_core::desktop::list_passthrough_detailed(container)
-        .map_err(|e| e.to_string())?;
+    let exported =
+        easytidy_core::desktop::list_passthrough_detailed(container).map_err(|e| e.to_string())?;
     let exported_json: Vec<_> = exported
         .into_iter()
         .map(|e| serde_json::json!({ "desktop_file": e.desktop_file, "content": e.content }))
@@ -136,7 +137,10 @@ pub async fn passthrough_set_boot_mode(
     session: tauri::State<'_, Option<GuiSession>>,
     mode: String,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = sess.container_name.clone();
     let cli = cli_path();
 
@@ -183,7 +187,10 @@ pub async fn passthrough_set_pinned(
     icon_path: Option<String>,
     pinned: bool,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
     let config_file = passthrough_config_file()?;
 
@@ -196,9 +203,13 @@ pub async fn passthrough_set_pinned(
             auto_start: false,
             icon: icon_path,
         };
-        config_file.pin_app(container, app).map_err(|e| e.to_string())?;
+        config_file
+            .pin_app(container, app)
+            .map_err(|e| e.to_string())?;
     } else {
-        config_file.unpin_app(container, &id).map_err(|e| e.to_string())?;
+        config_file
+            .unpin_app(container, &id)
+            .map_err(|e| e.to_string())?;
     }
     info!("passthrough 收藏已更新：{container} {id} pinned={pinned}");
     Ok(())
@@ -211,7 +222,10 @@ pub async fn passthrough_launch(
     session: tauri::State<'_, Option<GuiSession>>,
     id: String,
 ) -> Result<u32, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
     let config_file = passthrough_config_file()?;
@@ -261,7 +275,10 @@ pub async fn passthrough_set_auto_start(
     cmd: String,
     enabled: bool,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
     // 保留已存应用的图标（upsert 会整体覆盖，不能丢）
@@ -295,7 +312,10 @@ pub async fn passthrough_add_custom(
     name: String,
     cmd: String,
 ) -> Result<AppInfoFrontend, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let config_file = passthrough_config_file()?;
     let app = config_file
         .add_custom(&sess.container_name, &name, &cmd)
@@ -318,11 +338,16 @@ pub async fn passthrough_remove_app(
     session: tauri::State<'_, Option<GuiSession>>,
     id: String,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
     let config_file = passthrough_config_file()?;
-    config_file.remove_app(container, &id).map_err(|e| e.to_string())?;
+    config_file
+        .remove_app(container, &id)
+        .map_err(|e| e.to_string())?;
 
     // 非 custom 且已导出 → 清理导出（防孤儿）
     if !id.starts_with("custom:") {
@@ -386,7 +411,10 @@ pub async fn passthrough_import_container_icon(
     session: tauri::State<'_, Option<GuiSession>>,
     container_path: String,
 ) -> Result<String, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let bytes = fetch_container_file(sess, &container_path).await?;
     save_icon_to_appdata(&bytes, &container_path)
 }
@@ -399,7 +427,10 @@ pub async fn passthrough_set_custom_icon(
     id: String,
     icon: Option<String>,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
     let config_file = passthrough_config_file()?;
@@ -426,7 +457,10 @@ pub async fn passthrough_export(
     // 同时创建桌面图标（GNOME 桌面默认不显示应用菜单，入口在桌面路径）
     desktop_icon: Option<bool>,
 ) -> Result<String, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = sess.container_name.clone();
 
     // Exec 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数）
@@ -457,7 +491,13 @@ pub async fn passthrough_export(
                         .trim_end_matches(".desktop");
                     let safe: String = base
                         .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                        .map(|c| {
+                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                                c
+                            } else {
+                                '-'
+                            }
+                        })
                         .collect();
                     let icon_file = icons_dir.join(format!("easytidy-pt-{container}-{safe}.png"));
                     // 品牌化合成:208px 内容 + 天蓝→深蓝 45° 渐变圆角边框 +
@@ -498,7 +538,10 @@ pub async fn passthrough_revoke(
     session: tauri::State<'_, Option<GuiSession>>,
     desktop_file: String,
 ) -> Result<String, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let removed = easytidy_core::desktop::remove_passthrough(&sess.container_name, &desktop_file)
         .map_err(|e| e.to_string())?;
     Ok(removed.to_string_lossy().into_owned())
@@ -514,7 +557,10 @@ pub async fn export_gui_shortcut(
     session: tauri::State<'_, Option<GuiSession>>,
     desktop_icon: Option<bool>,
 ) -> Result<String, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     // 当前进程即 GUI 二进制（per-container 模式入口）；current_exe 失败
     // 回退命令行 argv[0]，再不行报错（Exec 必须绝对路径）
@@ -530,10 +576,7 @@ pub async fn export_gui_shortcut(
         desktop_icon.unwrap_or(true),
     )
     .map_err(|e| e.to_string())?;
-    info!(
-        "GUI 入口导出：{} → {:?}",
-        sess.container_name, menu_path
-    );
+    info!("GUI 入口导出：{} → {:?}", sess.container_name, menu_path);
     Ok(menu_path.to_string_lossy().into_owned())
 }
 
@@ -546,11 +589,18 @@ pub async fn export_gui_shortcut(
 pub async fn config_get(
     session: tauri::State<'_, Option<GuiSession>>,
 ) -> Result<serde_json::Value, String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    let resp = send_json_request(sess, "config.get".to_string(),
-        serde_json::to_value(CfgGet).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    let resp = send_json_request(
+        sess,
+        "config.get".to_string(),
+        serde_json::to_value(CfgGet).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let get_resp: CfgGetResp = serde_json::from_value(resp.payload)
         .map_err(|e| format!("解析 config.get 响应失败：{}", e))?;
@@ -565,12 +615,19 @@ pub async fn config_set(
     key: String,
     value: serde_json::Value,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
     let set_req = CfgSet { key, value };
-    send_json_request(sess, "config.set".to_string(),
-        serde_json::to_value(set_req).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    send_json_request(
+        sess,
+        "config.set".to_string(),
+        serde_json::to_value(set_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }

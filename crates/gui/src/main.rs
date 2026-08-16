@@ -1,8 +1,8 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::env;
 use easytidy_gui_lib::AppMode;
+use std::env;
 
 fn main() {
     // 在 Tauri 初始化之前解析命令行参数

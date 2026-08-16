@@ -1,7 +1,7 @@
 //! 中心化模式命令：容器生命周期 + 环境（env）语义 + flavor。
 
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tracing::{debug, error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
@@ -9,8 +9,8 @@ use easytidy_core::desktop;
 use easytidy_core::flavor::Flavor;
 use easytidy_core::models::{ContainerConfig, ContainerSummary};
 
-use crate::state::{GuiSession, PodmanState};
 use crate::commands::socket::send_json_request;
+use crate::state::{GuiSession, PodmanState};
 use easytidy_protocol::ops::LifecycleShutdown;
 
 // ============================================================================
@@ -46,8 +46,8 @@ pub async fn create_container(
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
 
     // 获取 server 二进制路径
-    let server_bin = easytidy_core::server_binary_path()
-        .map_err(|e| ferr("定位 server 二进制", e))?;
+    let server_bin =
+        easytidy_core::server_binary_path().map_err(|e| ferr("定位 server 二进制", e))?;
 
     // 容器配置（网络默认 Host 模式，产品语义；distrobox 同款）
     let container_config = ContainerConfig {
@@ -60,21 +60,21 @@ pub async fn create_container(
     };
 
     // 创建容器（走新入口，应用完整配置）
-    let id = p.create_with_config(&name, &image, &server_bin, &container_config)
+    let id = p
+        .create_with_config(&name, &image, &server_bin, &container_config)
         .await
         .map_err(|e| ferr(&format!("创建容器 {name}"), e))?;
 
     // 注册到配置文件
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| ferr("解析配置路径", e))?;
+    let config_path = ConfigFile::default_path().map_err(|e| ferr("解析配置路径", e))?;
     let config_file = ConfigFile::with_path(config_path);
 
-    config_file.register_container(container_config)
+    config_file
+        .register_container(container_config)
         .map_err(|e| ferr("注册容器配置", e))?;
 
     // 生成桌面图标
-    desktop::install_desktop_entry(&name, None, None)
-        .map_err(|e| ferr("生成桌面图标", e))?;
+    desktop::install_desktop_entry(&name, None, None).map_err(|e| ferr("生成桌面图标", e))?;
 
     podman.return_podman(p).await;
     Ok(id)
@@ -87,7 +87,9 @@ pub async fn start_container(
     name: String,
 ) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-    p.start(&name).await.map_err(|e| ferr(&format!("启动容器 {name}"), e))?;
+    p.start(&name)
+        .await
+        .map_err(|e| ferr(&format!("启动容器 {name}"), e))?;
     podman.return_podman(p).await;
     Ok(())
 }
@@ -99,7 +101,9 @@ pub async fn stop_container(
     name: String,
 ) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-    p.stop(&name).await.map_err(|e| ferr(&format!("停止容器 {name}"), e))?;
+    p.stop(&name)
+        .await
+        .map_err(|e| ferr(&format!("停止容器 {name}"), e))?;
     podman.return_podman(p).await;
     Ok(())
 }
@@ -111,7 +115,9 @@ pub async fn restart_container(
     name: String,
 ) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-    p.restart(&name).await.map_err(|e| ferr(&format!("重启容器 {name}"), e))?;
+    p.restart(&name)
+        .await
+        .map_err(|e| ferr(&format!("重启容器 {name}"), e))?;
     podman.return_podman(p).await;
     Ok(())
 }
@@ -124,13 +130,15 @@ pub async fn remove_container(
     force: bool,
 ) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-    p.remove(&name, force).await.map_err(|e| ferr(&format!("删除容器 {name}"), e))?;
+    p.remove(&name, force)
+        .await
+        .map_err(|e| ferr(&format!("删除容器 {name}"), e))?;
 
     // 从配置文件注销
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| ferr("解析配置路径", e))?;
+    let config_path = ConfigFile::default_path().map_err(|e| ferr("解析配置路径", e))?;
     let config_file = ConfigFile::with_path(config_path);
-    config_file.unregister_container(&name)
+    config_file
+        .unregister_container(&name)
         .map_err(|e| ferr("注销容器配置", e))?;
 
     // 卸载桌面图标
@@ -220,7 +228,9 @@ pub async fn image_remove(
     force: bool,
 ) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
-    p.remove_image(&image, force).await.map_err(|e| e.to_string())?;
+    p.remove_image(&image, force)
+        .await
+        .map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
     Ok(())
 }
@@ -251,16 +261,13 @@ pub fn flavor_delete(name: String) -> Result<(), String> {
 
 /// 列出所有环境（managed 容器 + configfile 注册表合并）。
 #[tauri::command]
-pub async fn env_list(
-    podman: tauri::State<'_, PodmanState>,
-) -> Result<Vec<EnvView>, String> {
+pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvView>, String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
     let containers = p.list_containers().await.map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
 
     // configfile 注册表：podman 中不存在的配置 → "missing"（仅配置保留）
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
     let config_file = ConfigFile::with_path(config_path);
     let registered = config_file
         .list_containers()
@@ -343,17 +350,15 @@ pub async fn env_new(
 
     let server_bin = try_log!(easytidy_core::server_binary_path(), "定位 server 二进制");
     try_log!(
-        p.create_with_config(&name, &config.image, &server_bin, &config).await,
+        p.create_with_config(&name, &config.image, &server_bin, &config)
+            .await,
         "创建容器"
     );
     try_log!(p.start(&name).await, "启动容器");
 
     let config_path = try_log!(ConfigFile::default_path(), "解析配置路径");
     let config_file = ConfigFile::with_path(config_path);
-    try_log!(
-        config_file.register_container(config),
-        "注册环境配置"
-    );
+    try_log!(config_file.register_container(config), "注册环境配置");
 
     podman.return_podman(p).await;
     info!("新环境 {name} 已创建并运行");
@@ -364,17 +369,13 @@ pub async fn env_new(
 ///
 /// 快照镜像为独立资产，删除时保留（可被 fork 复用）。
 #[tauri::command]
-pub async fn env_rm(
-    podman: tauri::State<'_, PodmanState>,
-    name: String,
-) -> Result<(), String> {
+pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
     p.remove(&name, true).await.map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
 
     // 清理注册配置（失败仅告警，不阻断删除）
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
     let config_file = ConfigFile::with_path(config_path);
     if let Err(e) = config_file.unregister_container(&name) {
         warn!("注销环境 {} 配置失败（忽略）：{}", name, e);
@@ -427,8 +428,7 @@ pub async fn env_fork(
     new_name: String,
 ) -> Result<(), String> {
     // 读源环境配置
-    let config_path = ConfigFile::default_path()
-        .map_err(|e| format!("解析配置路径失败：{}", e))?;
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
     let config_file = ConfigFile::with_path(config_path);
     let mut config = config_file
         .get_container(&name)
@@ -458,24 +458,22 @@ pub async fn env_fork(
 
 /// 运行环境（start）。
 #[tauri::command]
-pub async fn env_start(
-    podman: tauri::State<'_, PodmanState>,
-    name: String,
-) -> Result<(), String> {
+pub async fn env_start(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-    p.start(&name).await.map_err(|e| ferr(&format!("启动容器 {name}"), e))?;
+    p.start(&name)
+        .await
+        .map_err(|e| ferr(&format!("启动容器 {name}"), e))?;
     podman.return_podman(p).await;
     Ok(())
 }
 
 /// 关闭环境（stop；环境保留，可随时恢复运行）。
 #[tauri::command]
-pub async fn env_stop(
-    podman: tauri::State<'_, PodmanState>,
-    name: String,
-) -> Result<(), String> {
+pub async fn env_stop(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-    p.stop(&name).await.map_err(|e| ferr(&format!("停止容器 {name}"), e))?;
+    p.stop(&name)
+        .await
+        .map_err(|e| ferr(&format!("停止容器 {name}"), e))?;
     podman.return_podman(p).await;
     Ok(())
 }
@@ -521,11 +519,18 @@ pub fn open_container_window(name: String) -> Result<(), String> {
 pub async fn container_shutdown(
     session: tauri::State<'_, Option<GuiSession>>,
 ) -> Result<(), String> {
-    let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    send_json_request(sess, "lifecycle.shutdown".to_string(),
-        serde_json::to_value(LifecycleShutdown).map_err(|e| e.to_string())?)
-        .await.map_err(|e| e.to_string())?;
+    send_json_request(
+        sess,
+        "lifecycle.shutdown".to_string(),
+        serde_json::to_value(LifecycleShutdown).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     Ok(())
 }
