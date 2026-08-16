@@ -103,8 +103,13 @@ else
 fi
 mkdir -p /home/node
 chown {uid}:{gid} /home/node
+# sudo 安装（server 提权用；debian/alpine 兼容，失败不阻断——无 sudo 时
+# server 以 node 运行，euid 分派兼容，功能仍可用）
+apt-get install -y -qq sudo 2>/dev/null || apk add --no-cache sudo 2>/dev/null || true
 mkdir -p /etc/sudoers.d
-printf 'node ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/easytidy-node
+# env_keep：server 经 sudo 提权时保留用户映射变量（sudo 默认 env_reset
+# 会清掉 EASYTIDY_USER_* → server 误判"root 容器"，node 终端变 root，实测）
+printf 'Defaults env_keep += "EASYTIDY_USER_UID EASYTIDY_USER_GID"\nnode ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/easytidy-node
 chmod 440 /etc/sudoers.d/easytidy-node
 mkdir -p /home/easytidy
 chown {uid}:{gid} /home/easytidy
@@ -459,14 +464,18 @@ chown {uid}:{gid} /home/easytidy
                     .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?),
                 None => None,
             };
+            // server 经免密 sudo 提权为容器 root 运行（容器 User=node 下
+            // 恢复 root server：装包/su 降权能力；烘焙层已配 sudoers）。
+            // 最小镜像无 sudo 时回退 node 运行（euid 分派兼容，功能可用）
+            let server_cmd = format!(
+                "if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then \
+                 exec sudo -u root /usr/bin/easytidy-server --socket /run/easytidy/server.sock; \
+                 else exec /usr/bin/easytidy-server --socket /run/easytidy/server.sock; fi"
+            );
             let body = crate::libpod::keep_id_create_body(
                 name,
                 &init_image,
-                vec![
-                    "/usr/bin/easytidy-server".to_string(),
-                    "--socket".to_string(),
-                    "/run/easytidy/server.sock".to_string(),
-                ],
+                vec!["/bin/sh".to_string(), "-c".to_string(), server_cmd],
                 env.clone(),
                 labels.clone(),
                 mounts_json.as_array().cloned().unwrap_or_default(),
