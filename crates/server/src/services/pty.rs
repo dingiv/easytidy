@@ -17,7 +17,7 @@ use easytidy_protocol::{
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 /// 把连接订阅到已有 PTY 会话：按请求尺寸同步 PTY + 清屏回放环形缓冲 + 登记订阅。
@@ -314,6 +314,7 @@ pub(crate) async fn handle_pty_open(
         sessions.get(&stream_id).cloned().unwrap()
     };
     let default_terminal = state.default_terminal.clone();
+    let sessions_map = state.sessions.clone();
     thread::spawn(move || {
         pty_reader_thread(
             stream_id_copy,
@@ -321,6 +322,7 @@ pub(crate) async fn handle_pty_open(
             child,
             msg_id,
             session_for_reader,
+            sessions_map,
             default_terminal,
         );
     });
@@ -344,6 +346,7 @@ pub(crate) fn pty_reader_thread(
     mut child: Box<dyn portable_pty::Child + Send>,
     msg_id: u64,
     session: Arc<PtySession>,
+    sessions: Arc<RwLock<HashMap<u32, Arc<PtySession>>>>,
     default_terminal: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 ) {
     info!("PTY reader thread started: stream_id={}", stream_id);
@@ -454,7 +457,15 @@ pub(crate) fn pty_reader_thread(
         subs.clear();
     }
 
-    // 常驻终端自然退出（用户 exit/进程结束）→ 清除登记，下次 attach 新建
+    // 死亡同步清理（server 全权负责生命周期）：
+    // 1) sessions 移除 → pty.list 不再列出、attach 找不到 → 客户端
+    //    attach 已死终端时 handle_pty_open 回退新建，前端拿到新 stream_id
+    //    （blocking_write：本线程为同步上下文，reader I/O 不跨 async）
+    {
+        let mut sessions = sessions.blocking_write();
+        sessions.remove(&stream_id);
+    }
+    // 2) 常驻终端登记清除（用户 exit/进程结束）→ 下次 attach 新建
     {
         let mut def = default_terminal.write().unwrap();
         if let Some((key, _)) = def.iter().find(|(_, v)| **v == stream_id) {
