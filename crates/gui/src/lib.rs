@@ -33,6 +33,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             socket: tokio::sync::Mutex::new(None),
             next_msg_id: AtomicU64::new(2), // 握手已用 1
             active_ptys: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            active_execs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }),
         AppMode::Centralized => None,
     };

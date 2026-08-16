@@ -187,6 +187,9 @@ pub fn keep_id_create_body(
     exposed_ports: Option<std::collections::HashMap<String, std::collections::HashMap<(), ()>>>,
     port_bindings: Option<Value>,
     working_dir: Option<String>,
+    // 容器默认用户（PID 1 与 podman exec 的默认身份）；None = "0:0"（root，
+    // 旧行为）。node 化容器传 "<uid>:<gid>"——node 用户经 init 镜像烘焙预置
+    default_user: Option<&str>,
 ) -> Value {
     // libpod SpecGenerator 的 env 是 map[string]string（Docker compat 才是数组）
     let mut env_map = serde_json::Map::new();
@@ -223,12 +226,11 @@ pub fn keep_id_create_body(
         "image": image,
         // libpod SpecGenerator 用 "command"（Docker compat 才是 "cmd"）
         "command": cmd,
-        // keep-id 下容器进程默认被设为 uid 1000（keep-id 值）——server 必须
-        // 以**容器内 uid 0** 运行才有装包能力：容器层文件（镜像+可写层）在宿主
-        // 侧属主 = subuid 100000（rootless podman 容器文件统一归 subuid 区），
-        // 容器 root 的宿主身份恰为该属主 → 能写（apt/sudo 可用，实测）；
-        // 应用层再经 su 到 node（uid 1000 = 宿主用户，chrome 不掉沙盒）
-        "user": "0:0",
+        // keep-id 下容器进程默认被设为 uid 1000（keep-id 值）——旧模型显式
+        // "0:0" 让 server 以容器 root 运行（装包能力，应用经 su 降权）；
+        // 新模型传 "<uid>:<gid>"：server 直接以 node 运行（用户已由 init
+        // 镜像烘焙预置），root 需求走宿主 exec 通道
+        "user": default_user.unwrap_or("0:0"),
         "env": env_map,
         "labels": labels,
         "hostname": name,

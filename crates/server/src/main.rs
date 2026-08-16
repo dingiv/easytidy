@@ -280,6 +280,18 @@ struct UserMap {
 /// 容器内用户固定名（与宿主用户名不同，符合"名字不同、uid 相同"语义）。
 const CONTAINER_USER: &str = "node";
 
+/// server 自身 euid（/proc/self/status 解析，零依赖）。
+///
+/// euid 分派依据：容器默认用户 node 化后 server 以 node 运行（无建号/
+/// su 能力）；旧容器（User=root）以 root 运行——同一二进制双行为。
+fn current_euid() -> Option<u32> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+}
+
 /// 用户映射全局态：`setup_user_mapping` 成功后才写入。
 /// `user_map()` 返回 `None` 表示映射未生效（PTY/entry 回退 root /bin/sh，与旧版一致）。
 static USER_MAP: OnceLock<UserMap> = OnceLock::new();
@@ -336,6 +348,25 @@ async fn setup_user_mapping() -> bool {
         debug!("未收到 EASYTIDY_USER_* 环境变量，跳过用户映射（root 容器）");
         return false;
     };
+
+    // euid 分派：容器默认用户 node 化（新模型）下 server 以 node 运行——
+    // 用户已由 init 镜像烘焙预置（创建链路临时 root 容器），server 无权
+    // 也无需 useradd；校验存在即采用。root（旧容器）走下方完整建号逻辑。
+    if current_euid().unwrap_or(0) != 0 {
+        if user_exists(&user).await {
+            info!(
+                "node 容器：烘焙用户 {}({}:{}) 生效（免建号）",
+                user.name, user.uid, user.gid
+            );
+            let _ = USER_MAP.set(user);
+            return true;
+        }
+        warn!(
+            "server 以非 root 运行但用户 {} 不存在（init 烘焙未执行？），跳过映射",
+            user.name
+        );
+        return false;
+    }
 
     // 1. 确保组存在
     if !group_gid_exists(user.gid).await {
@@ -521,8 +552,7 @@ fn command_available(cmd: &str) -> bool {
 }
 
 /// 容器内可用 shell：/bin/bash 优先（ubuntu 系），缺失回退 /bin/sh（alpine/busybox）。
-fn user_shell_path() -> &'static str {
-    if Path::new("/bin/bash").exists() {
+fn user_shell_path() -> &'static str {    if Path::new("/bin/bash").exists() {
         "/bin/bash"
     } else {
         "/bin/sh"
@@ -1228,7 +1258,9 @@ async fn handle_pty_open(
     // as_root=true（setup/包管理）：直接以容器 root 运行（rootless 下 = 宿主用户权）
     // 映射未生效（env 缺失/用户创建失败）：维持现状（/bin/sh root）。
     let mut cmd_builder = if req.as_root {
-        // root 交互 shell 优先 bash（与 node 终端体验一致；PTY 对端自动交互）
+        // root 交互 shell 优先 bash（与 node 终端体验一致；PTY 对端自动交互）。
+        // 仅旧容器（User=root）会收到 as_root 请求——新容器的 root 终端由
+        // 宿主侧 exec 通道提供，不经 server
         let cmd = if req.cmd.is_empty() {
             if Path::new("/bin/bash").exists() {
                 "/bin/bash".to_string()
@@ -1246,18 +1278,49 @@ async fn handle_pty_open(
         }
         b
     } else if let Some(user) = user_map() {
-        if req.cmd.is_empty() {
-            let mut b = CommandBuilder::new("su");
-            b.arg("-");
-            b.arg(&user.name);
+        if current_euid().unwrap_or(0) == user.uid {
+            // node 容器（server=node）：直接 spawn，免 su——login 语义经
+            // shell 的 -l（HOME/SHELL 由 podman User=node 按 passwd 设置）
+            let cmd = if req.cmd.is_empty() {
+                if Path::new("/bin/bash").exists() {
+                    "/bin/bash".to_string()
+                } else {
+                    "/bin/sh".to_string()
+                }
+            } else {
+                req.cmd.clone()
+            };
+            let mut argv = if req.cmd.is_empty() {
+                vec![cmd.clone(), "-l".to_string()]
+            } else {
+                req.argv.clone()
+            };
+            if argv.is_empty() {
+                argv.push(cmd.clone());
+            }
+            let mut b = CommandBuilder::new(cmd);
+            for arg in &argv[1..] {
+                b.arg(arg);
+            }
+            if req.cwd == "/" {
+                b.cwd(&user.home); // login 落 home（与 su - 行为对齐）
+            }
             b
         } else {
-            let full = build_su_command(&req.cmd, &req.argv);
-            let mut b = CommandBuilder::new("su");
-            b.arg("-c");
-            b.arg(full);
-            b.arg(&user.name);
-            b
+            // root 容器（旧模型）：经 su 降权到 node
+            if req.cmd.is_empty() {
+                let mut b = CommandBuilder::new("su");
+                b.arg("-");
+                b.arg(&user.name);
+                b
+            } else {
+                let full = build_su_command(&req.cmd, &req.argv);
+                let mut b = CommandBuilder::new("su");
+                b.arg("-c");
+                b.arg(full);
+                b.arg(&user.name);
+                b
+            }
         }
     } else {
         let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };

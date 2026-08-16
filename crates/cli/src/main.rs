@@ -779,6 +779,12 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 
+    // root 身份：宿主侧 exec 通道（bollard exec，User=0）——容器默认用户
+    // node 化后 server 无 root；rootless 下宿主可自由以容器内任意 uid 起进程
+    if as_root {
+        return cmd_run_exec_root(&podman, &container, command).await;
+    }
+
     // 2. 连接到 socket
     let socket_path = easytidy_core::host_socket_path(&container)?;
     info!("连接到 socket：{}", socket_path.display());
@@ -1052,6 +1058,110 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
     // 恢复终端并打印换行
     println!();
 
+    Ok(code)
+}
+
+/// root 身份运行：宿主侧 exec 通道（bollard exec，User=0 + TTY attach）。
+///
+/// 与 server socket 通道（node）同构的交互体验：stdin→input、output→stdout、
+/// SIGWINCH→resize_exec、流 End→inspect_exec 查退出码。
+async fn cmd_run_exec_root(podman: &Podman, container: &str, command: Vec<String>) -> Result<i32> {
+    use futures::StreamExt;
+
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let pty = podman.exec_pty(container, "0", cols, rows, command).await?;
+    // 首次尺寸同步失败可容忍：一次性命令（id 等）在 resize 前已退出
+    let _ = podman.resize_exec_pty(&pty.exec_id, cols, rows).await;
+    debug!("exec PTY 打开成功：exec_id={}", pty.exec_id);
+
+    let mut raw_enabled = false;
+    match terminal::enable_raw_mode() {
+        Ok(()) => raw_enabled = true,
+        Err(e) => debug!("非 TTY 场景，跳过 raw 模式：{}", e),
+    }
+
+    // SIGWINCH → resize（与 server 通道同款线程转发）
+    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    std::thread::spawn(move || {
+        use signal_hook::iterator::Signals;
+        let mut signals = Signals::new([signal_hook::consts::SIGWINCH])
+            .expect("注册信号处理失败");
+        for _ in signals.forever() {
+            if signal_tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+
+    // stdin → exec input（阻塞读 + channel 转发）
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 4096];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin_tx.send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let mut stdout = tokio::io::stdout();
+    let mut output = pty.output;
+    let input = pty.input.clone();
+    let exec_id = pty.exec_id.clone();
+    let podman_resize = Podman::connect().await?;
+
+    let exit_code: i32 = loop {
+        tokio::select! {
+            // exec 输出 → stdout
+            item = output.next() => {
+                match item {
+                    Some(Ok(data)) => {
+                        stdout.write_all(&data).await?;
+                        stdout.flush().await?;
+                    }
+                    // 流 End = 进程退出
+                    None => break 0,
+                    Some(Err(e)) => {
+                        error!("exec 输出读取错误：{}", e);
+                        break 1;
+                    }
+                }
+            }
+            // stdin → exec input
+            Some(data) = stdin_rx.recv() => {
+                Podman::exec_pty_write(&input, &data).await?;
+            }
+            // SIGWINCH → resize
+            Some(()) = signal_rx.recv() => {
+                if let Ok((c, r)) = terminal::size() {
+                    let _ = podman_resize.resize_exec_pty(&exec_id, c, r).await;
+                }
+            }
+            else => break 0,
+        }
+    };
+
+    // 退出码：inspect（流 End 可能早于状态落盘，短暂重试）
+    let mut code = podman.exec_exit_code(&pty.exec_id).await?.unwrap_or(exit_code);
+    for _ in 0..4 {
+        if code != 0 || podman.exec_exit_code(&pty.exec_id).await?.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        code = podman.exec_exit_code(&pty.exec_id).await?.unwrap_or(code);
+    }
+
+    if raw_enabled {
+        terminal::disable_raw_mode().context("恢复终端模式失败")?;
+    }
+    println!();
     Ok(code)
 }
 

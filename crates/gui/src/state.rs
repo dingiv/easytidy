@@ -6,6 +6,7 @@
 //! - PtyEvent 等命令返回类型
 
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use anyhow::{Context, Result};
@@ -29,6 +30,20 @@ pub enum AppMode {
 /// 单条 PTY 会话的写侧（该 PTY 专用连接的 sink）
 pub type PtySink = Arc<tokio::sync::Mutex<SplitSink<Framed<UnixStream, FrameCodec>, Frame>>>;
 
+/// 宿主侧 exec PTY 会话句柄（root 终端：不经容器 server，宿主 bollard
+/// exec API 直连 podman socket）。input drop = stdin EOF → shell 退出。
+#[derive(Clone)]
+pub struct ExecHandle {
+    /// exec ID（resize/退出码查询用）
+    pub exec_id: String,
+    /// stdin 写侧
+    pub input: Arc<tokio::sync::Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
+}
+
+/// exec 型 stream_id 发号基址（与 server 的 stream_id 空间隔离；
+/// server 从 1 递增，实践远达不到此值）
+pub const EXEC_STREAM_ID_BASE: u32 = 1 << 30;
+
 /// 单容器 GUI 会话（托管在 Tauri State 中）
 pub struct GuiSession {
     /// 容器名
@@ -39,6 +54,8 @@ pub struct GuiSession {
     pub next_msg_id: AtomicU64,
     /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）
     pub active_ptys: Arc<tokio::sync::Mutex<HashMap<u32, PtySink>>>,
+    /// 宿主 exec PTY（root 终端；stream_id 从 EXEC_STREAM_ID_BASE 起）
+    pub active_execs: Arc<tokio::sync::Mutex<HashMap<u32, ExecHandle>>>,
 }
 
 /// PTY 事件（通过 Channel 发送给前端）

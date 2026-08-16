@@ -1,4 +1,12 @@
 //! PTY 命令：打开（attach 常驻终端）/写入/尺寸/关闭/心跳/工作目录。
+//!
+//! 两条通道：
+//! - **node 终端**：容器 server socket（每会话一条专用连接，server 持有
+//!   生命周期 + 环形缓冲回放 + cwd 跟随）
+//! - **root 终端**：宿主侧 bollard exec API（`exec_pty`，User=0）——容器
+//!   默认用户 node 化后 server 不再持有 root；rootless 下宿主对容器
+//!   userns 有所有权，可自由以 root 起进程（`podman exec -u root` 同机制）。
+//!   代价：不持久化（窗口关即断）、无 cwd 跟随。
 
 use std::sync::Arc;
 use futures::{SinkExt, StreamExt};
@@ -11,11 +19,14 @@ use tracing::error;
 
 use std::collections::HashMap;
 
-use crate::state::{GuiSession, PtyEvent};
+use crate::state::{ExecHandle, GuiSession, PtyEvent, EXEC_STREAM_ID_BASE};
 use crate::commands::socket::{connect_to_container, send_json_request};
 
 /// 获取当前所有活跃终端（server 持有的 PTY 会话；多终端面板恢复用——
 /// 重开窗口时逐个 attach_stream 重连，输出经环形缓冲回放）。
+///
+/// 注意：仅含 server 会话（node 终端）；root 终端（宿主 exec 通道）
+/// 不持久化，不在恢复范围。
 #[tauri::command]
 pub async fn get_terminals(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -35,6 +46,93 @@ pub async fn get_terminals(
     let list: PtyListResp = serde_json::from_value(resp.payload)
         .map_err(|e| format!("解析 pty.list 响应失败：{e}"))?;
     Ok(list.terminals)
+}
+
+/// root 终端：宿主侧 exec PTY（bollard exec，User=0）。
+///
+/// 读侧 spawn 消费 output 流 → Channel（data / exited）；写侧存
+/// `active_execs`（pty_write/resize/close 按 stream_id 分派）。
+/// stream_id 从 EXEC_STREAM_ID_BASE 起（与 server 的 id 空间隔离）。
+async fn open_exec_root_terminal(
+    sess: &GuiSession,
+    on_event: tauri::ipc::Channel<PtyEvent>,
+    cmd: Option<String>,
+    cols: u16,
+    rows: u16,
+    next_exec_id: u32,
+) -> Result<u32, String> {
+    let container = sess.container_name.clone();
+    let argv = cmd
+        .map(|c| c.split_whitespace().map(String::from).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let podman = easytidy_core::podman::Podman::connect()
+        .await
+        .map_err(|e| format!("连接 podman 失败：{e}"))?;
+    let pty = podman
+        .exec_pty(&container, "0", cols, rows, argv)
+        .await
+        .map_err(|e| format!("打开 root 终端失败：{e}"))?;
+    // start 后补一次 resize（create body 无尺寸字段，env COLUMNS/LINES
+    // 不驱动 TTY 尺寸）
+    podman
+        .resize_exec_pty(&pty.exec_id, cols, rows)
+        .await
+        .map_err(|e| format!("初始化 root 终端尺寸失败：{e}"))?;
+
+    let stream_id = next_exec_id;
+    let exec_id = pty.exec_id.clone();
+    {
+        let mut execs = sess.active_execs.lock().await;
+        execs.insert(
+            stream_id,
+            ExecHandle {
+                exec_id: exec_id.clone(),
+                input: pty.input.clone(),
+            },
+        );
+    }
+
+    // 读侧：output 流 → data 事件；End → 查退出码 → exited 事件 + 清理
+    let active_execs = Arc::clone(&sess.active_execs);
+    let mut output = pty.output;
+    tokio::spawn(async move {
+        while let Some(item) = output.next().await {
+            match item {
+                Ok(data) => {
+                    if on_event
+                        .send(PtyEvent {
+                            kind: "data".to_string(),
+                            data: Some(data),
+                            code: None,
+                            cwd: None,
+                        })
+                        .is_err()
+                    {
+                        break; // 通道关闭（面板卸载）
+                    }
+                }
+                Err(e) => {
+                    error!("root 终端读取错误：{e}");
+                    break;
+                }
+            }
+        }
+        // 流 End = 进程退出（或连接断开）；查退出码后通知前端
+        let code = match easytidy_core::podman::Podman::connect().await {
+            Ok(p) => p.exec_exit_code(&exec_id).await.ok().flatten().unwrap_or(0),
+            Err(_) => 0,
+        };
+        let _ = on_event.send(PtyEvent {
+            kind: "exited".to_string(),
+            data: None,
+            code: Some(code),
+            cwd: None,
+        });
+        let mut execs = active_execs.lock().await;
+        execs.remove(&stream_id);
+    });
+
+    Ok(stream_id)
 }
 
 /// 打开 PTY 会话（每条会话一条专用连接）。
@@ -62,7 +160,18 @@ pub async fn pty_open(
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container_name = sess.container_name.clone();
 
-    // 专用连接：连接 + 握手（与 cli cmd_run 同构）
+    // root 终端：宿主 exec 通道（新容器 server 以 node 运行无 root；
+    // persistent/attach 语义不适用——exec 会话随连接生存）
+    if as_root {
+        // 发号 = 当前最大 exec id + 1（关闭中间会话后不复用，防撞号）
+        let next = {
+            let execs = sess.active_execs.lock().await;
+            execs.keys().copied().max().unwrap_or(EXEC_STREAM_ID_BASE - 1) + 1
+        };
+        return open_exec_root_terminal(sess, on_event, cmd, cols, rows, next).await;
+    }
+
+    // node 终端：专用连接 + 握手（与 cli cmd_run 同构）
     let mut framed = connect_to_container(&container_name)
         .await
         .map_err(|e| e.to_string())?;
@@ -198,7 +307,7 @@ pub async fn pty_open(
     Ok(stream_id)
 }
 
-/// 向 PTY 写入数据（走该 PTY 专用连接的写侧）
+/// 向 PTY 写入数据（exec 型走宿主 stdin；server 型走专用连接写侧）
 #[tauri::command]
 pub async fn pty_write(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -206,6 +315,18 @@ pub async fn pty_write(
     data: Vec<u8>,
 ) -> Result<(), String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    // exec 型（root 终端，宿主 exec 通道）
+    let maybe_exec = {
+        let execs = sess.active_execs.lock().await;
+        execs.get(&stream_id).cloned()
+    };
+    if let Some(handle) = maybe_exec {
+        easytidy_core::podman::Podman::exec_pty_write(&handle.input, &data)
+            .await
+            .map_err(|e| format!("PTY 写入失败：{e}"))?;
+        return Ok(());
+    }
 
     let sink = {
         let active = sess.active_ptys.lock().await;
@@ -221,7 +342,7 @@ pub async fn pty_write(
     Ok(())
 }
 
-/// 调整 PTY 大小（走该 PTY 专用连接的写侧）
+/// 调整 PTY 大小（exec 型走宿主 resize_exec；server 型走专用连接写侧）
 #[tauri::command]
 pub async fn pty_resize(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -230,6 +351,20 @@ pub async fn pty_resize(
     rows: u16,
 ) -> Result<(), String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    // exec 型（root 终端）
+    let maybe_exec = {
+        let execs = sess.active_execs.lock().await;
+        execs.get(&stream_id).map(|h| h.exec_id.clone())
+    };
+    if let Some(exec_id) = maybe_exec {
+        let podman = easytidy_core::podman::Podman::connect()
+            .await
+            .map_err(|e| e.to_string())?;
+        // 流已关闭时静默忽略（退出竞态中 resize 可能触发失败）
+        let _ = podman.resize_exec_pty(&exec_id, cols, rows).await;
+        return Ok(());
+    }
 
     // 流已关闭时静默忽略（resize 可能在退出竞态中触发）
     let maybe_sink = {
@@ -259,13 +394,22 @@ pub async fn pty_resize(
     Ok(())
 }
 
-/// 关闭 PTY 会话（走该 PTY 专用连接的写侧）
+/// 关闭 PTY 会话（exec 型 = drop stdin → EOF → shell 退出；
+/// server 型 = pty.close 帧）
 #[tauri::command]
 pub async fn pty_close(
     session: tauri::State<'_, Option<GuiSession>>,
     stream_id: u32,
 ) -> Result<(), String> {
     let sess = session.inner().as_ref().ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    // exec 型（root 终端）：移除句柄 → input Arc drop → stdin EOF → 退出
+    {
+        let mut execs = sess.active_execs.lock().await;
+        if execs.remove(&stream_id).is_some() {
+            return Ok(());
+        }
+    }
 
     // 流已关闭时静默忽略
     let maybe_sink = {
