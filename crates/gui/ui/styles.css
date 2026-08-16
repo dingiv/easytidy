@@ -1199,3 +1199,126 @@ button:disabled {
   font-size: 0.72rem;
   color: #6c7086;
 }
+
+/* ============================================================================
+ * 主 GUI 面板通用 + 镜像管理 + Flavor 管理
+ * ========================================================================== */
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.8rem;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.header-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.panel-hint {
+  color: #6c7086;
+  font-size: 0.8rem;
+  margin: -0.4rem 0 0.8rem;
+}
+
+.dialog-hint {
+  color: #6c7086;
+  font-size: 0.8rem;
+  margin: 0 0 0.8rem;
+}
+
+.images-panel,
+.flavors-panel {
+  padding: 0.6rem 0.8rem;
+}
+
+.image-tag {
+  font-family: monospace;
+  font-size: 0.78rem;
+}
+
+/* flavor 列表卡片 */
+.flavor-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.flavor-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.6rem 0.8rem;
+  background: #181825;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+}
+
+.flavor-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.flavor-name {
+  font-weight: bold;
+  font-size: 0.95rem;
+}
+
+.flavor-image {
+  color: #9399b2;
+  font-family: monospace;
+  font-size: 0.75rem;
+  margin-top: 0.2rem;
+}
+
+.flavor-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex: none;
+}
+
+/* flavor 编辑表单 */
+.flavor-form .form-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.6rem;
+}
+
+.flavor-form .form-row > label {
+  width: 72px;
+  flex: none;
+  color: #cdd6f4;
+  font-size: 0.85rem;
+}
+
+.flavor-form .form-hint {
+  color: #6c7086;
+  font-size: 0.75rem;
+}
+
+/* 完整错误详情弹窗（容器创建/启动等链路错误全文展示） */
+.error-detail {
+  max-height: 320px;
+  overflow: auto;
+  background: #11111b;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.75rem;
+  font-family: "JetBrains Mono", monospace;
+  color: #f38ba8;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+  user-select: text;
+}

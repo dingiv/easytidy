@@ -962,7 +962,38 @@ async fn close_conn_ptys(
 }
 
 /// Handle a JSON message
+/// 消息入口：handler 失败转为显式 error 响应（带 anyhow 全链 {:#}），
+/// 不再断连——客户端原本就解析 err 字段，此前 Err 直接冒泡到连接层断开，
+/// 用户只能看到"接收响应失败"而拿不到真实原因（如 spawn: No such file）。
 async fn handle_message(
+    msg: Message,
+    state: &Arc<ServerState>,
+    handshake_done: &Arc<AtomicBool>,
+    event_tx: mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
+) -> Result<Option<Frame>> {
+    let msg_id = msg.id;
+    let msg_op = msg.op.clone();
+    match dispatch(msg, state, handshake_done, event_tx, conn_token).await {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            // {:#} = anyhow 全错误链（context + 根因），日志与响应一致
+            error!("{msg_op} 处理失败：{e:#}");
+            Ok(Some(Frame::Json(Message {
+                id: msg_id,
+                kind: MsgKind::Resp,
+                op: msg_op,
+                payload: json!(null),
+                err: Some(RpcError {
+                    code: "op_failed".to_string(),
+                    message: format!("{e:#}"),
+                }),
+            })))
+        }
+    }
+}
+
+async fn dispatch(
     msg: Message,
     state: &Arc<ServerState>,
     handshake_done: &Arc<AtomicBool>,
@@ -982,7 +1013,6 @@ async fn handle_message(
             }),
         })));
     }
-
     match (msg.kind, msg.op.as_str()) {
         (MsgKind::Req, "hello") => {
             Ok(Some(handle_handshake(msg, handshake_done).await?))

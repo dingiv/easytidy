@@ -31,3 +31,4 @@ tracing-subscriber = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 base64 = "0.22"
+tracing-appender = "0.2.5"

@@ -94,6 +94,45 @@ impl Flavor {
         Ok(flavor)
     }
 
+    /// 列出全部 flavor（含完整配置；GUI flavor 管理用）。
+    pub fn list_detailed() -> Result<Vec<Flavor>> {
+        Self::list()?
+            .into_iter()
+            .map(|name| Self::load(&name))
+            .collect()
+    }
+
+    /// 保存 flavor（新建或覆盖；临时文件 + rename 原子写，与 configfile 同款）。
+    pub fn save(&self) -> Result<()> {
+        if self.name.trim().is_empty() {
+            return Err(Error::Config("flavor 名不能为空".to_string()));
+        }
+        let dir = Self::flavors_dir()?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| Error::Config(format!("创建 flavors 目录失败：{e}")))?;
+        let path = dir.join(format!("{}.toml", self.name));
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| Error::Config(format!("序列化 flavor 失败：{e}")))?;
+        let tmp = dir.join(format!("{}.toml.tmp", self.name));
+        std::fs::write(&tmp, &content)
+            .map_err(|e| Error::Config(format!("写入 flavor 失败：{e}")))?;
+        std::fs::rename(&tmp, &path)
+            .map_err(|e| Error::Config(format!("替换 flavor 文件失败：{e}")))?;
+        tracing::info!("flavor 已保存：{path:?}");
+        Ok(())
+    }
+
+    /// 删除 flavor（不存在时静默）。
+    pub fn delete(name: &str) -> Result<()> {
+        let path = Self::flavors_dir()?.join(format!("{name}.toml"));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .map_err(|e| Error::Config(format!("删除 flavor 失败：{e}")))?;
+            tracing::info!("flavor 已删除：{path:?}");
+        }
+        Ok(())
+    }
+
     /// 展开为容器配置。
     ///
     /// GUI 透传（gui = true），配方参考 docs/11-gui-container.md（宿主实测验证）：
@@ -186,5 +225,70 @@ impl Flavor {
             // 非 GUI flavor 默认开启、可显式 user_home=false 关闭
             user_home: self.gui || self.user_home.unwrap_or(true),
         })
+    }
+}
+
+// ============================================================================
+// 内置预设 flavor（快速拉起 GUI 容器；缺失时补齐，不覆盖用户修改）
+// ============================================================================
+
+/// 内置预设模板（name → TOML 内容）。
+const PRESET_FLAVORS: &[(&str, &str)] = &[
+    (
+        "chrome",
+        r#"# Chrome 快速拉起：GUI 底座 + 官方源安装 + entry
+# 使用：easytidy flavor apply chrome（或主 GUI Flavor 面板「创建容器」）
+name = "chrome"
+image = "docker.io/library/ubuntu:24.04"
+gui = true
+setup = [
+    "apt-get update -qq && apt-get install -y -qq curl gpg",
+    "curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg",
+    "echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main' > /etc/apt/sources.list.d/google-chrome.list",
+    "apt-get update -qq && apt-get install -y -qq google-chrome-stable",
+]
+entry = "google-chrome-stable"
+"#,
+    ),
+    (
+        "firefox",
+        r#"# Firefox 快速拉起：debian 底座（firefox-esr 为 deb 原生包，无 snap 问题）
+name = "firefox"
+image = "docker.io/library/debian:bookworm"
+gui = true
+setup = ["apt-get update -qq && apt-get install -y -qq firefox-esr"]
+entry = "firefox-esr"
+"#,
+    ),
+    (
+        "code",
+        r#"# VS Code 快速拉起：GUI 底座 + 微软官方源安装
+name = "code"
+image = "docker.io/library/ubuntu:24.04"
+gui = true
+setup = [
+    "apt-get update -qq && apt-get install -y -qq curl gpg",
+    "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg",
+    "echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft.gpg] https://packages.microsoft.com/repos/code stable main' > /etc/apt/sources.list.d/vscode.list",
+    "apt-get update -qq && apt-get install -y -qq code",
+]
+entry = "code"
+"#,
+    ),
+];
+
+/// 补齐内置预设 flavor（文件不存在时写入；已存在 = 用户修改过，不覆盖）。
+pub fn ensure_presets() {
+    let Ok(dir) = Flavor::flavors_dir() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    for (name, content) in PRESET_FLAVORS {
+        let path = dir.join(format!("{name}.toml"));
+        if !path.exists() {
+            if std::fs::write(&path, content).is_ok() {
+                tracing::info!("预设 flavor 已写入：{path:?}");
+            }
+        }
     }
 }

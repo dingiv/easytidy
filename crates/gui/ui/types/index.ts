@@ -168,6 +168,40 @@ export interface TerminalInfo {
   cwd?: string | null;
 }
 
+/// 镜像摘要（images_list；GUI 镜像管理）
+export interface ImageSummary {
+  /// 镜像 ID（短）
+  id: string;
+  /// 仓库标签（悬空镜像为空）
+  repo_tags: string[];
+  /// 展开后大小（字节）
+  size: number;
+  /// 创建时间（unix 秒）
+  created: number;
+}
+
+/// flavor 启动配置模板（flavor_list_detailed / flavor_save；
+/// 描述"将一个镜像 run 起来"需要向 easytidy 传递的完整配置清单）
+export interface Flavor {
+  name: string;
+  /// 基础镜像
+  image: string;
+  /// GUI 透传（显示环境注入 + 字体/图标 + 用户映射）
+  gui: boolean;
+  /// 创建后按序执行的安装命令
+  setup: string[];
+  /// entry 应用（容器内可执行名）
+  entry?: string | null;
+  /// entry 应用参数
+  entry_args: string[];
+  /// 额外路径映射
+  mounts: MountConfig[];
+  /// 用户一致性映射（gui=true 时强制开启）
+  user_home?: boolean | null;
+  /// 网络配置
+  network: ContainerNetworkConfig;
+}
+
 /// PTY event from pty_open
 export interface PtyEvent {
   kind: 'data' | 'exited' | 'cwdChanged';

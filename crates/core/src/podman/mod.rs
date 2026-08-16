@@ -120,6 +120,9 @@ chmod 440 /etc/sudoers.d/easytidy-node
         use bollard::container::{CreateContainerOptions, Config as BConfig, WaitContainerOptions};
         use bollard::models::HostConfig;
         let config = BConfig::<String> {
+            // ⚠️ 必须显式传 image（漏传时 podman 收到空引用报
+            // "parsing reference \"\": repository name must have at least one component"）
+            image: Some(image.to_string()),
             user: Some("0:0".to_string()),
             cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
             host_config: Some(HostConfig {
@@ -815,6 +818,55 @@ chmod 440 /etc/sudoers.d/easytidy-node
     }
 
     /// 拉取镜像。
+    /// 列出所有镜像（GUI 镜像管理）。
+    pub async fn list_images(&self) -> Result<Vec<crate::models::ImageSummary>> {
+        use bollard::image::ListImagesOptions;
+
+        let images = self
+            .docker
+            .list_images(Some(ListImagesOptions::<String> {
+                all: false,
+                ..Default::default()
+            }))
+            .await
+            .map_err(|e| Error::Api(e))?;
+
+        Ok(images
+            .into_iter()
+            .map(|i| crate::models::ImageSummary {
+                // bollard ImageSummary 字段非 Option（id: String, repo_tags: Vec, ...）
+                id: i
+                    .id
+                    .trim_start_matches("sha256:")
+                    .chars()
+                    .take(12)
+                    .collect(),
+                repo_tags: i.repo_tags,
+                size: i.size as u64,
+                created: i.created,
+            })
+            .collect())
+    }
+
+    /// 删除镜像（force 强制删除被引用镜像）。
+    pub async fn remove_image(&self, name: &str, force: bool) -> Result<()> {
+        use bollard::image::RemoveImageOptions;
+
+        self.docker
+            .remove_image(
+                name,
+                Some(RemoveImageOptions {
+                    force,
+                    ..Default::default()
+                }),
+                None,
+            )
+            .await
+            .map_err(|e| Error::Api(e))?;
+        tracing::info!("镜像已删除：{name}");
+        Ok(())
+    }
+
     pub async fn pull_image(&self, image: &str) -> Result<()> {
         use bollard::image::CreateImageOptions;
         use futures::StreamExt;

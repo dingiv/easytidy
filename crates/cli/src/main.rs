@@ -898,6 +898,10 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         Frame::Json(msg) => msg,
         Frame::Raw { .. } => bail!("pty.open 响应为 JSON 帧"),
     };
+    // 错误响应优先检查（payload=null，直接 from_value 会报解析错误掩盖真实原因）
+    if let Some(err) = &open_resp_msg.err {
+        bail!("pty.open 失败：{} - {}", err.code, err.message);
+    }
 
     let open_resp: PtyOpenResp = serde_json::from_value(open_resp_msg.payload)
         .context("解析 pty.open 响应失败")?;

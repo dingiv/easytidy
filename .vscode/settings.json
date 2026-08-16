@@ -1,0 +1,19 @@
+{
+  // inotify 治本：排除构建产物/依赖目录的文件监视（target 2.4万 + node_modules 2.2万
+  // 文件不监视后，默认 65536 watch 上限通常即够用，无需调 sysctl）
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/.git/objects/**": true,
+    "**/spikes/**/target/**": true
+  },
+  // rust-analyzer 自身的监视源（vite 已在 vite.config.ts 排除 target）
+  "rust-analyzer.files.watchIgnore": ["target", "node_modules", "dist"],
+  // 顺手：搜索/文件浏览也跳过这些目录（性能）
+  "search.exclude": {
+    "**/target": true,
+    "**/node_modules": true,
+    "**/dist": true
+  }
+}

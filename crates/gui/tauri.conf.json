@@ -4,9 +4,15 @@
   "version": "0.1.0",
   "identifier": "io.github.dingiv.easytidy",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": {
+      "script": "pnpm dev",
+      "cwd": "."
+    },
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": {
+      "script": "pnpm build",
+      "cwd": "."
+    },
     "frontendDist": "dist"
   },
   "app": {

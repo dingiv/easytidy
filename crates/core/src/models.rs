@@ -17,6 +17,19 @@ pub struct ContainerSummary {
     pub managed: bool,
 }
 
+/// 镜像摘要（GUI 镜像管理）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageSummary {
+    /// 镜像 ID（短）
+    pub id: String,
+    /// 仓库标签（如 ["docker.io/library/ubuntu:24.04"]；悬空镜像为空）
+    pub repo_tags: Vec<String>,
+    /// 展开后大小（字节）
+    pub size: u64,
+    /// 创建时间（unix 秒）
+    pub created: i64,
+}
+
 /// 路径映射（bind mount）。
 ///
 /// 宿主路径必须已存在（`create_with_config` / `rebuild` 时校验）。

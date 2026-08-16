@@ -19,11 +19,33 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
     // 第一步：应用 NVIDIA 规避措施（在 Tauri 初始化之前）
     commands::common::apply_nvidia_workaround();
 
-    // 初始化日志
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
-            .add_directive("easytidy_gui=info".parse().unwrap()))
-        .init();
+    // 初始化日志：stdout + 文件双写。
+    // 桌面启动的 GUI 无终端（stdout 丢失），文件是唯一持久日志出口——
+    // 容器创建/启动链路多步易错，排障依赖完整日志。位置：
+    // ~/.easytidy/logs/easytidy-gui.log（单文件追加，手动清理即可）
+    {
+        use tracing_subscriber::prelude::*;
+
+        let filter = tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("easytidy_gui=info".parse().unwrap())
+            .add_directive("easytidy_core=info".parse().unwrap())
+            .add_directive("easytidy=info".parse().unwrap());
+        let file_layer = easytidy_core::appdata::app_data_dir()
+            .ok()
+            .map(|dir| {
+                let dir = dir.join("logs");
+                let _ = std::fs::create_dir_all(&dir);
+                let appender = tracing_appender::rolling::never(&dir, "easytidy-gui.log");
+                tracing_subscriber::fmt::layer()
+                    .with_writer(appender)
+                    .with_ansi(false)
+            });
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(file_layer)
+            .init();
+    }
 
     // 第二步：启动 Tauri 应用
     // 根据模式决定是否初始化 GuiSession
@@ -60,6 +82,14 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::container_shutdown,
             // 环境（env）语义
             commands::containers::flavor_list,
+            // 镜像管理
+            commands::containers::images_list,
+            commands::containers::image_pull,
+            commands::containers::image_remove,
+            // flavor 管理（启动配置模板）
+            commands::containers::flavor_list_detailed,
+            commands::containers::flavor_save,
+            commands::containers::flavor_delete,
             commands::containers::env_list,
             commands::containers::env_new,
             commands::containers::env_rm,

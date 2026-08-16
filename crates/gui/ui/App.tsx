@@ -1,3 +1,4 @@
+import { App as AntApp } from 'antd';
 import { Centralized } from './components/Centralized';
 import { PerContainer } from './components/PerContainer';
 import { useAppMode } from './hooks/useAppMode';
@@ -5,6 +6,16 @@ import { useAppMode } from './hooks/useAppMode';
 function App() {
   const { mode, error } = useAppMode();
 
+  // antd App 上下文：让各面板的 message/modal/notification 生效
+  // （无上下文时 App.useApp() 静默不渲染——主 GUI 曾因此吞掉创建错误）
+  return (
+    <AntApp>
+      <AppInner mode={mode} error={error} />
+    </AntApp>
+  );
+}
+
+function AppInner({ mode, error }: { mode: any; error: string | null }) {
   if (error) {
     return (
       <div className="app">
