@@ -109,6 +109,7 @@ impl Libpod {
     /// POST /v<version>/libpod/containers/create?name=<name>，body 为
     /// Docker-compat 形状 + libpod 扩展（namespaces.userns.nsmode）。返回容器 ID。
     pub async fn create_container(&self, name: &str, body: Value) -> Result<String> {
+        // FIXME: ?? 为什么我们本地创建容器需要请求网络
         let uri: hyper::Uri = format!(
             "http://podman/v{}/libpod/containers/create?name={}",
             self.api_version,
@@ -190,6 +191,8 @@ pub fn keep_id_create_body(
     // 容器默认用户（PID 1 与 podman exec 的默认身份）；None = "0:0"（root，
     // 旧行为）。node 化容器传 "<uid>:<gid>"——node 用户经 init 镜像烘焙预置
     default_user: Option<&str>,
+    // keep-id 用户命名空间（user_home 映射）；false = 无 userns（root 容器）
+    keep_id: bool,
 ) -> Value {
     // libpod SpecGenerator 的 env 是 map[string]string（Docker compat 才是数组）
     let mut env_map = serde_json::Map::new();
@@ -221,7 +224,7 @@ pub fn keep_id_create_body(
             })
         })
         .collect();
-    json!({
+    let mut body = json!({
         "name": name,
         "image": image,
         // libpod SpecGenerator 用 "command"（Docker compat 才是 "cmd"）
@@ -240,12 +243,15 @@ pub fn keep_id_create_body(
         "exposed_ports": exposed_ports,
         "port_bindings": port_bindings,
         "working_dir": working_dir,
-        // libpod 专属：keep-id。注意：字段放**顶层** userns
-        // （实测 namespaces.userns 被忽略）。
-        // 真实映射语义（实测文件属主，2026-08-07；/proc/self/uid_map 字面
-        // 不代表最终属主）：容器 uid 1000（node）= 宿主登录用户（1000）；
-        // 容器 uid 0（root）= 宿主 subuid 100000（容器文件系统属主，
-        // **不是宿主默认用户**——root 写宿主 home 属主呈现 100000）
-        "userns": { "nsmode": "keep-id" }
-    })
+    });
+    // libpod 专属：keep-id（user_home 映射容器）。注意：字段放**顶层** userns
+    // （实测 namespaces.userns 被忽略）。
+    // 真实映射语义（实测文件属主，2026-08-07；/proc/self/uid_map 字面
+    // 不代表最终属主）：容器 uid 1000（node）= 宿主登录用户（1000）；
+    // 容器 uid 0（root）= 宿主 subuid 100000（容器文件系统属主，
+    // **不是宿主默认用户**——root 写宿主 home 属主呈现 100000）
+    if keep_id {
+        body["userns"] = json!({ "nsmode": "keep-id" });
+    }
+    body
 }

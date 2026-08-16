@@ -298,7 +298,6 @@ chown {uid}:{gid} /home/easytidy
         server_bin_path: &Path,
         config: &ContainerConfig,
     ) -> Result<String> {
-        use bollard::container::{CreateContainerOptions, Config};
         use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
 
@@ -467,15 +466,15 @@ chown {uid}:{gid} /home/easytidy
             // server 经免密 sudo 提权为容器 root 运行（容器 User=node 下
             // 恢复 root server：装包/su 降权能力；烘焙层已配 sudoers）。
             // 最小镜像无 sudo 时回退 node 运行（euid 分派兼容，功能可用）
-            let server_cmd = format!(
-                "if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then \
-                 exec sudo -u root /usr/bin/easytidy-server --socket /run/easytidy/server.sock; \
-                 else exec /usr/bin/easytidy-server --socket /run/easytidy/server.sock; fi"
+            let server_cmd = concat!(
+                "if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then ",
+                "exec sudo -u root /usr/bin/easytidy-server --socket /run/easytidy/server.sock; ",
+                "else exec /usr/bin/easytidy-server --socket /run/easytidy/server.sock; fi",
             );
             let body = crate::libpod::keep_id_create_body(
                 name,
                 &init_image,
-                vec!["/bin/sh".to_string(), "-c".to_string(), server_cmd],
+                vec!["/bin/sh".to_string(), "-c".to_string(), server_cmd.to_string()],
                 env.clone(),
                 labels.clone(),
                 mounts_json.as_array().cloned().unwrap_or_default(),
@@ -486,39 +485,42 @@ chown {uid}:{gid} /home/easytidy
                     std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
                 ),
                 Some(&default_user),
+                true,
             );
             let id = libpod.create_container(name, body).await?;
             tracing::info!("容器 {} 创建成功（ID: {}，keep-id）", name, id);
             return Ok(id);
         }
-        // 构建容器配置
-        let config_body = Config {
-            image: Some(image.to_string()),
-            cmd: Some(vec![
+        // 非 user_home 路径同样走 libpod 端点创建（仅支持 podman；
+        // 不带 userns，容器以 root 运行，行为与旧版一致）
+        let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
+            .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
+        let port_bindings_json = match &host_config.port_bindings {
+            Some(pb) => Some(serde_json::to_value(pb)
+                .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?),
+            None => None,
+        };
+        let libpod = crate::libpod::Libpod::new().await?;
+        let body = crate::libpod::keep_id_create_body(
+            name,
+            image,
+            vec![
                 "/usr/bin/easytidy-server".to_string(),
                 "--socket".to_string(),
                 "/run/easytidy/server.sock".to_string(),
-            ]),
-            // 用户环境变量（GUI 透传的 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY +
-            // 用户映射的 EASYTIDY_USER_*）
-            env: if env.is_empty() { None } else { Some(env) },
-            labels: Some(labels),
-            host_config: Some(host_config),
+            ],
+            env,
+            labels,
+            mounts_json.as_array().cloned().unwrap_or_default(),
+            host_config.network_mode.clone(),
             exposed_ports,
-            ..Default::default()
-        };
-
-        let opts = CreateContainerOptions {
-            name: name.to_string(),
-            ..Default::default()
-        };
-        let result = self.docker.create_container(
-            Some(opts),
-            config_body,
-        ).await.map_err(|e| Error::Connect(format!("创建容器失败：{e}")))?;
-
-        let id = result.id;
-        tracing::info!("容器 {} 创建成功（ID: {}）", name, id);
+            port_bindings_json,
+            None,
+            None,
+            false,
+        );
+        let id = libpod.create_container(name, body).await?;
+        tracing::info!("容器 {} 创建成功（ID: {}，libpod）", name, id);
         Ok(id)
     }
 

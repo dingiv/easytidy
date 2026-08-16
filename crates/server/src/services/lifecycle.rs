@@ -54,6 +54,8 @@ pub(crate) async fn handle_lifecycle_entry_launch(
     // Wait for child in background
     let msg_id = state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64;
     let entry_id = req.entry_id.clone();
+
+    // FIXME: tokio spawn 的返回值没有处理
     tokio::spawn(async move {
         match child.wait().await {
             Ok(status) => {
