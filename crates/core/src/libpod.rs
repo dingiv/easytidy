@@ -80,6 +80,7 @@ impl Libpod {
         let client = Client::builder(TokioExecutor::new()).build(connector);
 
         // 取 API 版本（libpod 路径前缀需要）
+        // URI host 为占位（unix socket 传输，见 UnixConnector 注释）
         let req = hyper::Request::get("http://podman/version")
             .body(Full::new(Bytes::new()))
             .map_err(|e| Error::Connect(format!("构造 /version 请求失败：{e}")))?;
@@ -109,7 +110,10 @@ impl Libpod {
     /// POST /v<version>/libpod/containers/create?name=<name>，body 为
     /// Docker-compat 形状 + libpod 扩展（namespaces.userns.nsmode）。返回容器 ID。
     pub async fn create_container(&self, name: &str, body: Value) -> Result<String> {
-        // FIXME: ?? 为什么我们本地创建容器需要请求网络
+        // 注：这不是网络请求。URI 中的 "podman" 只是 hyper 强制要求的
+        // 绝对 URI 占位主机名——连接层由 UnixConnector 替换为本机
+        // $XDG_RUNTIME_DIR/podman/podman.sock 的 unix domain socket
+        // （同 podman CLI 自身与 bollard 的传输方式），零网络流量。
         let uri: hyper::Uri = format!(
             "http://podman/v{}/libpod/containers/create?name={}",
             self.api_version,
