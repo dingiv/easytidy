@@ -15,7 +15,7 @@ pub(crate) struct UserMap {
 }
 
 /// 容器内用户固定名（与宿主用户名不同，符合"名字不同、uid 相同"语义）。
-pub(crate) const CONTAINER_USER: &str = "node";
+pub(crate) const CONTAINER_USER: &str = "easytidy";
 
 /// server 自身 euid（/proc/self/status 解析，零依赖）。
 ///

@@ -63,126 +63,6 @@ impl Podman {
         Ok(client)
     }
 
-    /// 确保容器默认用户 node 已预置：不存在则以 root 临时容器跑 setup 脚本
-    /// → commit 烘焙为 init 镜像（幂等：镜像存在即跳过）。
-    ///
-    /// 容器 `User=node` 要求 passwd 里有该用户（podman start 前无法 exec），
-    /// 一次性 root 进程只能在独立临时容器完成；烘焙层在正式容器里天然生效。
-    /// 镜像名含宿主 uid/gid（宿主用户变化自然重烘）。
-    ///
-    /// 返回 init 镜像引用（正式 create 用它替代原镜像）。
-    async fn ensure_init_image(&self, image: &str, uid: u32, gid: u32) -> Result<String> {
-        let sanitized: String = image
-            .chars()
-            .map(|c| if c == '/' || c == ':' || c == '@' { '-' } else { c })
-            .collect();
-        let init_ref = format!("easytidy/init/{sanitized}:u{uid}g{gid}");
-        if self.image_exists(&init_ref).await? {
-            return Ok(init_ref); // 已烘焙（同镜像+同宿主用户）
-        }
-
-        // setup 脚本 = server setup_user_mapping 的 shell 翻译：
-        // 组/用户创建（useradd||adduser 回退；uid 被镜像用户占用则 usermod
-        // 改名对齐）+ home + sudoers 免密
-        let script = format!(
-            r#"set -e
-if ! getent group {gid} >/dev/null 2>&1; then
-  groupadd -g {gid} node 2>/dev/null || addgroup -g {gid} node
-fi
-if id -u {uid} >/dev/null 2>&1; then
-  EXISTING=$(id -nu {uid})
-  if [ "$EXISTING" != "node" ]; then
-    usermod -l node "$EXISTING"
-    usermod -d /home/node node
-    usermod -g {gid} node
-  fi
-else
-  SHELL_BIN=$(command -v bash || echo /bin/sh)
-  useradd -m -u {uid} -g {gid} -s "$SHELL_BIN" node 2>/dev/null \
-    || adduser -D -u {uid} -G node -s "$SHELL_BIN" -h /home/node node
-fi
-mkdir -p /home/node
-chown {uid}:{gid} /home/node
-# sudo 安装（server 提权用；debian/alpine 兼容，失败不阻断——无 sudo 时
-# server 以 node 运行，euid 分派兼容，功能仍可用）
-apt-get install -y -qq sudo 2>/dev/null || apk add --no-cache sudo 2>/dev/null || true
-mkdir -p /etc/sudoers.d
-# env_keep：server 经 sudo 提权时保留用户映射变量（sudo 默认 env_reset
-# 会清掉 EASYTIDY_USER_* → server 误判"root 容器"，node 终端变 root，实测）
-printf 'Defaults env_keep += "EASYTIDY_USER_UID EASYTIDY_USER_GID"\nnode ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/easytidy-node
-chmod 440 /etc/sudoers.d/easytidy-node
-mkdir -p /home/easytidy
-chown {uid}:{gid} /home/easytidy
-"#
-        );
-
-        // 临时容器（root 一次性跑脚本；无 keep-id/挂载——只写镜像层）
-        let tmp_name = format!(
-            "easytidy-init-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        use bollard::container::{CreateContainerOptions, Config as BConfig, WaitContainerOptions};
-        use bollard::models::HostConfig;
-        let config = BConfig::<String> {
-            // ⚠️ 必须显式传 image（漏传时 podman 收到空引用报
-            // "parsing reference \"\": repository name must have at least one component"）
-            image: Some(image.to_string()),
-            user: Some("0:0".to_string()),
-            cmd: Some(vec!["/bin/sh".to_string(), "-c".to_string(), script]),
-            host_config: Some(HostConfig {
-                auto_remove: Some(false),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        self.docker
-            .create_container(
-                Some(CreateContainerOptions {
-                    name: tmp_name.clone(),
-                    platform: None,
-                }),
-                config,
-            )
-            .await
-            .map_err(|e| Error::Connect(format!("创建 init 临时容器失败：{e}")))?;
-        self.docker
-            .start_container::<String>(&tmp_name, None)
-            .await
-            .map_err(|e| Error::Connect(format!("启动 init 临时容器失败：{e}")))?;
-
-        // 等脚本跑完（30s 上限），退出码非 0 报错（镜像缺 useradd 等）
-        let mut wait = self.docker.wait_container(
-            &tmp_name,
-            Some(WaitContainerOptions {
-                condition: "not-running",
-            }),
-        );
-        use futures::StreamExt as _;
-        let exit_code = match wait.next().await {
-            Some(Ok(resp)) => resp.status_code,
-            Some(Err(e)) => {
-                let _ = self.remove(&tmp_name, true).await;
-                return Err(Error::Connect(format!("等待 init 容器失败：{e}")));
-            }
-            None => -1,
-        };
-        if exit_code != 0 {
-            let _ = self.remove(&tmp_name, true).await;
-            return Err(Error::Config(format!(
-                "init 烘焙脚本失败（exit={exit_code}）：镜像 {image} 缺少 useradd/usermod 等基础工具"
-            )));
-        }
-
-        // commit 为 init 镜像 + 清理临时容器
-        self.commit_container(&tmp_name, &init_ref).await?;
-        let _ = self.remove(&tmp_name, true).await;
-        tracing::info!("init 镜像已烘焙：{init_ref}");
-        Ok(init_ref)
-    }
-
     /// 协商 API 版本（ping podman 并获取服务器版本）。
     ///
     /// bollard 默认使用最新 API 版本；某些 podman 版本可能不支持。
@@ -438,22 +318,13 @@ chown {uid}:{gid} /home/easytidy
         // （Docker compat 端点不支持 userns.keep-id，实测；见 libpod.rs）。
         // keep-id 使容器内 uid 1000（node 用户）= 宿主当前登录用户：
         // 宿主 home 读写 / /run/user/1000（显示 socket）自然可达（GUI 窗口可用）。
+        // ⚠️ 最终模型（2026-08-17 定案）：
+        // - 容器 User = root（PID 1 init 与 server 均 root，OCI 单 User 字段；
+        //   podman exec 默认 root 是容器程序限制，无法单独设默认用户）
+        // - keep-id：宿主 1000 ↔ 容器 1000（easytidy 用户，server 启动时创建）
+        // - server(root) 拉起子进程（bash 等）经 fork+exec+setuid+setgid
+        //   降权到 easytidy（见 server services/pty.rs，不再经 su）
         if config.user_home {
-            // 容器默认用户 node 化：用户经 init 镜像烘焙预置（podman start 前
-            // 无法 exec，一次性 root 进程只能在临时容器完成），正式 create
-            // 用烘焙镜像 + User=<uid>:<gid>（PID 1 与 podman exec 默认身份）；
-            // root 需求走宿主 exec 通道（GUI/CLI 已接）
-            let (init_image, default_user) = match crate::userenv::host_user() {
-                Some(user) => {
-                    let init = self.ensure_init_image(image, user.uid, user.gid).await?;
-                    (init, format!("{}:{}", user.uid, user.gid))
-                }
-                // 宿主用户探测失败：退回 root 旧模型（保可用性）
-                None => {
-                    tracing::warn!("宿主用户探测失败，容器保持 root 默认用户");
-                    (image.to_string(), "0:0".to_string())
-                }
-            };
             let libpod = crate::libpod::Libpod::new().await?;
             // mounts / port_bindings 已在 host_config 中（早于本分支 move），从 host_config 取
             let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
@@ -463,28 +334,22 @@ chown {uid}:{gid} /home/easytidy
                     .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?),
                 None => None,
             };
-            // server 经免密 sudo 提权为容器 root 运行（容器 User=node 下
-            // 恢复 root server：装包/su 降权能力；烘焙层已配 sudoers）。
-            // 最小镜像无 sudo 时回退 node 运行（euid 分派兼容，功能可用）
-            let server_cmd = concat!(
-                "if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then ",
-                "exec sudo -u root /usr/bin/easytidy-server --socket /run/easytidy/server.sock; ",
-                "else exec /usr/bin/easytidy-server --socket /run/easytidy/server.sock; fi",
-            );
             let body = crate::libpod::keep_id_create_body(
                 name,
-                &init_image,
-                vec!["/bin/sh".to_string(), "-c".to_string(), server_cmd.to_string()],
+                image,
+                vec![
+                    "/usr/bin/easytidy-server".to_string(),
+                    "--socket".to_string(),
+                    "/run/easytidy/server.sock".to_string(),
+                ],
                 env.clone(),
                 labels.clone(),
                 mounts_json.as_array().cloned().unwrap_or_default(),
                 host_config.network_mode.clone(),
                 exposed_ports.clone(),
                 port_bindings_json,
-                Some(
-                    std::env::var("HOME").unwrap_or_else(|_| "/".to_string()),
-                ),
-                Some(&default_user),
+                None,
+                None,
                 true,
             );
             let id = libpod.create_container(name, body).await?;

@@ -1,6 +1,6 @@
 //! PTY 服务：open/attach/回放/resize/close/枚举/cwd 跟随。
 use crate::state::{PtySession, RING_MAX, ServerState};
-use crate::setup::{build_su_command, user_map, current_euid, fixup_xdg_data_dirs_value};
+use crate::setup::{build_su_command, user_map, command_available, fixup_xdg_data_dirs_value};
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -148,15 +148,13 @@ pub(crate) async fn handle_pty_open(
         .openpty(pty_size)
         .context("Failed to open PTY")?;
 
-    // 用户映射生效且非 as_root 时经 su 降权到容器内用户 node（distrobox 式）：
-    // - cmd 为空：`su - <name>`（登录 shell，HOME/环境由 su 设置）
-    // - cmd 非空：`su <name> -c '<shell 转义后的完整命令>'`（cmd + argv[1..] 单引号转义拼接）
-    // as_root=true（setup/包管理）：直接以容器 root 运行（rootless 下 = 宿主用户权）
-    // 映射未生效（env 缺失/用户创建失败）：维持现状（/bin/sh root）。
+    // ⚠️ 最终模型（2026-08-17 定案）：server 以容器 root 运行；
+    // 非 as_root 时经 portable-pty 的凭证设置（内部 fork+exec 前钩子做
+    // setgid+setuid+setgroups）直接降权到 easytidy 用户——不经 su
+    // （免 shell 转义/子命令退出竞态，HOME/SHELL 由 server 显式注入）。
+    // as_root=true：直接以容器 root 运行（rootless 下 = 宿主 subuid）。
+    // 映射未生效（env 缺失/用户创建失败）：/bin/sh root 兜底。
     let mut cmd_builder = if req.as_root {
-        // root 交互 shell 优先 bash（与 node 终端体验一致；PTY 对端自动交互）。
-        // 仅旧容器（User=root）会收到 as_root 请求——新容器的 root 终端由
-        // 宿主侧 exec 通道提供，不经 server
         let cmd = if req.cmd.is_empty() {
             if Path::new("/bin/bash").exists() {
                 "/bin/bash".to_string()
@@ -174,50 +172,48 @@ pub(crate) async fn handle_pty_open(
         }
         b
     } else if let Some(user) = user_map() {
-        if current_euid().unwrap_or(0) == user.uid {
-            // node 容器（server=node）：直接 spawn，免 su——login 语义经
-            // shell 的 -l（HOME/SHELL 由 podman User=node 按 passwd 设置）
-            let cmd = if req.cmd.is_empty() {
+        // easytidy 身份降权：setpriv（util-linux）内部即 setgroups+setgid+
+        // setuid 后 exec——"fork+exec+setuid+setgid"语义的现成封装，
+        // 无 PAM/密码/转义问题。portable-pty CommandBuilder 无凭证 API，
+        // 故经 argv 前缀注入。无 setpriv 的最小镜像回退 su。
+        let mut b = if command_available("setpriv") {
+            let mut b = CommandBuilder::new("setpriv");
+            b.arg(format!("--reuid={}", user.uid));
+            b.arg(format!("--regid={}", user.gid));
+            b.arg("--init-groups");
+            if req.cmd.is_empty() {
+                // 登录 shell（-l 读 /etc/profile，HOME 由下方 env 注入）
                 if Path::new("/bin/bash").exists() {
-                    "/bin/bash".to_string()
+                    b.arg("/bin/bash");
+                    b.arg("-l");
                 } else {
-                    "/bin/sh".to_string()
+                    b.arg("/bin/sh");
+                    b.arg("-l");
                 }
             } else {
-                req.cmd.clone()
-            };
-            let mut argv = if req.cmd.is_empty() {
-                vec![cmd.clone(), "-l".to_string()]
-            } else {
-                req.argv.clone()
-            };
-            if argv.is_empty() {
-                argv.push(cmd.clone());
-            }
-            let mut b = CommandBuilder::new(cmd);
-            for arg in &argv[1..] {
-                b.arg(arg);
-            }
-            if req.cwd == "/" {
-                b.cwd(&user.home); // login 落 home（与 su - 行为对齐）
+                b.arg(&req.cmd);
+                for a in &req.argv[1..] {
+                    b.arg(a);
+                }
             }
             b
+        } else if req.cmd.is_empty() {
+            let mut b = CommandBuilder::new("su");
+            b.arg("-");
+            b.arg(&user.name);
+            b
         } else {
-            // root 容器（旧模型）：经 su 降权到 node
-            if req.cmd.is_empty() {
-                let mut b = CommandBuilder::new("su");
-                b.arg("-");
-                b.arg(&user.name);
-                b
-            } else {
-                let full = build_su_command(&req.cmd, &req.argv);
-                let mut b = CommandBuilder::new("su");
-                b.arg("-c");
-                b.arg(full);
-                b.arg(&user.name);
-                b
-            }
+            let full = build_su_command(&req.cmd, &req.argv);
+            let mut b = CommandBuilder::new("su");
+            b.arg("-c");
+            b.arg(full);
+            b.arg(&user.name);
+            b
+        };
+        if req.cwd == "/" {
+            b.cwd(&user.home); // login 落 home
         }
+        b
     } else {
         let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
         let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
@@ -237,6 +233,17 @@ pub(crate) async fn handle_pty_open(
             cmd_builder.env(k, fixup_xdg_data_dirs_value(v));
         } else {
             cmd_builder.env(k, v);
+        }
+    }
+    // 登录语义 env 后置覆盖：CLI/GUI 客户端 env 继承自宿主进程（HOME=宿主
+    // home、USER=宿主用户名），会覆盖降权身份的正确值——在客户端 env 之后
+    // 显式注入 easytidy 的登录环境
+    if !req.as_root {
+        if let Some(user) = user_map() {
+            cmd_builder.env("HOME", &user.home);
+            cmd_builder.env("USER", &user.name);
+            cmd_builder.env("LOGNAME", &user.name);
+            cmd_builder.env("SHELL", if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" });
         }
     }
     // TERM 注入：交互 shell 必需（clear 等依赖），客户端 env 未必携带
