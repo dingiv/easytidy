@@ -110,6 +110,11 @@ impl Libpod {
     /// POST /v<version>/libpod/containers/create?name=<name>，body 为
     /// Docker-compat 形状 + libpod 扩展（namespaces.userns.nsmode）。返回容器 ID。
     pub async fn create_container(&self, name: &str, body: Value) -> Result<String> {
+        // 最终请求体落日志（pretty JSON；排障对照 libpod SpecGenerator 字段）
+        tracing::info!(
+            "libpod create 请求（容器 {name}）：\n{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
         // 注：这不是网络请求。URI 中的 "podman" 只是 hyper 强制要求的
         // 绝对 URI 占位主机名——连接层由 UnixConnector 替换为本机
         // $XDG_RUNTIME_DIR/podman/podman.sock 的 unix domain socket
