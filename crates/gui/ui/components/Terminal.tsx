@@ -54,7 +54,7 @@ interface TerminalProps {
   onExit?: (streamId: number) => void;
 }
 
-function TerminalInner({ asRoot, streamId, onStream, onExit }: TerminalProps) {
+function TerminalInner({ asRoot, onStream, onExit }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -164,35 +164,65 @@ function TerminalInner({ asRoot, streamId, onStream, onExit }: TerminalProps) {
     // ⚠️ 面板可能在 pty_open 返回前被关闭（快速开-关）：resolve 后检测
     // cancelled，立即 pty_close 回收刚建的会话，避免孤儿常驻终端。
     let streamCancelled = false;
-    const ch = new Channel<PtyEvent>();
-    ch.onmessage = handlePtyEvent;
+    let reconnecting = false;
+    let writeFailed = false;
+    // 流代际：重连后旧 Channel 的事件（如晚到的 exited）不再影响面板
+    let streamGen = 0;
 
-    invoke<number>('pty_open', {
-      onEvent: ch,
-      cmd: null,
-      cols,
-      rows,
-      // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换，
-      // 如 streamId→stream_id）；传 snake_case 会被静默忽略——曾导致
-      // as_root 丢失、root 终端 attach 到 node 会话（实测）
-      asRoot: asRoot ?? false,
-      persistent: streamId == null,          // 新开 = 独立持久会话
-      attachStreamId: streamId ?? undefined, // 重连 = 附接已有会话
-    })
-      .then((sid) => {
+    /** 建立流（初始挂载 / 断线重连共用）。
+     *  - node 面板：优先 attach 旧会话（server 死会话自动 fallback 新建）
+     *  - root 面板：宿主 exec 通道无 attach 语义，每次新开会话 */
+    const establishStream = async (hint: string | null) => {
+      const gen = ++streamGen;
+      const ch = new Channel<PtyEvent>();
+      ch.onmessage = (ev) => {
+        if (gen === streamGen) handlePtyEvent(ev); // 旧代事件丢弃
+      };
+      try {
+        const sid = await invoke<number>('pty_open', {
+          onEvent: ch,
+          cmd: null,
+          cols: term.cols,
+          rows: term.rows,
+          // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换）
+          asRoot: asRoot ?? false,
+          persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
+          // root(exec 通道)无 attach 语义;node 先 attach（server 自动换新）
+          attachStreamId: asRoot ? undefined : streamIdRef.current ?? undefined,
+        });
         if (streamCancelled) {
-          // 面板已卸载：回收刚建的会话（孤儿常驻终端）
           invoke('pty_close', { streamId: sid }).catch(() => {});
           return;
         }
+        const prev = streamIdRef.current;
         streamIdRef.current = sid;
+        writeFailed = false; // 新通道就绪：恢复自动重连能力
         onStream?.(sid);
+        if (hint) {
+          term.writeln(
+            `\r\n\x1b[32m[已重连${prev !== sid ? `（stream ${prev ?? '?'} → ${sid}）` : ''}]\x1b[0m`,
+          );
+        }
         term.focus();
-      })
-      .catch((err) => {
+      } catch (err) {
         console.error('pty_open failed:', err);
-        term.writeln(`\r\n\x1b[91mFailed to open PTY: ${err}\x1b[0m`);
+        term.writeln(`\r\n\x1b[91m[${hint ?? '打开'} PTY 失败：${err}]\x1b[0m`);
+      }
+    };
+
+    /** 写通道断开 → 自动重连（server 全权负责生命周期：死会话已被清理，
+     *  attach 旧 id 会拿到新会话；root exec 通道每次新开）。防循环：单次
+     *  重连进行中丢弃后续触发，失败保留错误提示由用户手动刷新。 */
+    const reconnect = (reason: unknown) => {
+      if (streamCancelled || reconnecting) return;
+      reconnecting = true;
+      term.writeln(`\r\n\x1b[33m[通道断开（${reason}），重连中…]\x1b[0m`);
+      establishStream('重连').finally(() => {
+        reconnecting = false;
       });
+    };
+
+    establishStream(null);
 
     // 焦点管理（WebKitGTK 已知坑：窗口失焦/切走后再回来，xterm 的 textarea
     // 点击无法重新获得焦点——光标在闪但键盘事件进不了 xterm，表现为"终端
@@ -229,7 +259,6 @@ function TerminalInner({ asRoot, streamId, onStream, onExit }: TerminalProps) {
     // JSON 序列化会膨胀 4-5 倍（1MB 粘贴 → 3-5MB IPC），实测卡顿。
     // Uint8Array 经 Tauri 2 高效传输（Rust 侧 Vec<u8> 直接接收）；
     // 大输入分 64KB 块，小输入（打字）直发保持低延迟。
-    let writeFailed = false;
     const INPUT_CHUNK = 64 * 1024;
     term.onData((data: string) => {
       if (streamIdRef.current === null) return;
@@ -237,12 +266,13 @@ function TerminalInner({ asRoot, streamId, onStream, onExit }: TerminalProps) {
       const streamId = streamIdRef.current;
       const sendChunk = (chunk: Uint8Array) => {
         invoke('pty_write', { streamId, data: chunk }).catch((err) => {
-          // 写失败必须可见：静默吞掉会让用户面对"无法输入"而不知原因
+          // 写失败 = 句柄已死（会话退出/exec 通道断/竞态）→ 自动重连
+          // 换新会话，而不是让用户手动刷新
           if (!writeFailed) {
             writeFailed = true;
-            term.writeln(`\r\n\x1b[91m[输入通道错误：${err}，请刷新或切换 tab 重连]\x1b[0m`);
+            console.error('pty_write failed:', err);
+            reconnect(err);
           }
-          console.error('pty_write failed:', err);
         });
       };
       if (bytes.length <= INPUT_CHUNK) {
