@@ -61,22 +61,29 @@ function PerContainerInner({ containerName }: PerContainerProps) {
   const { message } = AntApp.useApp();
   // 收藏（pin 到工具栏）：PassthroughManager 经 store 同步；此处订阅展示
   const pinnedApps = useFavoritesStore((s) => s.pinned);
-  const [panes, setPanes] = useState<Pane[]>(() => [
-    // 默认打开一个 node 终端（新开持久会话；挂载后按 get_terminals 校正）
-    { id: useUiStore.getState().nextPaneId(), kind: 'terminal', title: '终端', asRoot: false, streamId: null },
-  ]);
+  // 会话同步状态：GUI 打开容器 → 先与 server 握手连接并同步必要数据
+  //（终端列表 + passthrough 收藏），再决定初始面板——避免"默认面板先建、
+  // 恢复列表后到"的重复建终端竞态
+  const [panes, setPanes] = useState<Pane[]>([]);
+  const [sessionReady, setSessionReady] = useState(false);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
   // 初始激活第一个 pane（惰性：首个渲染后设置）
   const activeId = activePaneId ?? panes[0]?.id ?? null;
 
-  // 多终端恢复：挂载时查 server 当前活跃终端 → 每个会话开一个面板（附接重连）；
-  // 无活跃会话 → 保持默认单个 node 终端（新建）。生命周期由 server 持有，
-  // 重开窗口/刷新后按此恢复全部终端。
+  // 打开容器的会话初始化（握手 + 数据同步）：
+  // 1. get_terminals 触发共享 socket 连接（hello 握手）→ 活跃终端列表，
+  //    每个会话恢复一个面板（附接重连，回放当前屏幕）
+  // 2. passthrough_state 同步收藏（工具栏不依赖面板打开）
+  // 3. 无活跃终端 → 默认单个 node 终端（新建持久会话）
+  // 任一步失败（server 未就绪等）→ 回退默认终端，不阻塞打开
   useEffect(() => {
     (async () => {
-      try {
-        const terminals = await invoke<TerminalInfo[]>('get_terminals');
-        if (terminals.length === 0) return;
+      const [terminalsRes, stateRes] = await Promise.allSettled([
+        invoke<TerminalInfo[]>('get_terminals'),
+        invoke<PassthroughState>('passthrough_state'),
+      ]);
+      if (terminalsRes.status === 'fulfilled') {
+        const terminals = terminalsRes.value;
         const restored: Pane[] = terminals.map((t) => ({
           id: useUiStore.getState().nextPaneId(),
           kind: 'terminal',
@@ -86,9 +93,33 @@ function PerContainerInner({ containerName }: PerContainerProps) {
         }));
         setPanes(restored);
         setActivePaneId(null); // 激活第一个
-      } catch (err) {
-        console.error('get_terminals failed（保持默认终端）:', err);
+      } else {
+        console.error('get_terminals failed（回退默认终端）:', terminalsRes.reason);
       }
+      if (stateRes.status === 'fulfilled') {
+        useFavoritesStore.getState().setPinned(stateRes.value.pinned ?? []);
+      } else {
+        console.error('passthrough_state 同步失败:', stateRes.reason);
+      }
+      if ((terminalsRes.status === 'fulfilled' && terminalsRes.value.length === 0)
+        || terminalsRes.status === 'rejected'
+      ) {
+        // 无活跃终端 / server 不可达：默认打开一个 node 终端
+        setPanes((prev) =>
+          prev.length > 0
+            ? prev
+            : [
+                {
+                  id: useUiStore.getState().nextPaneId(),
+                  kind: 'terminal',
+                  title: '终端',
+                  asRoot: false,
+                  streamId: null,
+                },
+              ],
+        );
+      }
+      setSessionReady(true);
     })();
   }, []);
 
@@ -164,18 +195,6 @@ function PerContainerInner({ containerName }: PerContainerProps) {
       console.error('container_shutdown failed:', err);
     }
   };
-
-  // 收藏（pin）初始化：挂载时拉取 passthrough_state（工具栏不依赖面板打开）
-  useEffect(() => {
-    (async () => {
-      try {
-        const st = await invoke<PassthroughState>('passthrough_state');
-        useFavoritesStore.getState().setPinned(st.pinned ?? []);
-      } catch (err) {
-        console.error('load pinned failed:', err);
-      }
-    })();
-  }, []);
 
   /** 点击收藏图标 → 拉起应用（server apps.launch，server 保活） */
   const launchPinned = async (p: PinnedApp) => {
@@ -462,7 +481,9 @@ function PerContainerInner({ containerName }: PerContainerProps) {
             ))}
             {panes.length === 0 && (
               <div className="pane-empty">
-                从工具栏打开面板（终端 / Passthrough / 配置）
+                {sessionReady
+                  ? '从工具栏打开面板（终端 / Passthrough / 配置）'
+                  : '正在连接容器 server 并同步会话…'}
               </div>
             )}
           </section>
