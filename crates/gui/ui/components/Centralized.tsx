@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { App as AntApp, Tabs } from 'antd';
 import type { ContainerSummary } from '../types';
-import { ContainerCreateModal } from './ContainerCreateModal';
+import { ContainerCreateForm } from './ContainerCreateForm';
 import { EnvPanel } from './EnvPanel';
 import { ImagesPanel } from './ImagesPanel';
 import { FlavorsPanel } from './FlavorsPanel';
@@ -113,7 +113,17 @@ export function Centralized() {
           {
             key: 'containers',
             label: '容器',
-            children: (
+            children: showCreateDialog ? (
+              // 新建容器：页内表单（与配置管理同一套 ContainerConfig 编辑器），
+              // 取消/成功返回列表
+              <ContainerCreateForm
+                onCancel={() => setShowCreateDialog(false)}
+                onCreated={() => {
+                  setShowCreateDialog(false);
+                  loadContainers();
+                }}
+              />
+            ) : (
               <>
                 <div className="centralized-header">
                   <h2>
@@ -203,13 +213,6 @@ export function Centralized() {
                     )}
                   </div>
                 )}
-
-                {/* 新建容器（统一创建入口：与配置管理依赖同一 ContainerConfig） */}
-                <ContainerCreateModal
-                  open={showCreateDialog}
-                  onClose={() => setShowCreateDialog(false)}
-                  onCreated={loadContainers}
-                />
               </>
             ),
           },

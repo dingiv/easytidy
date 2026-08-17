@@ -24,7 +24,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import type { EnvView } from '../types';
-import { ContainerCreateModal } from './ContainerCreateModal';
+import { ContainerCreateForm } from './ContainerCreateForm';
 import './EnvPanel.css';
 
 /** 状态 → 中文标签 + 颜色（普通用户视角） */
@@ -50,8 +50,8 @@ function EnvPanelInner() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 新建环境（Modal 自带 flavor 展开 + 完整 ContainerConfig 表单）
-  const [newOpen, setNewOpen] = useState(false);
+  // 新建环境（页内表单，ContainerCreateForm 自带 flavor 展开 + 统一编辑器）
+  const [creating, setCreating] = useState(false);
 
   // 快照（按环境记录可选标签）
   const [snapshotTag, setSnapshotTag] = useState<Record<string, string>>({});
@@ -80,10 +80,6 @@ function EnvPanelInner() {
     loadEnvs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // ---------- 新建环境 ----------
-
-  const openNewModal = () => setNewOpen(true);
 
   // ---------- 运行 / 关闭 ----------
 
@@ -179,6 +175,21 @@ function EnvPanelInner() {
 
   // ---------- 渲染 ----------
 
+  // 新建：页内表单替换列表（用户偏好页内表单，非模态）；取消/成功返回列表
+  if (creating) {
+    return (
+      <div className="env-panel">
+        <ContainerCreateForm
+          onCancel={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            loadEnvs();
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="env-panel">
       <div className="env-panel-header">
@@ -189,7 +200,7 @@ function EnvPanelInner() {
           <Button icon={<ReloadOutlined />} onClick={loadEnvs} loading={loading}>
             刷新
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={openNewModal}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
             新建环境
           </Button>
         </Space>
@@ -298,14 +309,6 @@ function EnvPanelInner() {
           })}
         </div>
       )}
-
-      {/* 新建环境（统一创建入口：flavor 展开预填 / 镜像默认值 → 完整
-          ContainerConfig 提交 env_new，与配置管理同一结构体） */}
-      <ContainerCreateModal
-        open={newOpen}
-        onClose={() => setNewOpen(false)}
-        onCreated={loadEnvs}
-      />
 
       {/* fork：从快照派生新环境 */}
       <Modal

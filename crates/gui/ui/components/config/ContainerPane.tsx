@@ -1,10 +1,15 @@
-// 容器面板：镜像/入口应用/静默启动/持久化/血缘。
+// 容器面板：基本信息（名称/镜像，按模式可编辑）+ entry/参数 + 静默启动 +
+// 持久化 + 血缘。统一编辑器（ContainerConfigEditor）的「容器」页。
 
 import { Input, Space, Switch, Tag, Typography } from 'antd';
 import type { ContainerConfig } from '../../types';
 
 interface ContainerPaneProps {
   edit: ContainerConfig;
+  /** create = 名称/镜像可编辑；edit = 身份只读（改名/换镜像 = 另一个容器） */
+  mode: 'create' | 'edit';
+  onNameChange(v: string): void;
+  onImageChange(v: string): void;
   onEntryChange(v: string): void;
   onEntryArgsChange(v: string[]): void;
   onSilentBootChange(v: boolean): void;
@@ -12,13 +17,32 @@ interface ContainerPaneProps {
 }
 
 export function ContainerPane({
-  edit, onEntryChange, onEntryArgsChange, onSilentBootChange, onPersistentChange,
+  edit, mode, onNameChange, onImageChange, onEntryChange, onEntryArgsChange,
+  onSilentBootChange, onPersistentChange,
 }: ContainerPaneProps) {
   return (
     <div className="config-fields">
+      {mode === 'create' && (
+        <div className="config-field">
+          <label>名称</label>
+          <Input
+            placeholder="如：my-env（模板按名称展开，请先输入）"
+            value={edit.name}
+            onChange={(e) => onNameChange(e.target.value)}
+          />
+        </div>
+      )}
       <div className="config-field">
-        <label>镜像</label>
-        <Typography.Text code>{edit.image}</Typography.Text>
+        <label>镜像{mode === 'create' ? '（需已拉取）' : ''}</label>
+        {mode === 'create' ? (
+          <Input
+            placeholder="如：docker.io/library/ubuntu:24.04"
+            value={edit.image}
+            onChange={(e) => onImageChange(e.target.value)}
+          />
+        ) : (
+          <Typography.Text code>{edit.image}</Typography.Text>
+        )}
       </div>
       <div className="config-field">
         <label>入口应用（entry）</label>

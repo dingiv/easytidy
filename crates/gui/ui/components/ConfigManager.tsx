@@ -1,9 +1,13 @@
-// 容器配置管理器（zustand 驱动）。
+// 容器配置管理器（zustand 驱动 + 统一编辑器）。
 //
-// 状态在 stores/configStore：saved/effective/edit/hostUser + **dirty 标志位**
-// （编辑动作显式置位,不再深比较推断——比较法对引擎注入 env/mounts/
-// userns 回显的过滤有漏网,未修改也误报"配置已修改",2026-08-08 实测）。
-// 保存即"保存并重启容器",成功后重载,不存在"已保存未生效"状态。
+// 状态在 stores/configStore：saved/effective/edit/hostUser/flavorStatus +
+// **dirty 标志位**（编辑动作显式置位,不再深比较推断——比较法对引擎注入
+// env/mounts/userns 回显的过滤有漏网,未修改也误报"配置已修改",
+// 2026-08-08 实测）。保存即"保存并重启容器",成功后重载,不存在
+// "已保存未生效"状态。
+//
+// 表单体是统一编辑器 ContainerConfigEditor（与主 GUI 创建共用同一套
+// ContainerConfig 编辑 UI）；本组件只承担：加载/校验/保存重启/模板同步。
 
 import { useEffect } from 'react';
 import {
@@ -13,27 +17,16 @@ import {
   Popconfirm,
   Space,
   Spin,
-  Tabs,
   Typography,
 } from 'antd';
 import {
-  ApiOutlined,
-  CodeOutlined,
-  FolderOpenOutlined,
   ForkOutlined,
   ReloadOutlined,
   SaveOutlined,
-  SettingOutlined,
-  UserOutlined,
 } from '@ant-design/icons';
-import type { ContainerConfig } from '../types';
 import { validateEnv } from './config/utils';
+import { ContainerConfigEditor } from './config/ContainerConfigEditor';
 import { useConfigStore } from '../stores/configStore';
-import { MountsPane } from './config/MountsPane';
-import { NetworkPane } from './config/NetworkPane';
-import { EnvPane } from './config/EnvPane';
-import { UserPane } from './config/UserPane';
-import { ContainerPane } from './config/ContainerPane';
 import './ConfigManager.css';
 
 interface ConfigManagerProps {
@@ -51,31 +44,6 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
     load(containerName);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerName]);
-
-  // ---------- 编辑回调（统一走 store.update → dirty 置位） ----------
-
-  const addMount = (m: ContainerConfig['mounts'][number]) =>
-    update((prev) => ({ ...prev, mounts: [...prev.mounts, m] }));
-  const removeMount = (idx: number) =>
-    update((prev) => ({ ...prev, mounts: prev.mounts.filter((_, i) => i !== idx) }));
-  const setNetworkMode = (mode: ContainerConfig['network']['mode']) =>
-    update((prev) => ({ ...prev, network: { ...prev.network, mode } }));
-  const addPort = (p: ContainerConfig['network']['ports'][number]) =>
-    update((prev) => ({ ...prev, network: { ...prev.network, ports: [...prev.network.ports, p] } }));
-  const removePort = (idx: number) =>
-    update((prev) => ({
-      ...prev,
-      network: { ...prev.network, ports: prev.network.ports.filter((_, i) => i !== idx) },
-    }));
-  const addEnv = (key: string, value: string) =>
-    update((prev) => ({ ...prev, env: [...prev.env, `${key}=${value}`] }));
-  const removeEnv = (idx: number) =>
-    update((prev) => ({ ...prev, env: prev.env.filter((_, i) => i !== idx) }));
-  const setUserHome = (v: boolean) => update((prev) => ({ ...prev, user_home: v }));
-  const setEntry = (v: string) => update((prev) => ({ ...prev, entry: v }));
-  const setEntryArgs = (v: string[]) => update((prev) => ({ ...prev, entry_args: v }));
-  const setSilentBoot = (v: boolean) => update((prev) => ({ ...prev, silent_boot: v }));
-  const setPersistent = (v: boolean) => update((prev) => ({ ...prev, persistent: v }));
 
   // ---------- 从模板同步（血缘） ----------
 
@@ -223,86 +191,14 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           </Spin>
         </div>
       ) : !edit ? null : (
-        <Tabs
-          className="config-manager-tabs"
-          items={[
-            {
-              key: 'mounts',
-              label: (
-                <span>
-                  <FolderOpenOutlined /> 挂载
-                </span>
-              ),
-              children: (
-                <MountsPane mounts={edit.mounts} onAdd={addMount} onRemove={removeMount} />
-              ),
-            },
-            {
-              key: 'network',
-              label: (
-                <span>
-                  <ApiOutlined /> 网络
-                </span>
-              ),
-              children: (
-                <NetworkPane
-                  network={edit.network}
-                  onModeChange={setNetworkMode}
-                  onAddPort={addPort}
-                  onRemovePort={removePort}
-                />
-              ),
-            },
-            {
-              key: 'container',
-              label: (
-                <span>
-                  <SettingOutlined /> 容器
-                </span>
-              ),
-              children: (
-                <ContainerPane
-                  edit={edit}
-                  onEntryChange={setEntry}
-                  onEntryArgsChange={setEntryArgs}
-                  onSilentBootChange={setSilentBoot}
-                  onPersistentChange={setPersistent}
-                />
-              ),
-            },
-            {
-              key: 'env',
-              label: (
-                <span>
-                  <CodeOutlined /> 环境变量
-                </span>
-              ),
-              children: (
-                <EnvPane
-                  env={edit.env}
-                  effectiveEnv={effective?.env ?? null}
-                  onAdd={addEnv}
-                  onRemove={removeEnv}
-                />
-              ),
-            },
-            {
-              key: 'user',
-              label: (
-                <span>
-                  <UserOutlined /> 用户
-                </span>
-              ),
-              children: (
-                <UserPane
-                  userHome={edit.user_home}
-                  onUserHomeChange={setUserHome}
-                  hostUser={hostUser}
-                  effective={effective}
-                />
-              ),
-            },
-          ]}
+        // 统一编辑器（与主 GUI 创建共用）：受控 onChange → store.update
+        // （dirty 置位）；edit 模式携带 inspect 投影 + 宿主用户对照
+        <ContainerConfigEditor
+          mode="edit"
+          value={edit}
+          onChange={(next) => update(() => next)}
+          effective={effective}
+          hostUser={hostUser}
         />
       )}
     </div>

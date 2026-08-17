@@ -1,0 +1,39 @@
+/* 新建容器页内表单（ContainerCreateForm）——替代模态的页内布局 */
+
+.container-create-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+}
+
+.container-create-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.container-create-title {
+  margin: 0 !important;
+}
+
+.container-create-flavor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.container-create-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin-top: auto; /* 提交栏沉底：编辑器较高时保持可视 */
+}
+
+.container-create-hint {
+  font-size: 12px;
+}
