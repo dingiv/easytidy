@@ -54,8 +54,12 @@ pub struct GuiSession {
     pub next_msg_id: AtomicU64,
     /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）
     pub active_ptys: Arc<tokio::sync::Mutex<HashMap<u32, PtySink>>>,
-    /// 宿主 exec PTY（root 终端；stream_id 从 EXEC_STREAM_ID_BASE 起）
+    /// 宿主 exec PTY（root 终端；id 从 EXEC_STREAM_ID_BASE 起原子递增，
+    /// 永不复用——曾用 max+1 扫描发号，计算与插入之间隔着 exec 创建的
+    /// await 窗口，并发双开撞号 → insert 静默覆盖 → close 误删幸存句柄）
     pub active_execs: Arc<tokio::sync::Mutex<HashMap<u32, ExecHandle>>>,
+    /// 下一个 exec 型 stream_id（EXEC_STREAM_ID_BASE 起原子递增）
+    pub next_exec_id: std::sync::atomic::AtomicU32,
 }
 
 /// PTY 事件（通过 Channel 发送给前端）

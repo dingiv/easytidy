@@ -54,7 +54,7 @@ interface TerminalProps {
   onExit?: (streamId: number) => void;
 }
 
-function TerminalInner({ asRoot, onStream, onExit }: TerminalProps) {
+function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -187,8 +187,12 @@ function TerminalInner({ asRoot, onStream, onExit }: TerminalProps) {
           // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换）
           asRoot: asRoot ?? false,
           persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
-          // root(exec 通道)无 attach 语义;node 先 attach（server 自动换新）
-          attachStreamId: asRoot ? undefined : streamIdRef.current ?? undefined,
+          // node 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前
+          // 屏幕；死会话自动换新）。ref 为空（首次挂载）用面板传入的恢复 id
+          // ——曾只读 ref，prop 丢失导致每次开窗口都新建会话、旧会话泄漏
+          attachStreamId: asRoot
+            ? undefined
+            : streamIdRef.current ?? initialStreamId ?? undefined,
         });
         if (streamCancelled) {
           invoke('pty_close', { streamId: sid }).catch(() => {});

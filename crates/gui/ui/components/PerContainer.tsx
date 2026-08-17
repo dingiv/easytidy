@@ -72,9 +72,10 @@ function PerContainerInner({ containerName }: PerContainerProps) {
 
   // 打开容器的会话初始化（握手 + 数据同步）：
   // 1. get_terminals 触发共享 socket 连接（hello 握手）→ 活跃终端列表，
-  //    每个会话恢复一个面板（附接重连，回放当前屏幕）
+  //    node 会话各恢复一个面板（附接重连，回放当前屏幕）；root 遗留
+  //    会话不恢复（exec 通道无附接语义）并顺带关闭清理
   // 2. passthrough_state 同步收藏（工具栏不依赖面板打开）
-  // 3. 无活跃终端 → 默认单个 node 终端（新建持久会话）
+  // 3. 无活跃 node 终端 → 默认单个 node 终端（新建持久会话）
   // 任一步失败（server 未就绪等）→ 回退默认终端，不阻塞打开
   useEffect(() => {
     (async () => {
@@ -83,8 +84,18 @@ function PerContainerInner({ containerName }: PerContainerProps) {
         invoke<PassthroughState>('passthrough_state'),
       ]);
       if (terminalsRes.status === 'fulfilled') {
-        const terminals = terminalsRes.value;
-        const restored: Pane[] = terminals.map((t) => ({
+        // root 会话（server su 通道时代的遗留）不恢复：root 终端已走宿主
+        // exec 通道，无 attach 语义——恢复只会静默新建 exec，旧 root bash
+        // 永久泄漏在 server 里。顺带关闭这些不可达的僵尸会话（pty_close
+        // 经共享 socket 兜底）
+        const rootLegacies = terminalsRes.value.filter((t) => t.as_root);
+        rootLegacies.forEach((t) => {
+          invoke('pty_close', { streamId: t.stream_id }).catch((err) =>
+            console.error('清理遗留 root 会话失败:', err),
+          );
+        });
+        const restorable = terminalsRes.value.filter((t) => !t.as_root);
+        const restored: Pane[] = restorable.map((t) => ({
           id: useUiStore.getState().nextPaneId(),
           kind: 'terminal',
           title: terminalTitle(t),
@@ -101,10 +112,13 @@ function PerContainerInner({ containerName }: PerContainerProps) {
       } else {
         console.error('passthrough_state 同步失败:', stateRes.reason);
       }
-      if ((terminalsRes.status === 'fulfilled' && terminalsRes.value.length === 0)
-        || terminalsRes.status === 'rejected'
-      ) {
-        // 无活跃终端 / server 不可达：默认打开一个 node 终端
+      // 无活跃 node 终端 / server 不可达：默认打开一个 node 终端
+      //（按过滤 root 后的列表判断——只剩遗留 root 时也开默认终端）
+      const restorableCount =
+        terminalsRes.status === 'fulfilled'
+          ? terminalsRes.value.filter((t) => !t.as_root).length
+          : 0;
+      if (restorableCount === 0) {
         setPanes((prev) =>
           prev.length > 0
             ? prev

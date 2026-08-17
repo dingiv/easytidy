@@ -7,7 +7,7 @@ pub mod commands;
 pub mod state;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::sync::Arc;
 
 pub use state::AppMode;
@@ -54,6 +54,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             next_msg_id: AtomicU64::new(2), // 握手已用 1
             active_ptys: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             active_execs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            next_exec_id: AtomicU32::new(state::EXEC_STREAM_ID_BASE),
         }),
         AppMode::Centralized => None,
     };

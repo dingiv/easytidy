@@ -22,7 +22,7 @@ use tracing::error;
 use std::collections::HashMap;
 
 use crate::commands::socket::{connect_to_container, send_json_request};
-use crate::state::{ExecHandle, GuiSession, PtyEvent, EXEC_STREAM_ID_BASE};
+use crate::state::{ExecHandle, GuiSession, PtyEvent};
 
 /// 获取当前所有活跃终端（server 持有的 PTY 会话；多终端面板恢复用——
 /// 重开窗口时逐个 attach_stream 重连，输出经环形缓冲回放）。
@@ -88,6 +88,12 @@ async fn open_exec_root_terminal(
     let exec_id = pty.exec_id.clone();
     {
         let mut execs = sess.active_execs.lock().await;
+        // 原子发号下不应撞号；防御性断言（撞号 = insert 静默覆盖句柄，
+        // 后果是孤儿 exec + close 误删，宁可尽早暴露）
+        debug_assert!(
+            !execs.contains_key(&stream_id),
+            "exec stream_id 撞号：{stream_id}"
+        );
         execs.insert(
             stream_id,
             ExecHandle {
@@ -172,16 +178,13 @@ pub async fn pty_open(
     // root 终端：宿主 exec 通道（新容器 server 以 node 运行无 root；
     // persistent/attach 语义不适用——exec 会话随连接生存）
     if as_root {
-        // 发号 = 当前最大 exec id + 1（关闭中间会话后不复用，防撞号）
-        let next = {
-            let execs = sess.active_execs.lock().await;
-            execs
-                .keys()
-                .copied()
-                .max()
-                .unwrap_or(EXEC_STREAM_ID_BASE - 1)
-                + 1
-        };
+        // 发号 = 原子递增，永不复用。⚠️ 不能用 max+1 扫描：计算与 insert
+        // 之间隔着 exec 创建的 await 窗口，并发双开时双双拿到同一个 id
+        // （首个 root 终端必撞 BASE），insert 静默覆盖 + close 按 id 误删
+        // 幸存句柄 → 面板提示符正常但一敲键报"PTY 流 N 不存在"
+        let next = sess
+            .next_exec_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return open_exec_root_terminal(sess, on_event, cmd, cols, rows, next).await;
     }
 
@@ -439,6 +442,15 @@ pub async fn pty_close(
         active.get(&stream_id).cloned()
     };
     let Some(sink) = maybe_sink else {
+        // 本地无句柄（server 侧会话，如恢复面板 attach 前关闭、遗留
+        // root 会话清理）→ 经共享 socket 发 pty.close。幂等：会话已
+        // 不存在时 server 报错也视为关闭成功
+        let req = PtyClose { stream_id };
+        if let Ok(payload) = serde_json::to_value(req) {
+            if let Err(e) = send_json_request(sess, "pty.close".to_string(), payload).await {
+                tracing::debug!("pty.close（共享 socket）失败（会话可能已不存在）：{e}");
+            }
+        }
         return Ok(());
     };
 
