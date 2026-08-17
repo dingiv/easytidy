@@ -20,16 +20,20 @@ interface ContainerCreateFormProps {
   onCancel(): void;
   /** 创建成功后回调（刷新列表并退出表单） */
   onCreated(): void;
+  /** 预选模板（flavor 卡片「启动」进入）：名称就绪后自动展开预填 */
+  initialFlavor?: string;
 }
 
-function ContainerCreateFormInner({ onCancel, onCreated }: ContainerCreateFormProps) {
+function ContainerCreateFormInner({ onCancel, onCreated, initialFlavor }: ContainerCreateFormProps) {
   const { message, modal } = AntApp.useApp();
 
   const [mode, setMode] = useState<'flavor' | 'image'>('flavor');
   const [flavors, setFlavors] = useState<string[]>([]);
-  const [selectedFlavor, setSelectedFlavor] = useState<string | undefined>(undefined);
+  const [selectedFlavor, setSelectedFlavor] = useState<string | undefined>(initialFlavor);
   const [config, setConfig] = useState<ContainerConfig>(BLANK_CONTAINER_CONFIG);
   const [creating, setCreating] = useState(false);
+  // 预选模板的自动展开只做一次（名称就绪后）；此后切换/手选均为手动
+  const [autoExpanded, setAutoExpanded] = useState(false);
 
   // 可用 flavor 模板（挂载即取；无模板时回退镜像方式）
   useEffect(() => {
@@ -102,6 +106,14 @@ function ContainerCreateFormInner({ onCancel, onCreated }: ContainerCreateFormPr
   };
 
   const nameReady = config.name.trim().length > 0;
+
+  // 预选模板（flavor 卡片「启动」进入）：名称就绪后自动展开预填一次
+  useEffect(() => {
+    if (!initialFlavor || mode !== 'flavor' || autoExpanded || !nameReady) return;
+    setAutoExpanded(true);
+    handleFlavorSelect(initialFlavor);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFlavor, mode, autoExpanded, nameReady]);
 
   return (
     <div className="container-create-form">

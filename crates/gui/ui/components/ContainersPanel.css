@@ -120,3 +120,21 @@
 .env-hint {
   margin-bottom: 0;
 }
+
+/* ---------- 合并面板分区（快速启动 / 我的容器） ---------- */
+
+.env-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.env-section + .env-section {
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.env-section-title {
+  margin: 0 !important;
+}

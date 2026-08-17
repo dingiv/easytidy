@@ -455,6 +455,25 @@ pub async fn env_start(podman: tauri::State<'_, PodmanState>, name: String) -> R
     Ok(())
 }
 
+/// 重建环境：按注册表（config.toml）当前配置 commit → 删旧 → 同名重建
+/// → 启动。应用外部修改的配置文件 / 修正容器漂移状态用；配置编辑走
+/// 配置管理器（apply），模板对齐走「从模板同步」。
+#[tauri::command]
+pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
+    let config_file = ConfigFile::with_path(config_path);
+    let config = config_file
+        .get_container(&name)
+        .map_err(|e| format!("读取配置失败：{e}"))?
+        .ok_or_else(|| format!("环境 {name} 不在注册表（先创建）"))?;
+
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    p.rebuild(&name, &config).await.map_err(|e| format!("重建失败：{e}"))?;
+    podman.return_podman(p).await;
+    info!("环境 {name} 已按注册配置重建并启动");
+    Ok(())
+}
+
 /// 关闭环境（stop；环境保留，可随时恢复运行）。
 #[tauri::command]
 pub async fn env_stop(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {

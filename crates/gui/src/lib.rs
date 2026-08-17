@@ -91,6 +91,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::flavor_delete,
             commands::containers::env_list,
             commands::containers::env_new,
+            commands::containers::env_rebuild,
             commands::containers::env_rm,
             commands::containers::env_snapshot,
             commands::containers::env_fork,
