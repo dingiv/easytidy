@@ -9,8 +9,6 @@ import {
   Input,
   Modal,
   Popconfirm,
-  Radio,
-  Select,
   Space,
   Spin,
   Tag,
@@ -26,6 +24,7 @@ import {
   StopOutlined,
 } from '@ant-design/icons';
 import type { EnvView } from '../types';
+import { ContainerCreateModal } from './ContainerCreateModal';
 import './EnvPanel.css';
 
 /** 状态 → 中文标签 + 颜色（普通用户视角） */
@@ -51,14 +50,8 @@ function EnvPanelInner() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // 新建环境
+  // 新建环境（Modal 自带 flavor 展开 + 完整 ContainerConfig 表单）
   const [newOpen, setNewOpen] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newMode, setNewMode] = useState<'flavor' | 'image'>('flavor');
-  const [newFlavor, setNewFlavor] = useState<string | undefined>(undefined);
-  const [newImage, setNewImage] = useState('');
-  const [flavors, setFlavors] = useState<string[]>([]);
-  const [creating, setCreating] = useState(false);
 
   // 快照（按环境记录可选标签）
   const [snapshotTag, setSnapshotTag] = useState<Record<string, string>>({});
@@ -88,58 +81,9 @@ function EnvPanelInner() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 可用 flavor 模板（新建环境下拉）
-  useEffect(() => {
-    invoke<string[]>('flavor_list')
-      .then((list) => setFlavors(list))
-      .catch((err) => {
-        console.error('flavor_list failed:', err);
-        setFlavors([]);
-      });
-  }, []);
-
   // ---------- 新建环境 ----------
 
-  const openNewModal = () => {
-    setNewName('');
-    setNewFlavor(undefined);
-    setNewImage('');
-    setNewMode(flavors.length > 0 ? 'flavor' : 'image');
-    setNewOpen(true);
-  };
-
-  const handleNewEnv = async () => {
-    const name = newName.trim();
-    if (!name) {
-      message.error('请输入环境名称');
-      return;
-    }
-    if (newMode === 'flavor') {
-      if (!newFlavor) {
-        message.error('请选择模板（flavor）');
-        return;
-      }
-    } else if (!newImage.trim()) {
-      message.error('请输入镜像名称（需已拉取）');
-      return;
-    }
-    setCreating(true);
-    try {
-      await invoke('env_new', {
-        name,
-        flavor: newMode === 'flavor' ? newFlavor : null,
-        image: newMode === 'flavor' ? null : newImage.trim(),
-      });
-      message.success(`新环境「${name}」已创建并运行`);
-      setNewOpen(false);
-      await loadEnvs();
-    } catch (err: any) {
-      message.error(err?.message || '创建环境失败');
-      console.error('env_new failed:', err);
-    } finally {
-      setCreating(false);
-    }
-  };
+  const openNewModal = () => setNewOpen(true);
 
   // ---------- 运行 / 关闭 ----------
 
@@ -355,56 +299,13 @@ function EnvPanelInner() {
         </div>
       )}
 
-      {/* 新建环境 */}
-      <Modal
-        title="新建环境"
+      {/* 新建环境（统一创建入口：flavor 展开预填 / 镜像默认值 → 完整
+          ContainerConfig 提交 env_new，与配置管理同一结构体） */}
+      <ContainerCreateModal
         open={newOpen}
-        onCancel={() => setNewOpen(false)}
-        onOk={handleNewEnv}
-        okText="创建"
-        cancelText="取消"
-        confirmLoading={creating}
-      >
-        <div className="env-modal-form">
-          <div className="form-field">
-            <label>环境名称</label>
-            <Input
-              placeholder="如：my-env"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-            />
-          </div>
-          <div className="form-field">
-            <label>创建方式</label>
-            <Radio.Group value={newMode} onChange={(e) => setNewMode(e.target.value)}>
-              <Radio.Button value="flavor">模板（flavor）</Radio.Button>
-              <Radio.Button value="image">镜像</Radio.Button>
-            </Radio.Group>
-          </div>
-          {newMode === 'flavor' ? (
-            <div className="form-field">
-              <label>模板</label>
-              <Select
-                style={{ width: '100%' }}
-                placeholder="选择预配置模板"
-                value={newFlavor}
-                onChange={setNewFlavor}
-                options={flavors.map((f) => ({ value: f, label: f }))}
-                notFoundContent="暂无可用模板（~/.config/easytidy/flavors/）"
-              />
-            </div>
-          ) : (
-            <div className="form-field">
-              <label>镜像</label>
-              <Input
-                placeholder="如：docker.io/library/ubuntu:latest（镜像需已拉取）"
-                value={newImage}
-                onChange={(e) => setNewImage(e.target.value)}
-              />
-            </div>
-          )}
-        </div>
-      </Modal>
+        onClose={() => setNewOpen(false)}
+        onCreated={loadEnvs}
+      />
 
       {/* fork：从快照派生新环境 */}
       <Modal

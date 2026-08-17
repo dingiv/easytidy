@@ -36,50 +36,6 @@ pub async fn list_containers(
     Ok(result)
 }
 
-/// 创建新容器
-#[tauri::command]
-pub async fn create_container(
-    podman: tauri::State<'_, PodmanState>,
-    image: String,
-    name: String,
-) -> Result<String, String> {
-    let p = podman.get().await.map_err(|e| ferr("连接 podman", e))?;
-
-    // 获取 server 二进制路径
-    let server_bin =
-        easytidy_core::server_binary_path().map_err(|e| ferr("定位 server 二进制", e))?;
-
-    // 容器配置（网络默认 Host 模式，产品语义；distrobox 同款）
-    let container_config = ContainerConfig {
-        name: name.clone(),
-        image: image.clone(),
-        entry: None,
-        silent_boot: false,
-        persistent: true,
-        ..Default::default()
-    };
-
-    // 创建容器（走新入口，应用完整配置）
-    let id = p
-        .create_with_config(&name, &image, &server_bin, &container_config)
-        .await
-        .map_err(|e| ferr(&format!("创建容器 {name}"), e))?;
-
-    // 注册到配置文件
-    let config_path = ConfigFile::default_path().map_err(|e| ferr("解析配置路径", e))?;
-    let config_file = ConfigFile::with_path(config_path);
-
-    config_file
-        .register_container(container_config)
-        .map_err(|e| ferr("注册容器配置", e))?;
-
-    // 生成桌面图标
-    desktop::install_desktop_entry(&name, None, None).map_err(|e| ferr("生成桌面图标", e))?;
-
-    podman.return_podman(p).await;
-    Ok(id)
-}
-
 /// 启动容器
 #[tauri::command]
 pub async fn start_container(
@@ -302,16 +258,43 @@ pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvVi
     Ok(views)
 }
 
-/// 新建环境：flavor 模板展开创建，或指定镜像创建；创建后启动并注册。
+/// 展开 flavor 模板为完整 [`ContainerConfig`]（创建表单预填用）。
+///
+/// 展开必须在宿主侧执行：GUI 透传要注入宿主 DISPLAY/WAYLAND_DISPLAY/
+/// XDG_RUNTIME_DIR、探测宿主字体/图标目录存在性（`Flavor::build_config`）。
+/// 展开结果交回表单，用户可继续修改后经 [`env_new`] 提交——模板只是预填，
+/// 创建入口统一收 `ContainerConfig`（与单实例 GUI 配置管理同一定义）。
+#[tauri::command]
+pub fn flavor_expand(name: String, flavor: String) -> Result<ContainerConfig, String> {
+    let flavor = Flavor::load(&flavor).map_err(|e| format!("加载 flavor {flavor} 失败：{e}"))?;
+    flavor
+        .build_config(&name)
+        .map_err(|e| format!("展开 flavor 配置失败：{e}"))
+}
+
+/// 新建环境：统一创建入口，收完整 [`ContainerConfig`]（创建后启动并注册）。
+///
+/// 主 GUI 的容器启动（flavor 模板展开预填 / 裸镜像默认值）与单实例 GUI 的
+/// 配置管理（`get_container_config`/`apply_container_config`）自此依赖同一
+/// 结构体——core::models::ContainerConfig 是容器启动参数的唯一事实来源。
 ///
 /// 镜像需已拉取（`create_with_config` 对缺失镜像报错，错误信息直接透传）。
 #[tauri::command]
 pub async fn env_new(
     podman: tauri::State<'_, PodmanState>,
-    name: String,
-    flavor: Option<String>,
-    image: Option<String>,
+    config: ContainerConfig,
 ) -> Result<(), String> {
+    // 基本校验（表单兜底；名称 trim 防空白注册）
+    if config.name.trim().is_empty() {
+        return Err("环境名称不能为空".to_string());
+    }
+    if config.image.trim().is_empty() {
+        return Err("镜像不能为空（需已拉取）".to_string());
+    }
+    let mut config = config;
+    config.name = config.name.trim().to_string();
+    let name = config.name.clone();
+
     // 失败即落盘：容器创建/启动链路多步易错，前端展示之外同时写
     // ~/.easytidy/logs/easytidy-gui.log（排障唯一持久出口）
     macro_rules! try_log {
@@ -329,36 +312,23 @@ pub async fn env_new(
     }
 
     let p = try_log!(podman.get().await, "连接 podman");
-
-    // 配置来源：flavor 模板展开（继承挂载/网络/用户映射/GUI 透传）或直接镜像
-    let config = match flavor {
-        Some(f) => {
-            let flavor = try_log!(Flavor::load(&f), format!("加载 flavor {f}"));
-            try_log!(flavor.build_config(&name), "展开 flavor 配置")
-        }
-        None => {
-            let Some(image) = image else {
-                return Err("新建环境需要提供模板（flavor）或镜像（image）".to_string());
-            };
-            ContainerConfig {
-                name: name.clone(),
-                image: image.clone(),
-                ..Default::default()
-            }
-        }
-    };
-
     let server_bin = try_log!(easytidy_core::server_binary_path(), "定位 server 二进制");
     try_log!(
-        p.create_with_config(&name, &config.image, &server_bin, &config)
+        p.create_with_config(&config.name, &config.image, &server_bin, &config)
             .await,
         "创建容器"
     );
-    try_log!(p.start(&name).await, "启动容器");
+    try_log!(p.start(&config.name).await, "启动容器");
 
     let config_path = try_log!(ConfigFile::default_path(), "解析配置路径");
     let config_file = ConfigFile::with_path(config_path);
     try_log!(config_file.register_container(config), "注册环境配置");
+
+    // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可——旧
+    // create_container 路径的行为，统一入口后由此处承接）
+    if let Err(e) = desktop::install_desktop_entry(&name, None, None) {
+        warn!("生成桌面图标失败（忽略）：{e}");
+    }
 
     podman.return_podman(p).await;
     info!("新环境 {name} 已创建并运行");

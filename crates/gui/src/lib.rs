@@ -70,7 +70,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::common::get_app_mode,
             // 中心化模式
             commands::containers::list_containers,
-            commands::containers::create_container,
+            commands::containers::flavor_expand,
             commands::containers::start_container,
             commands::containers::stop_container,
             commands::containers::restart_container,

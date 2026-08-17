@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { App as AntApp, Tabs } from 'antd';
 import type { ContainerSummary } from '../types';
+import { ContainerCreateModal } from './ContainerCreateModal';
 import { EnvPanel } from './EnvPanel';
 import { ImagesPanel } from './ImagesPanel';
 import { FlavorsPanel } from './FlavorsPanel';
@@ -13,8 +14,6 @@ export function Centralized() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [createImage, setCreateImage] = useState('docker.io/library/ubuntu:latest');
-  const [createName, setCreateName] = useState('');
 
   useEffect(() => {
     loadContainers();
@@ -31,26 +30,6 @@ export function Centralized() {
       console.error('list_containers failed:', err);
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleCreateContainer = async () => {
-    if (!createName.trim()) {
-      setError('Container name is required');
-      return;
-    }
-    setError(null);
-    try {
-      await invoke('create_container', {
-        image: createImage,
-        name: createName,
-      });
-      setShowCreateDialog(false);
-      setCreateName('');
-      await loadContainers();
-    } catch (err: any) {
-      setError(err.message || 'Failed to create container');
-      console.error('create_container failed:', err);
     }
   };
 
@@ -225,42 +204,12 @@ export function Centralized() {
                   </div>
                 )}
 
-                {/* Create Container Dialog */}
-                {showCreateDialog && (
-                  <div className="dialog-overlay" onClick={() => setShowCreateDialog(false)}>
-                    <div className="dialog" onClick={(e) => e.stopPropagation()}>
-                      <h3>Create New Container</h3>
-                      <div className="dialog-content">
-                        <div className="form-group">
-                          <label>Image:</label>
-                          <input
-                            type="text"
-                            value={createImage}
-                            onChange={(e) => setCreateImage(e.target.value)}
-                            placeholder="docker.io/library/ubuntu:latest"
-                          />
-                        </div>
-                        <div className="form-group">
-                          <label>Name:</label>
-                          <input
-                            type="text"
-                            value={createName}
-                            onChange={(e) => setCreateName(e.target.value)}
-                            placeholder="my-container"
-                          />
-                        </div>
-                      </div>
-                      <div className="dialog-actions">
-                        <button className="secondary-button" onClick={() => setShowCreateDialog(false)}>
-                          Cancel
-                        </button>
-                        <button className="primary-button" onClick={handleCreateContainer}>
-                          Create
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                {/* 新建容器（统一创建入口：与配置管理依赖同一 ContainerConfig） */}
+                <ContainerCreateModal
+                  open={showCreateDialog}
+                  onClose={() => setShowCreateDialog(false)}
+                  onCreated={loadContainers}
+                />
               </>
             ),
           },
