@@ -12,10 +12,11 @@ import {
   EditOutlined,
   PlusOutlined,
   RocketOutlined,
+  SyncOutlined,
 } from '@ant-design/icons';
 import type { Flavor, MountConfig } from '../types';
 
-/** 空白 flavor（新建表单初始值） */
+/** 空白 flavor（新建表单初始值；user_home 与 Rust 共享基座对齐：bool 默认 true） */
 function emptyFlavor(): Flavor {
   return {
     name: '',
@@ -25,7 +26,7 @@ function emptyFlavor(): Flavor {
     entry: null,
     entry_args: [],
     mounts: [],
-    user_home: null,
+    user_home: true,
     network: { mode: 'host', ports: [] },
   };
 }
@@ -49,6 +50,9 @@ export function FlavorsPanel() {
   const { message, modal } = AntApp.useApp();
   const [flavors, setFlavors] = useState<Flavor[]>([]);
   const [loading, setLoading] = useState(true);
+  // 血缘：每个模板派生了哪些容器（批量同步入口）
+  const [lineage, setLineage] = useState<Record<string, string[]>>({});
+  const [syncingFlavor, setSyncingFlavor] = useState<string | null>(null);
   // 编辑/新建表单
   const [editing, setEditing] = useState<Flavor | null>(null);
   const [isNew, setIsNew] = useState(false);
@@ -63,7 +67,12 @@ export function FlavorsPanel() {
   const load = async () => {
     setLoading(true);
     try {
-      setFlavors(await invoke<Flavor[]>('flavor_list_detailed'));
+      const [list, lineageMap] = await Promise.all([
+        invoke<Flavor[]>('flavor_list_detailed'),
+        invoke<Record<string, string[]>>('flavor_lineage'),
+      ]);
+      setFlavors(list);
+      setLineage(lineageMap ?? {});
     } catch (err: any) {
       message.error(err?.message || '读取 flavor 列表失败');
       console.error('flavor_list_detailed failed:', err);
@@ -137,7 +146,7 @@ export function FlavorsPanel() {
     });
   };
 
-  /** 从 flavor 一键创建容器（env_new 走 flavor 展开：创建+启动+注册） */
+  /** 从 flavor 一键创建容器：展开 → env_new(完整 config)（统一创建入口） */
   const handleCreate = async () => {
     const f = creating;
     if (!f) return;
@@ -150,10 +159,16 @@ export function FlavorsPanel() {
         message.error(`容器名「${name}」已存在，请换一个名字`);
         return;
       }
-      await invoke('env_new', { name, flavor: f.name });
+      // 宿主侧展开（GUI 透传 env / 字体挂载）→ 统一入口提交完整 ContainerConfig
+      const config = await invoke<Record<string, unknown>>('flavor_expand', {
+        name,
+        flavor: f.name,
+      });
+      await invoke('env_new', { config: { ...config, name } });
       message.success(`容器 ${name} 已创建并启动（来自 flavor ${f.name}）`);
       setCreating(null);
       setCreateName('');
+      await load();
     } catch (err: any) {
       // 完整报错展示：容器创建/启动链路多步（镜像检查→烘焙→创建→启动→setup），
       // 任何一步都可能失败——toast 会消失且截断，用 Modal 展示全文（可选中复制）
@@ -168,6 +183,50 @@ export function FlavorsPanel() {
     } finally {
       setCreatingBusy(false);
     }
+  };
+
+  /** 批量同步：把模板当前声明重新展开到全部派生容器（逐个重建） */
+  const handleSyncAll = (f: Flavor) => {
+    const derived = lineage[f.name] ?? [];
+    if (derived.length === 0) return;
+    modal.confirm({
+      title: `按模板「${f.name}」重新同步全部派生容器？`,
+      content: (
+        <div>
+          <p>以下 {derived.length} 个容器将按模板当前声明重新展开并逐个重建（本地的自启/常驻设置保留，其余本地修改被模板覆盖）：</p>
+          <p style={{ paddingLeft: 12 }}>{derived.join('、')}</p>
+        </div>
+      ),
+      okText: '全部重新同步',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        setSyncingFlavor(f.name);
+        const failures: string[] = [];
+        try {
+          for (const name of derived) {
+            try {
+              await invoke('config_sync_from_flavor', { name });
+            } catch (err: any) {
+              failures.push(`${name}：${err?.message || err}`);
+            }
+          }
+          if (failures.length > 0) {
+            modal.error({
+              title: `同步完成，${failures.length} 个失败`,
+              width: 620,
+              content: <pre className="error-detail">{failures.join('\n\n')}</pre>,
+              okText: '知道了',
+            });
+          } else {
+            message.success(`已按模板「${f.name}」同步 ${derived.length} 个容器`);
+          }
+          await load();
+        } finally {
+          setSyncingFlavor(null);
+        }
+      },
+    });
   };
 
   return (
@@ -190,8 +249,10 @@ export function FlavorsPanel() {
         <div className="loading">Loading flavors...</div>
       ) : (
         <div className="flavor-list">
-          {flavors.map((f) => (
-            <div key={f.name} className="flavor-item">
+          {flavors.map((f) => {
+            const derived = lineage[f.name] ?? [];
+            return (
+              <div key={f.name} className="flavor-item">
               <div className="flavor-main">
                 <div className="flavor-title">
                   <span className="flavor-name">{f.name}</span>
@@ -200,6 +261,11 @@ export function FlavorsPanel() {
                   {f.setup.length > 0 && <Tag>setup ×{f.setup.length}</Tag>}
                   {f.mounts.length > 0 && <Tag>mounts ×{f.mounts.length}</Tag>}
                   <Tag>{f.network.mode === 'host' ? 'host 网络' : 'bridge'}</Tag>
+                  {derived.length > 0 && (
+                    <Tooltip title={`派生容器：${derived.join('、')}`}>
+                      <Tag color="purple">派生 ×{derived.length}</Tag>
+                    </Tooltip>
+                  )}
                 </div>
                 <div className="flavor-image">{f.image}</div>
               </div>
@@ -216,11 +282,23 @@ export function FlavorsPanel() {
                     创建容器
                   </Button>
                 </Tooltip>
+                {derived.length > 0 && (
+                  <Tooltip title={`按模板当前声明重新同步全部派生容器（${derived.join('、')}）`}>
+                    <Button
+                      icon={<SyncOutlined />}
+                      loading={syncingFlavor === f.name}
+                      onClick={() => handleSyncAll(f)}
+                    >
+                      同步派生
+                    </Button>
+                  </Tooltip>
+                )}
                 <Button icon={<EditOutlined />} onClick={() => openEditor(f)} title="编辑" />
                 <Button danger icon={<DeleteOutlined />} onClick={() => handleDelete(f)} title="删除" />
               </div>
             </div>
-          ))}
+            );
+          })}
           {flavors.length === 0 && (
             <div className="empty-message">暂无 flavor，点击「新建」创建启动配置模板。</div>
           )}

@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use bollard::Docker;
 use crate::error::{Error, Result};
 use crate::models::{
-    ContainerConfig, ContainerConfigView, ContainerSummary, MountConfig, NetworkConfig,
-    NetworkMode, PortMapping,
+    ContainerConfig, ContainerConfigView, ContainerParams, ContainerSummary, MountConfig,
+    NetworkConfig, NetworkMode, PortMapping,
 };
 
 /// 宿主侧 exec PTY（root 终端通道；见 exec.rs）
@@ -139,11 +139,14 @@ impl Podman {
     ) -> Result<String> {
         let config = ContainerConfig {
             name: name.to_string(),
-            image: image.to_string(),
-            // 保持既有语义：默认 bridge 网络 + 无端口映射
-            network: NetworkConfig {
-                mode: NetworkMode::Mapped,
-                ports: Vec::new(),
+            params: ContainerParams {
+                image: image.to_string(),
+                // 保持既有语义：默认 bridge 网络 + 无端口映射
+                network: NetworkConfig {
+                    mode: NetworkMode::Mapped,
+                    ports: Vec::new(),
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -162,11 +165,11 @@ impl Podman {
     /// 在 `create()` 的既有基础之上追加（rebuild 保留同一套基础）：
     /// - HostConfig.init = true（catatonit = PID 1）
     /// - Cmd = [<server-bin>, "--socket", "/run/easytidy/server.sock"]
-    /// - Bind mounts: server 二进制（ro）+ socket 目录（rw）+ config.mounts（宿主路径须已存在）
+    /// - Bind mounts: server 二进制（ro）+ socket 目录（rw）+ config.params.mounts（宿主路径须已存在）
     /// - 标签: manager=easytidy + easytidy.name=<name>
     /// - 网络: `Host` → `network_mode = "host"`（端口映射无意义，忽略并告警）；
     ///   `Mapped` → 不设 network_mode（podman 默认 bridge）+ ExposedPorts + PortBindings
-    /// - 用户一致性映射（`config.user_home`，distrobox 式）：`$HOME` → `$HOME`（rw）
+    /// - 用户一致性映射（`config.params.user_home`，distrobox 式）：`$HOME` → `$HOME`（rw）
     ///   与注入 `EASYTIDY_USER_NAME/UID/GID/HOME`，容器内 server 据此创建同名用户并
     ///   经 su 拉起应用（见 crates/server）；`host_user()` 失败时跳过并告警
     ///
@@ -222,7 +225,7 @@ impl Podman {
                 ..Default::default()
             },
         ];
-        for m in &config.mounts {
+        for m in &config.params.mounts {
             validate_mount(m)?;
             mounts.push(Mount {
                 typ: Some(MountTypeEnum::BIND),
@@ -233,14 +236,14 @@ impl Podman {
             });
         }
 
-        // 用户一致性映射（distrobox 式，config.user_home）：映射宿主用户目录 +
+        // 用户一致性映射（distrobox 式，config.params.user_home）：映射宿主用户目录 +
         // 注入 EASYTIDY_USER_*（容器内 server 据此创建同名/同 uid/gid 用户，
         // 应用经 su 以该用户运行而非 root）。
         //
         // host_user() 失败（无法解析用户名/home）时仅告警并跳过——容器仍以 root
         // 运行，行为与旧版一致。
         let mut env = config.env.clone();
-        if config.user_home {
+        if config.params.user_home {
             if let Some(user) = crate::userenv::host_user() {
                 if !mount_has_target(&mounts, &user.home) && Path::new(&user.home).exists() {
                     mounts.push(Mount {
@@ -273,23 +276,23 @@ impl Podman {
         // 网络配置（host ⇄ bridge+端口映射 切换）
         let mut exposed_ports: Option<HashMap<String, HashMap<(), ()>>> = None;
         let mut port_bindings: Option<HashMap<String, Option<Vec<PortBinding>>>> = None;
-        match config.network.mode {
+        match config.params.network.mode {
             NetworkMode::Host => {
                 host_config.network_mode = Some("host".to_string());
-                if !config.network.ports.is_empty() {
+                if !config.params.network.ports.is_empty() {
                     tracing::warn!(
                         "容器 {} 网络模式为 host，端口映射不生效（已忽略）：{:?}",
                         name,
-                        config.network.ports
+                        config.params.network.ports
                     );
                 }
             }
             NetworkMode::Mapped => {
                 // 不设 network_mode → podman 默认 bridge
-                if !config.network.ports.is_empty() {
+                if !config.params.network.ports.is_empty() {
                     let mut exposed = HashMap::new();
                     let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-                    for p in &config.network.ports {
+                    for p in &config.params.network.ports {
                         let protocol = if p.protocol.is_empty() { "tcp" } else { p.protocol.as_str() };
                         if p.container_port == 0 || p.host_port == 0 {
                             return Err(Error::Config(format!(
@@ -314,6 +317,29 @@ impl Podman {
         }
         host_config.port_bindings = port_bindings;
 
+        // server Cmd：entry 链式拉起接通（此前 `entry` 字段存而不用——server
+        // 支持 --entry 但创建时从未传入）。有 entry 才追加；entry + args
+        // 拼为一条命令串（server 经 su -c shell 执行，含空格参数需引号）
+        let mut server_cmd = vec![
+            "/usr/bin/easytidy-server".to_string(),
+            "--socket".to_string(),
+            "/run/easytidy/server.sock".to_string(),
+        ];
+        if let Some(entry) = config
+            .params
+            .entry
+            .as_ref()
+            .filter(|e| !e.trim().is_empty())
+        {
+            let mut entry_cmd = entry.trim().to_string();
+            for arg in config.params.entry_args.iter().filter(|a| !a.trim().is_empty()) {
+                entry_cmd.push(' ');
+                entry_cmd.push_str(arg.trim());
+            }
+            server_cmd.push("--entry".to_string());
+            server_cmd.push(entry_cmd);
+        }
+
         // 用户一致性映射（user_home=true）→ keep-id 必须走 libpod 端点
         // （Docker compat 端点不支持 userns.keep-id，实测；见 libpod.rs）。
         // keep-id 使容器内 uid 1000（node 用户）= 宿主当前登录用户：
@@ -324,7 +350,7 @@ impl Podman {
         // - keep-id：宿主 1000 ↔ 容器 1000（easytidy 用户，server 启动时创建）
         // - server(root) 拉起子进程（bash 等）经 fork+exec+setuid+setgid
         //   降权到 easytidy（见 server services/pty.rs，不再经 su）
-        if config.user_home {
+        if config.params.user_home {
             let libpod = crate::libpod::Libpod::new().await?;
             // mounts / port_bindings 已在 host_config 中（早于本分支 move），从 host_config 取
             let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
@@ -337,11 +363,7 @@ impl Podman {
             let body = crate::libpod::keep_id_create_body(
                 name,
                 image,
-                vec![
-                    "/usr/bin/easytidy-server".to_string(),
-                    "--socket".to_string(),
-                    "/run/easytidy/server.sock".to_string(),
-                ],
+                server_cmd.clone(),
                 env.clone(),
                 labels.clone(),
                 mounts_json.as_array().cloned().unwrap_or_default(),
@@ -369,11 +391,7 @@ impl Podman {
         let body = crate::libpod::keep_id_create_body(
             name,
             image,
-            vec![
-                "/usr/bin/easytidy-server".to_string(),
-                "--socket".to_string(),
-                "/run/easytidy/server.sock".to_string(),
-            ],
+            server_cmd,
             env,
             labels,
             mounts_json.as_array().cloned().unwrap_or_default(),

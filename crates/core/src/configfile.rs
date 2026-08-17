@@ -257,7 +257,10 @@ mod tests {
                         format!("container-{}", i),
                         ContainerConfig {
                             name: format!("container-{}", i),
-                            image: "alpine:latest".to_string(),
+                            params: crate::models::ContainerParams {
+                                image: "alpine:latest".to_string(),
+                                ..Default::default()
+                            },
                             ..Default::default()
                         },
                     );
@@ -288,8 +291,11 @@ mod tests {
         // 创建
         let container = ContainerConfig {
             name: "test-container".to_string(),
-            image: "alpine:latest".to_string(),
-            entry: Some("/bin/sh".to_string()),
+            params: crate::models::ContainerParams {
+                image: "alpine:latest".to_string(),
+                entry: Some("/bin/sh".to_string()),
+                ..Default::default()
+            },
             silent_boot: true,
             persistent: true,
             ..Default::default()
@@ -301,7 +307,7 @@ mod tests {
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
         assert_eq!(loaded.name, "test-container");
-        assert_eq!(loaded.image, "alpine:latest");
+        assert_eq!(loaded.params.image, "alpine:latest");
 
         // 列出
         let list = config_file.list_containers().unwrap();
@@ -335,10 +341,16 @@ persistent = true
 
         let loaded = config_file.load().unwrap();
         let c = loaded.containers.get("legacy").expect("旧格式容器应可加载");
-        assert_eq!(c.image, "alpine:latest");
-        assert!(c.mounts.is_empty(), "旧格式无 mounts → 默认空");
-        assert_eq!(c.network.mode, crate::models::NetworkMode::Host);
-        assert!(c.network.ports.is_empty(), "旧格式无端口 → 默认空");
+        assert_eq!(c.params.image, "alpine:latest");
+        assert!(c.params.mounts.is_empty(), "旧格式无 mounts → 默认空");
+        assert_eq!(c.params.network.mode, crate::models::NetworkMode::Host);
+        assert!(c.params.network.ports.is_empty(), "旧格式无端口 → 默认空");
+        // flatten 序列化形状验证：旧格式文件（字段平铺）加载 + 重新保存后
+        // 字段仍平铺在外层（血缘/共享基座拆分对 TOML 兼容）
+        config_file.save(&loaded).unwrap();
+        let resaved = fs::read_to_string(&config_path).unwrap();
+        assert!(resaved.contains("\nimage = \"alpine:latest\""), "params 字段应平铺：\n{resaved}");
+        assert!(resaved.contains("[containers.legacy.network]"), "network 应为子表");
     }
 
     #[test]

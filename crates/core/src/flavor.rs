@@ -13,45 +13,30 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::models::{ContainerConfig, MountConfig, NetworkConfig, NetworkMode};
+use crate::models::{ContainerConfig, ContainerParams, MountConfig};
 
 /// 配置 flavor（TOML 清单）。
+///
+/// 模板 = 共享基座 [`ContainerParams`]（镜像/entry/挂载/网络/用户映射）+
+/// 模板专属的**意图**字段：`gui`（展开期推导指令——宿主侧探测 DISPLAY/
+/// 字体目录后生成 env/mounts，非容器参数）与 `setup`（创建后经 server PTY
+/// 执行的安装命令，生命周期动作）。存意图，不存解析快照——展开
+/// （[`Flavor::build_config`]）才产出实例快照 [`ContainerConfig`]。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Flavor {
     /// flavor 名（与文件名一致）
     pub name: String,
-    /// 基础镜像
-    pub image: String,
-    /// GUI 应用：自动注入宿主显示环境（DISPLAY/WAYLAND_DISPLAY/XAUTHORITY）+
-    /// 挂载 /tmp 与 $XDG_RUNTIME_DIR（X11/Wayland socket 透传）
+    /// 核心参数（与 ContainerConfig 共享基座；flatten 平铺，TOML 形状不变）
+    #[serde(flatten)]
+    pub params: ContainerParams,
+    /// GUI 应用：展开时自动注入宿主显示环境（DISPLAY/WAYLAND_DISPLAY/
+    /// XAUTHORITY）+ 挂载 /tmp 与 $XDG_RUNTIME_DIR（X11/Wayland socket
+    /// 透传）+ 字体/图标只读透传；并强制 user_home
     #[serde(default)]
     pub gui: bool,
     /// 容器内按序执行的安装命令（经 server PTY 以 `bash -c` 执行）
     #[serde(default)]
     pub setup: Vec<String>,
-    /// entry 应用（容器内可执行名）
-    pub entry: Option<String>,
-    /// entry 应用参数
-    #[serde(default)]
-    pub entry_args: Vec<String>,
-    /// 额外路径映射
-    #[serde(default)]
-    pub mounts: Vec<MountConfig>,
-    /// 用户一致性映射（distrobox 式：映射宿主用户目录 + 容器用户与宿主一致）。
-    /// 默认开启；`gui = true` 时强制开启。显式 `false` 且非 GUI 时关闭
-    /// （容器内以 root 运行，行为与旧版一致）。
-    #[serde(default)]
-    pub user_home: Option<bool>,
-    /// 网络配置（默认 host 模式）
-    #[serde(default = "default_network")]
-    pub network: NetworkConfig,
-}
-
-fn default_network() -> NetworkConfig {
-    NetworkConfig {
-        mode: NetworkMode::Host,
-        ports: Vec::new(),
-    }
 }
 
 impl Flavor {
@@ -133,21 +118,24 @@ impl Flavor {
         Ok(())
     }
 
-    /// 展开为容器配置。
+    /// 展开为容器配置（模板 → 实例快照）。
     ///
-    /// GUI 透传（gui = true），配方参考 docs/11-gui-container.md（宿主实测验证）：
+    /// 基座（`params`）整体继承（含 `entry_args`——曾在此处丢失）；GUI 透传
+    /// （gui = true）追加推导产物，配方参考 docs/11-gui-container.md（宿主实测验证）：
     /// - env：DISPLAY / WAYLAND_DISPLAY / XAUTHORITY / XDG_RUNTIME_DIR（取宿主值）
     /// - 挂载：`/tmp/.X11-unix`（X11 socket）、`$XDG_RUNTIME_DIR`（Wayland/dbus/XAUTHORITY）
     /// - 字体/图标透传（只读）：`/usr/share/fonts`、`$HOME/.local/share/fonts`、
     ///   `/usr/share/icons`、`$HOME/.local/share/icons`（容器内 GUI 应用中文渲染
     ///   与图标主题需要宿主字体；distrobox 同类挂载）
     /// - 用户一致性映射（distrobox 式）：gui=true 强制 `user_home=true`，
-    ///   由 create_with_config 映射 `$HOME` + 注入 EASYTIDY_USER_*（见 models::ContainerConfig）
+    ///   由 create_with_config 映射 `$HOME` + 注入 EASYTIDY_USER_*
     /// - GPU 透传（--gpus=all + NVIDIA_* env）与 apparmor=unconfined 属 P1（需宿主
     ///   nvidia-container-toolkit），此处仅做纯显示透传，GUI 应用以软件渲染可用。
+    ///
+    /// 血缘：展开结果盖 `flavor = Some(self.name)`（模板同步/漂移检测依据）。
     pub fn build_config(&self, name: &str) -> Result<ContainerConfig> {
         let mut env = Vec::new();
-        let mut mounts = self.mounts.clone();
+        let mut params = self.params.clone();
 
         if self.gui {
             for key in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR"] {
@@ -158,14 +146,14 @@ impl Flavor {
                 }
             }
             // X11 socket
-            mounts.push(MountConfig {
+            params.mounts.push(MountConfig {
                 host_path: "/tmp/.X11-unix".to_string(),
                 container_path: "/tmp/.X11-unix".to_string(),
                 read_only: false,
             });
             // Wayland / dbus / XAUTHORITY（$XDG_RUNTIME_DIR）
             if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-                mounts.push(MountConfig {
+                params.mounts.push(MountConfig {
                     host_path: runtime.clone(),
                     container_path: runtime,
                     read_only: false,
@@ -183,7 +171,7 @@ impl Flavor {
                 ("/usr/share/icons", "/usr/share/easytidy-host/icons"),
             ] {
                 if Path::new(host).exists() {
-                    mounts.push(MountConfig {
+                    params.mounts.push(MountConfig {
                         host_path: host.to_string(),
                         container_path: container.to_string(),
                         read_only: true,
@@ -201,7 +189,7 @@ impl Flavor {
                 for sub in [".local/share/fonts", ".local/share/icons"] {
                     let p = format!("{home}/{sub}");
                     if Path::new(&p).exists() {
-                        mounts.push(MountConfig {
+                        params.mounts.push(MountConfig {
                             host_path: p.clone(),
                             container_path: format!("/usr/share/easytidy-host/{sub}"),
                             read_only: true,
@@ -210,22 +198,89 @@ impl Flavor {
                 }
             }
             env.extend(env_extra);
+            // gui=true 恒开用户一致性映射（GUI 应用需以宿主用户身份读写宿主挂载目录）
+            params.user_home = true;
         }
 
         Ok(ContainerConfig {
             name: name.to_string(),
-            image: self.image.clone(),
-            entry: self.entry.clone(),
+            params,
+            env,
             silent_boot: false,
             persistent: true,
-            mounts,
-            network: self.network.clone(),
-            env,
-            // gui=true 恒开用户一致性映射（GUI 应用需以宿主用户身份读写宿主挂载目录）；
-            // 非 GUI flavor 默认开启、可显式 user_home=false 关闭
-            user_home: self.gui || self.user_home.unwrap_or(true),
+            // 血缘盖章：后续 ConfigManager「从模板同步」与漂移检测依据
+            flavor: Some(self.name.clone()),
         })
     }
+}
+
+// ============================================================================
+// 血缘：模板同步与漂移检测（config ← flavor 重展开）
+// ============================================================================
+
+/// 血缘状态（GUI 展示用）：来源模板是否存在 + 实例是否漂移。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LineageStatus {
+    /// 来源模板名
+    pub flavor: String,
+    /// 模板文件是否存在（被删除 = 无法同步，仅展示血缘）
+    pub exists: bool,
+    /// 实例基座与模板当前声明不一致（GUI 依据此展示「从模板同步」）。
+    /// 只比 `params`——env 是展开期宿主环境解析快照（DISPLAY 等），
+    /// 天然随会话变化，不参与漂移判定
+    pub drifted: bool,
+}
+
+/// 查询实例配置的血缘状态。
+///
+/// `None` = 无血缘（自由创建）。模板文件损坏/不可读按 `exists=false` 处理
+/// （不吞掉血缘信息）。
+pub fn lineage_status(config: &ContainerConfig) -> Option<LineageStatus> {
+    let flavor_name = config.flavor.clone()?;
+    let status = match Flavor::load(&flavor_name) {
+        Ok(f) => LineageStatus {
+            drifted: f
+                .build_config(&config.name)
+                .map(|expanded| expanded.params != config.params)
+                .unwrap_or(true),
+            flavor: flavor_name,
+            exists: true,
+        },
+        Err(_) => LineageStatus {
+            flavor: flavor_name,
+            exists: false,
+            drifted: false,
+        },
+    };
+    Some(status)
+}
+
+/// 从来源模板重新同步容器配置（flavor = 实例配置批量管理的核心动作）：
+/// 重新展开 → 保留实例侧字段 → 重建容器 → 更新注册。
+///
+/// - 基座（image/entry/entry_args/mounts/network/user_home）与 env 取模板
+///   重新展开结果（env 重解析当前宿主显示环境）
+/// - `silent_boot` / `persistent` 保留实例当前值（用户本地决策不随模板走）
+///
+/// 返回同步后的配置。
+pub async fn sync_from_flavor(
+    podman: &crate::podman::Podman,
+    config_file: &crate::configfile::ConfigFile,
+    name: &str,
+) -> Result<ContainerConfig> {
+    let current = config_file
+        .get_container(name)?
+        .ok_or_else(|| Error::Config(format!("容器配置不存在：{name}")))?;
+    let flavor_name = current.flavor.clone().ok_or_else(|| {
+        Error::Config(format!("容器 {name} 无血缘（非模板创建），不参与模板同步"))
+    })?;
+    let flavor = Flavor::load(&flavor_name)?;
+    let mut next = flavor.build_config(name)?;
+    next.silent_boot = current.silent_boot;
+    next.persistent = current.persistent;
+    podman.rebuild(name, &next).await?;
+    config_file.register_container(next.clone())?;
+    Ok(next)
 }
 
 // ============================================================================

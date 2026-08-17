@@ -21,12 +21,14 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   name: '',
   image: '',
   entry: null,
+  entry_args: [],
   silent_boot: false,
   persistent: true,
   mounts: [],
   network: { mode: 'host', ports: [] },
   env: [],
   user_home: true,
+  flavor: null,
 };
 
 /** ContainerConfig 编辑表单（名称/镜像 + 可折叠高级配置） */
@@ -112,11 +114,21 @@ export function ContainerConfigForm({ value, onChange }: ContainerConfigFormProp
                     />
                   </div>
                   <div className="config-field">
-                    <label>entry 应用（静默启动时拉起；类 ENTRYPOINT）</label>
+                    <label>entry 应用（启动时链式拉起；类 ENTRYPOINT）</label>
                     <Input
                       placeholder="如：firefox（留空 = 无）"
                       value={value.entry ?? ''}
                       onChange={(e) => update({ entry: e.target.value.trim() || null })}
+                    />
+                  </div>
+                  <div className="config-field">
+                    <label>entry 参数（空格分隔，随 entry 一起执行）</label>
+                    <Input
+                      placeholder="如：--new-window https://example.com"
+                      value={value.entry_args.join(' ')}
+                      onChange={(e) =>
+                        update({ entry_args: e.target.value.split(/\s+/).filter(Boolean) })
+                      }
                     />
                   </div>
                 </div>

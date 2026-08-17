@@ -99,6 +99,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             // 配置管理器
             commands::config::get_container_config,
             commands::config::apply_container_config,
+            commands::config::config_sync_from_flavor,
+            commands::containers::flavor_lineage,
             // PTY 终端
             commands::pty::get_terminals,
             commands::pty::pty_open,

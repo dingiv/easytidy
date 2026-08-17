@@ -8,12 +8,14 @@ export function normalizeConfig(cfg: ContainerConfig): ContainerConfig {
   return {
     ...cfg,
     entry: cfg.entry ?? '',
+    entry_args: [...(cfg.entry_args ?? [])],
     mounts: cfg.mounts.map((m) => ({ ...m })),
     network: {
       mode: cfg.network.mode,
       ports: cfg.network.ports.map((p) => ({ ...p })),
     },
     env: [...(cfg.env ?? [])],
+    flavor: cfg.flavor ?? null,
   };
 }
 

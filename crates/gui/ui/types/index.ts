@@ -117,6 +117,8 @@ export interface ContainerConfig {
   name: string;
   image: string;
   entry: string | null;
+  /// entry 应用参数（空格拼接到 entry 后，server 经 shell 执行）
+  entry_args: string[];
   silent_boot: boolean;
   persistent: boolean;
   mounts: MountConfig[];
@@ -125,6 +127,18 @@ export interface ContainerConfig {
   env: string[];
   /// 用户一致性映射开关（keep-id：容器内 uid 与宿主对齐）
   user_home: boolean;
+  /// 血缘：来源 flavor 模板名（展开时盖章；null = 自由创建，不参与模板同步）
+  flavor?: string | null;
+}
+
+/// 模板血缘状态（get_container_config 返回；null = 无血缘）
+export interface FlavorStatus {
+  /// 来源模板名
+  flavor: string;
+  /// 模板文件是否存在（被删 = 无法同步，仅展示血缘）
+  exists: boolean;
+  /// 实例基座与模板当前声明不一致（提示「从模板同步」）
+  drifted: boolean;
 }
 
 /// 宿主用户信息（uid 映射语义对照表数据源；null = 探测失败，容器降级 root 运行）
@@ -153,6 +167,8 @@ export interface ContainerConfigResult {
   config: ContainerConfig;
   effective: ContainerConfigView | null;
   host_user: HostUser | null;
+  /// 模板血缘状态（null = 自由创建）
+  flavor_status?: FlavorStatus | null;
 }
 
 /// 活跃终端会话（get_terminals / server pty.list）
@@ -196,8 +212,8 @@ export interface Flavor {
   entry_args: string[];
   /// 额外路径映射
   mounts: MountConfig[];
-  /// 用户一致性映射（gui=true 时强制开启）
-  user_home?: boolean | null;
+  /// 用户一致性映射（gui=true 时强制开启；Rust 侧为共享基座 bool，默认 true）
+  user_home?: boolean;
   /// 网络配置
   network: ContainerNetworkConfig;
 }

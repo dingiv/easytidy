@@ -20,6 +20,7 @@ import {
   ApiOutlined,
   CodeOutlined,
   FolderOpenOutlined,
+  ForkOutlined,
   ReloadOutlined,
   SaveOutlined,
   SettingOutlined,
@@ -41,8 +42,10 @@ interface ConfigManagerProps {
 
 function ConfigManagerInner({ containerName }: ConfigManagerProps) {
   const { message } = AntApp.useApp();
-  const { effective, hostUser, edit, loading, applying, error, dirty, load, update, apply, clearError } =
-    useConfigStore();
+  const {
+    effective, hostUser, edit, loading, applying, syncing, error, dirty,
+    flavorStatus, load, update, apply, syncFromFlavor, clearError,
+  } = useConfigStore();
 
   useEffect(() => {
     load(containerName);
@@ -70,7 +73,16 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
     update((prev) => ({ ...prev, env: prev.env.filter((_, i) => i !== idx) }));
   const setUserHome = (v: boolean) => update((prev) => ({ ...prev, user_home: v }));
   const setEntry = (v: string) => update((prev) => ({ ...prev, entry: v }));
+  const setEntryArgs = (v: string[]) => update((prev) => ({ ...prev, entry_args: v }));
   const setSilentBoot = (v: boolean) => update((prev) => ({ ...prev, silent_boot: v }));
+  const setPersistent = (v: boolean) => update((prev) => ({ ...prev, persistent: v }));
+
+  // ---------- 从模板同步（血缘） ----------
+
+  const handleSync = async () => {
+    const note = await syncFromFlavor(containerName);
+    if (note) message.success(note);
+  };
 
   // ---------- 保存并重启 ----------
 
@@ -121,6 +133,34 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           容器配置
         </Typography.Title>
         <Space>
+          {/* 血缘：来源模板 + 漂移状态 + 从模板同步（重建容器） */}
+          {flavorStatus && (
+            <Popconfirm
+              title="从模板重新同步"
+              description={`将按模板「${flavorStatus.flavor}」当前声明重新展开（镜像/挂载/网络/entry/用户映射/env 重新解析），并重建容器。本地的自启/常驻设置保留，其余本地修改将被模板覆盖。`}
+              okText="重新同步并重建"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={handleSync}
+              disabled={!flavorStatus.exists || syncing || applying || dirty}
+            >
+              <Button
+                icon={<ForkOutlined />}
+                loading={syncing}
+                disabled={!flavorStatus.exists || applying || dirty}
+                title={
+                  !flavorStatus.exists
+                    ? '来源模板已删除，仅展示血缘'
+                    : dirty
+                      ? '有未保存的本地修改，请先保存或放弃'
+                      : '按模板当前声明重新展开并重建'
+                }
+              >
+                模板: {flavorStatus.flavor}
+                {flavorStatus.exists && flavorStatus.drifted ? '（有变更）' : ''}
+              </Button>
+            </Popconfirm>
+          )}
           <Button
             icon={<ReloadOutlined />}
             onClick={() => load(containerName)}
@@ -155,6 +195,15 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           description={error}
           closable
           onClose={clearError}
+        />
+      )}
+
+      {!loading && flavorStatus?.exists && flavorStatus.drifted && !dirty && (
+        <Alert
+          type="info"
+          showIcon
+          message={`模板「${flavorStatus.flavor}」与当前配置存在差异`}
+          description="来源模板已修改（或宿主显示环境变化导致展开结果不同）。可点击右上角「模板: …」按钮按模板重新同步（重建容器）。"
         />
       )}
 
@@ -212,7 +261,13 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
                 </span>
               ),
               children: (
-                <ContainerPane edit={edit} onEntryChange={setEntry} onSilentBootChange={setSilentBoot} />
+                <ContainerPane
+                  edit={edit}
+                  onEntryChange={setEntry}
+                  onEntryArgsChange={setEntryArgs}
+                  onSilentBootChange={setSilentBoot}
+                  onPersistentChange={setPersistent}
+                />
               ),
             },
             {

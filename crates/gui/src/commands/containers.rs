@@ -249,7 +249,7 @@ pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvVi
         }
         views.push(EnvView {
             name: cfg.name,
-            image: cfg.image,
+            image: cfg.params.image,
             status: "missing".to_string(),
             managed: true,
         });
@@ -288,7 +288,7 @@ pub async fn env_new(
     if config.name.trim().is_empty() {
         return Err("环境名称不能为空".to_string());
     }
-    if config.image.trim().is_empty() {
+    if config.params.image.trim().is_empty() {
         return Err("镜像不能为空（需已拉取）".to_string());
     }
     let mut config = config;
@@ -314,7 +314,7 @@ pub async fn env_new(
     let p = try_log!(podman.get().await, "连接 podman");
     let server_bin = try_log!(easytidy_core::server_binary_path(), "定位 server 二进制");
     try_log!(
-        p.create_with_config(&config.name, &config.image, &server_bin, &config)
+        p.create_with_config(&config.name, &config.params.image, &server_bin, &config)
             .await,
         "创建容器"
     );
@@ -333,6 +333,24 @@ pub async fn env_new(
     podman.return_podman(p).await;
     info!("新环境 {name} 已创建并运行");
     Ok(())
+}
+
+/// 模板派生清单：每个 flavor 有哪些容器以其为血缘（FlavorsPanel 展示
+/// 「派生容器」+ 批量同步入口）。自由创建的容器（无血缘）不出现。
+#[tauri::command]
+pub fn flavor_lineage() -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
+    let config_file = ConfigFile::with_path(config_path);
+    let containers = config_file
+        .list_containers()
+        .map_err(|e| format!("读取容器配置失败：{e}"))?;
+    let mut lineage = std::collections::HashMap::new();
+    for cfg in containers {
+        if let Some(flavor) = cfg.flavor {
+            lineage.entry(flavor).or_insert_with(Vec::new).push(cfg.name);
+        }
+    }
+    Ok(lineage)
 }
 
 /// 删除环境：容器 + 注册配置 + 桌面图标 + socket 目录全清理。
@@ -408,7 +426,7 @@ pub async fn env_fork(
     // 快照镜像：easytidy/snapshot/<name>-<snapshot>
     let image_ref = format!("easytidy/snapshot/{name}-{snapshot}");
     config.name = new_name.clone();
-    config.image = image_ref.clone();
+    config.params.image = image_ref.clone();
 
     let p = podman.get().await.map_err(|e| e.to_string())?;
     let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;

@@ -365,8 +365,10 @@ async fn cmd_create(
     // 容器配置（网络默认 Host 模式，产品语义；distrobox 同款）
     let container_config = ContainerConfig {
         name: name.clone(),
-        image: image.clone(),
-        entry: None,
+        params: easytidy_core::models::ContainerParams {
+            image: image.clone(),
+            ..Default::default()
+        },
         silent_boot: false,
         persistent: true,
         ..Default::default()
@@ -550,7 +552,10 @@ async fn cmd_env_new(podman: Podman, name: String, flavor: Option<String>, image
             let server_bin = easytidy_core::server_binary_path()?;
             let config = ContainerConfig {
                 name: name.clone(),
-                image: image.clone(),
+                params: easytidy_core::models::ContainerParams {
+                    image: image.clone(),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let id = podman.create_with_config(&name, &image, &server_bin, &config).await?;
@@ -614,7 +619,7 @@ async fn cmd_env_fork(
     // 快照镜像：easytidy/snapshot/<name>-<snapshot>
     let image_ref = format!("easytidy/snapshot/{name}-{snapshot}");
     config.name = new_name.clone();
-    config.image = image_ref.clone();
+    config.params.image = image_ref.clone();
 
     let server_bin = easytidy_core::server_binary_path()?;
     let id = podman.create_with_config(&new_name, &image_ref, &server_bin, &config).await?;
@@ -666,13 +671,13 @@ async fn cmd_flavor_apply(
     let flavor = easytidy_core::flavor::Flavor::load(&flavor_name)?;
     let name = container.unwrap_or_else(|| flavor_name.clone());
 
-    info!("应用 flavor {flavor_name}：镜像 {}，容器 {name}", flavor.image);
+    info!("应用 flavor {flavor_name}：镜像 {}，容器 {name}", flavor.params.image);
 
     // 展开配置（GUI 透传自动注入宿主显示环境）
     let config = flavor.build_config(&name)?;
 
     let server_bin = easytidy_core::server_binary_path()?;
-    let id = podman.create_with_config(&name, &flavor.image, &server_bin, &config).await?;
+    let id = podman.create_with_config(&name, &flavor.params.image, &server_bin, &config).await?;
     println!("容器 {name} 创建成功（ID: {}）", &id[..12.min(id.len())]);
 
     podman.start(&name).await?;
@@ -697,8 +702,8 @@ async fn cmd_flavor_apply(
 
     println!("✅ flavor {flavor_name} 已应用。启动容器内应用：");
     println!("   easytidy run --container {name} -- {entry}{args}",
-        entry = flavor.entry.clone().unwrap_or_else(|| "（无 entry，可指定任意命令）".into()),
-        args = flavor.entry_args.join(" "));
+        entry = flavor.params.entry.clone().unwrap_or_else(|| "（无 entry，可指定任意命令）".into()),
+        args = flavor.params.entry_args.join(" "));
 
     Ok(())
 }

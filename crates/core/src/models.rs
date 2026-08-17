@@ -89,63 +89,95 @@ pub struct NetworkConfig {
     pub ports: Vec<PortMapping>,
 }
 
-/// `ContainerConfig.network` 的 serde 默认值（旧 config.toml 兼容）。
+/// `ContainerParams.network` 的 serde 默认值（旧 config.toml 兼容）。
 fn default_network() -> NetworkConfig {
     NetworkConfig::default()
 }
 
-/// `ContainerConfig.user_home` 的 serde 默认值（旧配置文件无该字段 → 默认开启映射）。
+/// `ContainerParams.user_home` 的 serde 默认值（旧配置无该字段 → 默认开启映射）。
 fn default_true() -> bool {
     true
 }
 
-/// 容器配置（easytidy 自有元数据，存于宿主共享配置文件）。
+/// 容器核心参数——模板与实例共享的基座。
 ///
-/// `mounts` / `network` / `user_home` 为 serde 默认值：旧配置文件（无新字段）加载后
-/// 得到空挂载列表 + Host 网络模式 + 用户一致性映射开启。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContainerConfig {
-    pub name: String,
+/// [`Flavor`](crate::flavor::Flavor)（模板，存意图）与 [`ContainerConfig`]
+/// （实例，存快照）经 `#[serde(flatten)]` 组合本结构：序列化形状与拆分前
+/// 完全一致（TOML/JSON 字段平铺在外层，旧文件直接兼容；toml 0.8 pretty
+/// 序列化器自动把表类字段排到末尾，flatten 无值后置表问题——2026-08-18 实测）。
+///
+/// 模板同步（config ← flavor 重展开）以本结构为传输单位：`env` / `name` /
+/// `silent_boot` / `persistent` 属于实例侧，不参与同步。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerParams {
+    /// 基础镜像
     pub image: String,
-    /// entry 应用（静默启动时链式拉起；类 Docker ENTRYPOINT）
+    /// entry 应用（容器启动时 server 经 `--entry` 链式拉起；类 Docker
+    /// ENTRYPOINT。shell 执行（`su -c`），参数经 `entry_args` 追加）
     pub entry: Option<String>,
-    /// 静默启动标志（宿主开机自启）
-    pub silent_boot: bool,
-    /// 是否常驻（catatonit + server 生命周期）
-    pub persistent: bool,
+    /// entry 应用参数（拼接在 entry 后空格分隔；含空格的参数需引号）
+    #[serde(default)]
+    pub entry_args: Vec<String>,
     /// 路径映射（bind mount）
     #[serde(default)]
     pub mounts: Vec<MountConfig>,
     /// 网络配置（默认 Host 模式）
     #[serde(default = "default_network")]
     pub network: NetworkConfig,
-    /// 容器环境变量（"KEY=VALUE" 列表，GUI 透传时含宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY）
-    #[serde(default)]
-    pub env: Vec<String>,
-    /// 用户一致性映射（distrobox 式）：默认映射宿主用户目录（`$HOME` → `$HOME` rw）+
-    /// 经 `EASYTIDY_USER_*` 告知容器内 server 创建同名/同 uid/gid 用户，
-    /// 应用以该用户运行而非 root——避免容器内 root 读写宿主挂载目录的权限问题。
-    ///
-    /// 与 GUI 透传的关系：`gui=true` 的 flavor 强制开启（GUI 应用写宿主挂载目录、
-    /// 读宿主字体/图标都需要正确属主）；非 GUI 容器可显式 `user_home = false` 关闭
-    /// （容器内以 root 运行，行为与旧版一致）。
+    /// 用户一致性映射（keep-id：容器内 uid 与宿主对齐）。与 GUI 透传的
+    /// 关系：`gui=true` 的 flavor 展开时强制开启。
     #[serde(default = "default_true")]
     pub user_home: bool,
 }
 
-impl Default for ContainerConfig {
+impl Default for ContainerParams {
     /// 与 serde 默认保持一致：`user_home` 默认 true（用户一致性映射开启）。
     fn default() -> Self {
         Self {
-            name: String::new(),
             image: String::new(),
             entry: None,
-            silent_boot: false,
-            persistent: false,
+            entry_args: Vec::new(),
             mounts: Vec::new(),
             network: NetworkConfig::default(),
-            env: Vec::new(),
             user_home: true,
+        }
+    }
+}
+
+/// 容器配置（easytidy 自有元数据，存于宿主共享配置文件）。
+///
+/// 核心参数在 [`ContainerParams`]（与 flavor 模板共享）；本结构是**实例**
+/// 快照：镜像/挂载/网络等展开结果 + 实例专属字段。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerConfig {
+    pub name: String,
+    /// 核心参数（模板共享基座）
+    #[serde(flatten)]
+    pub params: ContainerParams,
+    /// 容器环境变量（"KEY=VALUE" 列表，GUI 透传时含宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY
+    /// ——flavor 展开期的解析快照，随会话可能变化，不参与模板同步）
+    #[serde(default)]
+    pub env: Vec<String>,
+    /// 静默启动标志（宿主开机自启）
+    pub silent_boot: bool,
+    /// 是否常驻（catatonit + server 生命周期）
+    pub persistent: bool,
+    /// 血缘：来源 flavor 模板名（展开时盖章）。模板同步与漂移检测依据；
+    /// `None` = 自由创建（镜像起步），不参与模板生态
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flavor: Option<String>,
+}
+
+impl Default for ContainerConfig {
+    /// 与 serde 默认保持一致：`params.user_home` 默认 true。
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            params: ContainerParams::default(),
+            env: Vec::new(),
+            silent_boot: false,
+            persistent: false,
+            flavor: None,
         }
     }
 }
@@ -190,11 +222,15 @@ persistent = true
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.name, "legacy");
-        assert!(config.mounts.is_empty());
-        assert_eq!(config.network.mode, NetworkMode::Host);
-        assert!(config.network.ports.is_empty());
+        assert!(config.params.mounts.is_empty());
+        assert_eq!(config.params.network.mode, NetworkMode::Host);
+        assert!(config.params.network.ports.is_empty());
         assert!(config.env.is_empty());
-        assert!(config.user_home);
+        assert!(config.params.user_home);
+        // flatten 形状：基座字段平铺在外层（旧文件直接兼容）
+        assert_eq!(config.params.image, "alpine:latest");
+        assert_eq!(config.params.entry.as_deref(), Some("/bin/sh"));
+        assert_eq!(config.flavor, None);
     }
 
     #[test]
@@ -243,7 +279,7 @@ silent_boot = false
 persistent = true
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.user_home, "旧配置缺失 user_home 字段应默认 true");
+        assert!(config.params.user_home, "旧配置缺失 user_home 字段应默认 true");
 
         // 显式 false → 关闭映射（非 GUI 容器可选项）
         let toml_str = r#"
@@ -254,49 +290,60 @@ persistent = true
 user_home = false
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
-        assert!(!config.user_home);
+        assert!(!config.params.user_home);
 
         // Rust 侧 Default 与 serde 默认一致（struct literal 走 ..Default::default() 的入口同语义）
-        assert!(ContainerConfig::default().user_home);
+        assert!(ContainerConfig::default().params.user_home);
     }
 
     #[test]
     fn test_container_config_roundtrip() {
         let config = ContainerConfig {
             name: "app".to_string(),
-            image: "alpine:latest".to_string(),
-            entry: Some("/bin/sh".to_string()),
-            silent_boot: true,
-            persistent: true,
-            mounts: vec![MountConfig {
-                host_path: "/tmp".to_string(),
-                container_path: "/data".to_string(),
-                read_only: true,
-            }],
-            network: NetworkConfig {
-                mode: NetworkMode::Mapped,
-                ports: vec![PortMapping {
-                    host_port: 8080,
-                    container_port: 80,
-                    protocol: "tcp".to_string(),
+            params: ContainerParams {
+                image: "alpine:latest".to_string(),
+                entry: Some("/bin/sh".to_string()),
+                entry_args: vec!["--verbose".to_string()],
+                mounts: vec![MountConfig {
+                    host_path: "/tmp".to_string(),
+                    container_path: "/data".to_string(),
+                    read_only: true,
                 }],
+                network: NetworkConfig {
+                    mode: NetworkMode::Mapped,
+                    ports: vec![PortMapping {
+                        host_port: 8080,
+                        container_port: 80,
+                        protocol: "tcp".to_string(),
+                    }],
+                },
+                user_home: true,
             },
             env: vec!["DISPLAY=:0".to_string()],
-            user_home: true,
+            silent_boot: true,
+            persistent: true,
+            flavor: Some("chrome".to_string()),
         };
 
-        // TOML 往返（configfile 格式）
+        // TOML 往返（configfile 格式；flatten 平铺形状不变）
         let toml_str = toml::to_string(&config).unwrap();
         let back: ContainerConfig = toml::from_str(&toml_str).unwrap();
-        assert_eq!(back.mounts, config.mounts);
-        assert_eq!(back.network, config.network);
+        assert_eq!(back.params, config.params);
+        assert_eq!(back.flavor, config.flavor);
+        // 血缘 skip_serializing_if=None：无血缘时不落盘
+        let no_lineage = ContainerConfig {
+            flavor: None,
+            ..config.clone()
+        };
+        let toml_str = toml::to_string(&no_lineage).unwrap();
+        assert!(!toml_str.contains("flavor"));
 
         // JSON 往返（Tauri 命令格式）
         let json = serde_json::to_value(&config).unwrap();
         let back: ContainerConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.name, "app");
-        assert_eq!(back.mounts, config.mounts);
-        assert_eq!(back.network, config.network);
+        assert_eq!(back.params, config.params);
+        assert_eq!(back.flavor, config.flavor);
     }
 }
 

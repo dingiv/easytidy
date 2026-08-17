@@ -130,13 +130,21 @@ pub(crate) async fn perform_graceful_shutdown(state: Arc<ServerState>) -> Result
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::atomic::*};
+    // 三层重构（connection/router/services）后测试从旧 main.rs 移植：
+    // 各服务函数已分家到 services::{fs,apps,config}，此处显式引回
+    use std::fs;
 
-use crate::setup::*;
-
-use super::*;
-    use easytidy_protocol::FrameCodec;
+    use super::*;
+    use crate::services::apps::parse_desktop_file;
+    use crate::services::config::handle_config_get;
+    use crate::services::fs::handle_fs_list;
+    use crate::setup::*;
+    use easytidy_protocol::ops::{CfgGetResp, FsList, FsListResp};
+    use easytidy_protocol::{FrameCodec, Handshake, HandshakeAck, PROTOCOL_VERSION};
+    use futures::{SinkExt, StreamExt};
     use tempfile::NamedTempFile;
+    use tokio::net::{UnixListener, UnixStream};
+    use tokio_util::codec::Framed;
 
     /// Test handshake roundtrip
     #[tokio::test]
@@ -146,16 +154,6 @@ use super::*;
         let socket_path = temp_dir.path().join("test.sock");
 
         // Spawn server in background
-        let _state = Arc::new(ServerState {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            default_terminal: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            children: Arc::new(RwLock::new(HashMap::new())),
-            next_stream_id: Arc::new(AtomicU32::new(1)),
-            next_conn_id: Arc::new(AtomicU64::new(1)),
-            next_msg_id: Arc::new(AtomicU32::new(1)),
-            shutting_down: Arc::new(AtomicBool::new(false)),
-        });
-
         let socket_path_clone = socket_path.clone();
         tokio::spawn(async move {
             let listener = UnixListener::bind(&socket_path_clone).unwrap();

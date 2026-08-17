@@ -75,19 +75,22 @@ async fn rebuild_applies_mounts_and_ports() {
     let host_port = free_host_port();
     let config = ContainerConfig {
         name: name.clone(),
-        image: "docker.io/library/alpine:latest".to_string(),
-        mounts: vec![MountConfig {
-            host_path: src_dir.to_string_lossy().to_string(),
-            container_path: "/data".to_string(),
-            read_only: false,
-        }],
-        network: NetworkConfig {
-            mode: NetworkMode::Mapped,
-            ports: vec![PortMapping {
-                host_port,
-                container_port: 80,
-                protocol: "tcp".to_string(),
+        params: easytidy_core::models::ContainerParams {
+            image: "docker.io/library/alpine:latest".to_string(),
+            mounts: vec![MountConfig {
+                host_path: src_dir.to_string_lossy().to_string(),
+                container_path: "/data".to_string(),
+                read_only: false,
             }],
+            network: NetworkConfig {
+                mode: NetworkMode::Mapped,
+                ports: vec![PortMapping {
+                    host_port,
+                    container_port: 80,
+                    protocol: "tcp".to_string(),
+                }],
+            },
+            ..Default::default()
         },
         ..Default::default()
     };
@@ -102,7 +105,7 @@ async fn rebuild_applies_mounts_and_ports() {
     let result: Result<(), String> = async {
         // create（初始状态，含旧配置）
         let id = podman
-            .create_with_config(&name, &config.image, &fake_server, &config)
+            .create_with_config(&name, &config.params.image, &fake_server, &config)
             .await
             .map_err(|e| format!("创建容器失败：{e}"))?;
         println!("[create] id = {id}");
@@ -110,7 +113,7 @@ async fn rebuild_applies_mounts_and_ports() {
         // 修改配置（模拟用户编辑 config.toml）：新增第二条 mount
         let config2 = {
             let mut c = config.clone();
-            c.mounts.push(MountConfig {
+            c.params.mounts.push(MountConfig {
                 host_path: tmp_path.to_string_lossy().to_string(),
                 container_path: "/tmp-e2e".to_string(),
                 read_only: true,
