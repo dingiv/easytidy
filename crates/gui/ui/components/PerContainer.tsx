@@ -8,6 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { App as AntApp, Dropdown, Tooltip } from 'antd';
 import {
   CloseOutlined,
@@ -216,7 +217,7 @@ function PerContainerInner({ containerName }: PerContainerProps) {
       const pid = await invoke<number>('passthrough_launch', { id: p.id });
       message.success(`${p.name} 已启动 (pid=${pid})`);
     } catch (err: any) {
-      message.error(err?.message || `启动 ${p.name} 失败`);
+      message.error(errMsg(err, `启动 ${p.name} 失败`));
       console.error('passthrough_launch failed:', err);
     }
   };
@@ -233,7 +234,7 @@ function PerContainerInner({ containerName }: PerContainerProps) {
       });
       useFavoritesStore.getState().removePinned(p.id);
     } catch (err: any) {
-      message.error(err?.message || '取消收藏失败');
+      message.error(errMsg(err, '取消收藏失败'));
       console.error('passthrough_set_pinned (unpin) failed:', err);
     }
   };

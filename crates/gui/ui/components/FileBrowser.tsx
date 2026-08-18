@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke, Channel } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import type { UnlistenFn } from '@tauri-apps/api/event';
 import { App as AntApp, Breadcrumb, Spin, Empty, Button, Tooltip, Dropdown, Modal, Progress } from 'antd';
@@ -70,7 +71,7 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
     invoke<FsEntry[]>('fs_list', { path: currentPath })
       .then(setEntries)
       .catch((err: any) => {
-        setError(err.message || 'Failed to load directory');
+        setError(errMsg(err, 'Failed to load directory'));
         console.error('fs_list failed:', err);
       })
       .finally(() => setLoading(false));
@@ -86,7 +87,7 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
       })
       .catch((err: any) => {
         if (!cancelled) {
-          setError(err.message || 'Failed to load directory');
+          setError(errMsg(err, 'Failed to load directory'));
           console.error('fs_list failed:', err);
         }
       })
@@ -109,7 +110,7 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
       message.success(`已导入 ${paths.length} 个项目`);
       reload();
     } catch (err: any) {
-      message.error(err?.message || '导入失败');
+      message.error(errMsg(err, '导入失败'));
       console.error('import_files failed:', err);
     } finally {
       setImporting(false);
@@ -139,7 +140,7 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
         doImport(paths);
       }
     } catch (err: any) {
-      message.error(err?.message || '导入失败');
+      message.error(errMsg(err, '导入失败'));
       console.error('import_inspect failed:', err);
     }
   };
@@ -196,7 +197,7 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
       message.success(`已复制到 ${dst}`);
       reload();
     } catch (err: any) {
-      message.error(err?.message || '复制失败');
+      message.error(errMsg(err, '复制失败'));
       console.error('fs_copy failed:', err);
     }
   };
@@ -208,7 +209,7 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
       message.success(`已导出到 ${dest}`);
     } catch (err: any) {
       if (err?.message !== '已取消') {
-        message.error(err?.message || '导出失败');
+        message.error(errMsg(err, '导出失败'));
         console.error('export_file_dialog failed:', err);
       }
     }

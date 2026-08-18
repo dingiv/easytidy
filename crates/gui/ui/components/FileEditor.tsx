@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { App as AntApp, Button, Space, Spin, Typography } from 'antd';
 import { SaveOutlined, CloseOutlined } from '@ant-design/icons';
 import CodeMirror from '@uiw/react-codemirror';
@@ -97,7 +98,7 @@ export function FileEditor({ path, onClose, onSaved }: FileEditorProps) {
       })
       .catch((err: any) => {
         if (!cancelled) {
-          setLoadError(err?.message || '读取文件失败');
+          setLoadError(errMsg(err, '读取文件失败'));
           console.error('fs_read failed:', err);
         }
       })
@@ -122,7 +123,7 @@ export function FileEditor({ path, onClose, onSaved }: FileEditorProps) {
       message.success('已保存');
       onSaved();
     } catch (err: any) {
-      message.error(err?.message || '保存失败');
+      message.error(errMsg(err, '保存失败'));
       console.error('fs_write failed:', err);
     } finally {
       setSaving(false);

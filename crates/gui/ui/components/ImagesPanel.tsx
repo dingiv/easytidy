@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { App as AntApp, Button, Input, Modal, Table, Tag } from 'antd';
 import { CloudDownloadOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
 import type { ImageSummary } from '../types';
@@ -45,7 +46,7 @@ export function ImagesPanel() {
       setImages(await invoke<ImageSummary[]>('images_list'));
       setSelectedKeys([]);
     } catch (err: any) {
-      message.error(err?.message || '读取镜像列表失败');
+      message.error(errMsg(err, '读取镜像列表失败'));
       console.error('images_list failed:', err);
     } finally {
       setLoading(false);
@@ -70,7 +71,7 @@ export function ImagesPanel() {
       await load();
     } catch (err: any) {
       // 拉取失败原因多样（tag 不存在/网络/权限），Modal 展示完整错误
-      const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+      const msg = errMsg(err);
       console.error('image_pull failed:', err);
       modal.error({
         title: `拉取镜像失败：${pullName.trim()}`,
@@ -102,7 +103,7 @@ export function ImagesPanel() {
           message.success(`已删除：${name}`);
           await load();
         } catch (err: any) {
-          message.error(err?.message || '删除失败');
+          message.error(errMsg(err, '删除失败'));
           console.error('image_remove failed:', err);
         }
       },
@@ -146,7 +147,7 @@ export function ImagesPanel() {
               }
               done += 1;
             } catch (err: any) {
-              failures.push(`${name}：${err?.message || err}`);
+              failures.push(`${name}：${errMsg(err)}`);
             }
           }
           if (failures.length > 0) {

@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { App as AntApp, Alert, Button, Radio, Select, Space, Typography } from 'antd';
 import { PlayCircleOutlined } from '@ant-design/icons';
 import type { ContainerConfig } from '../types';
@@ -58,7 +59,7 @@ function ContainerCreateFormInner({ onCancel, onCreated, initialFlavor }: Contai
       setConfig(expanded); // expanded.name = name，保留用户输入
       setSelectedFlavor(flavor);
     } catch (err: any) {
-      message.error(err?.message || `展开模板 ${flavor} 失败`);
+      message.error(errMsg(err, `展开模板 ${flavor} 失败`));
     }
   };
 
@@ -80,7 +81,7 @@ function ContainerCreateFormInner({ onCancel, onCreated, initialFlavor }: Contai
     } catch (err: any) {
       // 完整报错展示：创建/启动链路多步易错，toast 会消失且截断，
       // 用 Modal 展示全文（可选中复制）
-      const msg = typeof err === 'string' ? err : err?.message || JSON.stringify(err);
+      const msg = errMsg(err);
       console.error('env_new failed:', err);
       modal.error({
         title: `创建容器「${name}」失败`,

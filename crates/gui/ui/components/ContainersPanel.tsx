@@ -15,6 +15,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import {
   App as AntApp,
   Alert,
@@ -143,7 +144,7 @@ function ContainersPanelInner() {
       setFlavors(flavorList);
       setLineage(lineageMap ?? {});
     } catch (err: any) {
-      setError(err?.message || '加载失败');
+      setError(errMsg(err, '加载失败'));
       console.error('load (envs/flavors) failed:', err);
     } finally {
       setLoading(false);
@@ -162,7 +163,7 @@ function ContainersPanelInner() {
       message.success(`容器「${env.name}」已运行`);
       await load();
     } catch (err: any) {
-      message.error(err?.message || '启动失败');
+      message.error(errMsg(err, '启动失败'));
       console.error('env_start failed:', err);
     }
   };
@@ -173,7 +174,7 @@ function ContainersPanelInner() {
       message.success(`容器「${env.name}」已关闭（环境保留，可随时恢复）`);
       await load();
     } catch (err: any) {
-      message.error(err?.message || '关闭失败');
+      message.error(errMsg(err, '关闭失败'));
       console.error('env_stop failed:', err);
     }
   };
@@ -183,7 +184,7 @@ function ContainersPanelInner() {
     try {
       await invoke('open_container_window', { name: env.name });
     } catch (err: any) {
-      message.error(err?.message || '打开容器窗口失败');
+      message.error(errMsg(err, '打开容器窗口失败'));
       console.error('open_container_window failed:', err);
     }
   };
@@ -196,7 +197,7 @@ function ContainersPanelInner() {
       message.success(`容器「${env.name}」已按注册配置重建并启动`);
       await load();
     } catch (err: any) {
-      message.error(err?.message || '重建失败');
+      message.error(errMsg(err, '重建失败'));
       console.error('env_rebuild failed:', err);
     } finally {
       setRebuilding(null);
@@ -214,7 +215,7 @@ function ContainersPanelInner() {
       message.success(`快照完成：${imageRef}`);
       setSnapshotTag((prev) => ({ ...prev, [env.name]: '' }));
     } catch (err: any) {
-      message.error(err?.message || '创建快照失败');
+      message.error(errMsg(err, '创建快照失败'));
       console.error('env_snapshot failed:', err);
     }
   };
@@ -244,7 +245,7 @@ function ContainersPanelInner() {
       setForkTarget(null);
       await load();
     } catch (err: any) {
-      message.error(err?.message || '派生（fork）失败');
+      message.error(errMsg(err, '派生（fork）失败'));
       console.error('env_fork failed:', err);
     } finally {
       setForking(false);
@@ -257,7 +258,7 @@ function ContainersPanelInner() {
       message.success(`容器「${env.name}」已删除；其快照为独立资产已保留，可用于派生（fork）`);
       await load();
     } catch (err: any) {
-      message.error(err?.message || '删除失败');
+      message.error(errMsg(err, '删除失败'));
       console.error('env_rm failed:', err);
     }
   };
@@ -305,7 +306,7 @@ function ContainersPanelInner() {
       setEditing(null);
       await load();
     } catch (err: any) {
-      message.error(err?.message || '保存失败');
+      message.error(errMsg(err, '保存失败'));
       console.error('flavor_save failed:', err);
     } finally {
       setSaving(false);
@@ -325,7 +326,7 @@ function ContainersPanelInner() {
           message.success(`已删除：${f.name}`);
           await load();
         } catch (err: any) {
-          message.error(err?.message || '删除失败');
+          message.error(errMsg(err, '删除失败'));
         }
       },
     });
@@ -354,7 +355,7 @@ function ContainersPanelInner() {
             try {
               await invoke('config_sync_from_flavor', { name });
             } catch (err: any) {
-              failures.push(`${name}：${err?.message || err}`);
+              failures.push(`${name}：${errMsg(err)}`);
             }
           }
           if (failures.length > 0) {

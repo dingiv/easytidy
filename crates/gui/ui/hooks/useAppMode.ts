@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import type { AppMode } from '../types';
 
 export function useAppMode() {
@@ -19,7 +20,7 @@ export function useAppMode() {
       })
       .catch((err) => {
         console.error('Failed to get app mode:', err);
-        setError(err.message || 'Failed to determine app mode');
+        setError(errMsg(err, 'Failed to determine app mode'));
       });
   }, []);
 

@@ -5,6 +5,7 @@
 
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { Dropdown, Radio, Tooltip } from 'antd';
 import { DownOutlined, PictureOutlined, PushpinFilled, PushpinOutlined } from '@ant-design/icons';
 import { AppIcon } from './AppIcon';
@@ -45,7 +46,7 @@ export function PassthroughManager() {
       await invoke('export_gui_shortcut');
       setError(null);
     } catch (err: any) {
-      setError(err.message || 'Failed to export GUI shortcut');
+      setError(errMsg(err, 'Failed to export GUI shortcut'));
       console.error('export_gui_shortcut failed:', err);
     } finally {
       setExportingGui(false);
@@ -70,7 +71,7 @@ export function PassthroughManager() {
       // 收藏列表同步到 store（工具栏订阅展示）
       useFavoritesStore.getState().setPinned(stateResult.pinned ?? []);
     } catch (err: any) {
-      setError(err.message || 'Failed to load data');
+      setError(errMsg(err, 'Failed to load data'));
       console.error('passthrough load failed:', err);
     } finally {
       setLoading(false);
@@ -98,7 +99,7 @@ export function PassthroughManager() {
       await invoke('passthrough_set_auto_start', { id, name, cmd, enabled });
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to set auto-start');
+      setError(errMsg(err, 'Failed to set auto-start'));
       console.error('passthrough_set_auto_start failed:', err);
     }
   };
@@ -127,7 +128,7 @@ export function PassthroughManager() {
       }
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to pin app');
+      setError(errMsg(err, 'Failed to pin app'));
       console.error('passthrough_set_pinned failed:', err);
     }
   };
@@ -143,7 +144,7 @@ export function PassthroughManager() {
       await invoke('passthrough_set_boot_mode', { mode });
       await loadData();
     } catch (err: any) {
-      setError(err?.message || '设置自启动模式失败');
+      setError(errMsg(err, '设置自启动模式失败'));
       console.error('passthrough_set_boot_mode failed:', err);
     }
   };
@@ -158,7 +159,7 @@ export function PassthroughManager() {
       }
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to export apps');
+      setError(errMsg(err, 'Failed to export apps'));
       console.error('passthrough_export failed:', err);
     }
   };
@@ -169,7 +170,7 @@ export function PassthroughManager() {
       await invoke('passthrough_revoke', { desktopFile });
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to revoke app');
+      setError(errMsg(err, 'Failed to revoke app'));
       console.error('passthrough_revoke failed:', err);
     }
   };
@@ -189,7 +190,7 @@ export function PassthroughManager() {
       await invoke('passthrough_export', { app });
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to export custom app');
+      setError(errMsg(err, 'Failed to export custom app'));
       console.error('passthrough_export (custom) failed:', err);
     }
   };
@@ -209,7 +210,7 @@ export function PassthroughManager() {
         setCustomIcon(null);
       }
     } catch (err: any) {
-      setError(err?.message || '导入图标失败');
+      setError(errMsg(err, '导入图标失败'));
       console.error('import icon failed:', err);
     }
   };
@@ -233,7 +234,7 @@ export function PassthroughManager() {
       setCustomIcon(null);
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to add custom app');
+      setError(errMsg(err, 'Failed to add custom app'));
       console.error('passthrough_add_custom failed:', err);
     } finally {
       setAddingCustom(false);
@@ -246,7 +247,7 @@ export function PassthroughManager() {
       await invoke('passthrough_remove_app', { id });
       await loadData();
     } catch (err: any) {
-      setError(err.message || 'Failed to remove custom app');
+      setError(errMsg(err, 'Failed to remove custom app'));
       console.error('passthrough_remove_app failed:', err);
     }
   };

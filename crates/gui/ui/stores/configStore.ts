@@ -9,6 +9,7 @@
 
 import { create } from 'zustand';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { normalizeConfig, normalizeView } from '../components/config/utils';
 import type {
   ContainerConfig,
@@ -72,7 +73,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         dirty: false,
       });
     } catch (err: any) {
-      set({ error: err?.message || 'Failed to load container config' });
+      set({ error: errMsg(err, '加载容器配置失败') });
       console.error('get_container_config failed:', err);
     } finally {
       set({ loading: false });
@@ -103,7 +104,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       // 保存并重启成功：重载（dirty 重置,无"未生效"状态）
       await get().load(name);
     } catch (err: any) {
-      set({ error: err?.message || '应用配置失败' });
+      set({ error: errMsg(err, '应用配置失败') });
       console.error('apply_container_config failed:', err);
     } finally {
       set({ applying: false });
@@ -118,7 +119,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       await get().load(name);
       return note;
     } catch (err: any) {
-      set({ error: err?.message || '从模板同步失败' });
+      set({ error: errMsg(err, '从模板同步失败') });
       console.error('config_sync_from_flavor failed:', err);
     } finally {
       set({ syncing: false });

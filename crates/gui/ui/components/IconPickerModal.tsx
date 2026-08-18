@@ -7,6 +7,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { Modal, Button, Input, Spin, Empty } from 'antd';
 import { mimeForPath } from './mime';
 
@@ -63,7 +64,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
       setSelected(null);
       setPreview(null);
     } catch (err: any) {
-      setError(err?.message || '读取容器目录失败');
+      setError(errMsg(err, '读取容器目录失败'));
     } finally {
       setBrowsing(false);
     }
@@ -108,7 +109,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
       const hostPath = await invoke<string>('passthrough_pick_host_icon');
       await applyPickedIcon(hostPath);
     } catch (err: any) {
-      setError(err?.message || '选择宿主图标失败');
+      setError(errMsg(err, '选择宿主图标失败'));
     } finally {
       setBusy(false);
     }
@@ -125,7 +126,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
       });
       await applyPickedIcon(hostPath);
     } catch (err: any) {
-      setError(err?.message || '导入容器图标失败');
+      setError(errMsg(err, '导入容器图标失败'));
     } finally {
       setBusy(false);
     }
@@ -140,7 +141,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
       onChanged();
       onClose();
     } catch (err: any) {
-      setError(err?.message || '清除图标失败');
+      setError(errMsg(err, '清除图标失败'));
     } finally {
       setBusy(false);
     }

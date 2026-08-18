@@ -3,6 +3,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { errMsg } from '../lib/errors';
 import { Spin, Typography } from 'antd';
 import { mimeForPath } from './mime';
 
@@ -24,7 +25,7 @@ export function ImageViewer({ path }: ImageViewerProps) {
       })
       .catch((err: any) => {
         if (!cancelled) {
-          setError(err?.message || '加载图片失败');
+          setError(errMsg(err, '加载图片失败'));
           console.error('fetch_file_b64 failed:', err);
         }
       });
