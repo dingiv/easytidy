@@ -83,9 +83,18 @@ pub fn host_socket_path(name: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// 串行化所有读写进程级环境变量的测试。`std::env::set_var`/`remove_var`
+    /// 是进程全局的——Rust 测试并行多线程跑，`test_host_socket_path_no_xdg`
+    /// 移除 XDG_RUNTIME_DIR 与 `test_host_socket_path` 读它并发踩踏（实测
+    /// 偶发 NoXdgRuntime panic）；XDG_DATA_HOME 两个测试同理。共用一把锁
+    /// 让环境相关的测试互斥执行。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_host_socket_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap();
         let expected = PathBuf::from(runtime_dir)
             .join("easytidy")
@@ -98,6 +107,7 @@ mod tests {
 
     #[test]
     fn test_host_socket_path_no_xdg() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // 临时 unset XDG_RUNTIME_DIR
         let original = std::env::var("XDG_RUNTIME_DIR").ok();
         std::env::remove_var("XDG_RUNTIME_DIR");
@@ -114,6 +124,7 @@ mod tests {
 
     #[test]
     fn test_server_binary_path_with_temp_xdg() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // 临时设置 XDG_DATA_HOME
         let original = std::env::var("XDG_DATA_HOME").ok();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -139,6 +150,7 @@ mod tests {
 
     #[test]
     fn test_server_binary_path_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
         // 临时设置 XDG_DATA_HOME 到空目录
         let original = std::env::var("XDG_DATA_HOME").ok();
         let temp_dir = tempfile::tempdir().unwrap();
