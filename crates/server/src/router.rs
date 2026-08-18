@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 
 use crate::http::HTTP_PORT;
 use crate::state::ServerState;
-use crate::services::apps::{handle_apps_get_icon, handle_apps_launch, handle_apps_list};
+use crate::services::apps::{handle_apps_get_icon, handle_apps_kill, handle_apps_launch, handle_apps_list, handle_apps_logs, handle_apps_ps};
 use crate::services::config::{handle_config_get, handle_config_set};
 use crate::services::fs::{handle_fs_copy, handle_fs_list, handle_fs_mkdir, handle_fs_read, handle_fs_stat, handle_fs_write};
 use crate::services::lifecycle::{handle_lifecycle_entry_launch, handle_lifecycle_shutdown};
@@ -118,7 +118,16 @@ pub(crate) async fn dispatch(
             Ok(Some(handle_apps_get_icon(msg).await?))
         }
         (MsgKind::Req, "apps.launch") => {
-            Ok(Some(handle_apps_launch(msg, state).await?))
+            Ok(Some(handle_apps_launch(msg, state, event_tx).await?))
+        }
+        (MsgKind::Req, "apps.ps") => {
+            Ok(Some(handle_apps_ps(msg, state).await?))
+        }
+        (MsgKind::Req, "apps.logs") => {
+            Ok(Some(handle_apps_logs(msg, state).await?))
+        }
+        (MsgKind::Req, "apps.kill") => {
+            Ok(Some(handle_apps_kill(msg, state).await?))
         }
         (MsgKind::Req, "server.info") => {
             Ok(Some(handle_server_info(msg).await?))

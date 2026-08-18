@@ -348,6 +348,62 @@ pub struct AppGetIconResp {
 }
 
 // ============================================================================
+// apps: 托管进程管理族（server 全权管理拉起的应用：stdio + 生命周期）
+// ============================================================================
+
+/// 托管进程摘要（server 拉起的 entry / passthrough 应用）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManagedProcess {
+    /// 进程 PID
+    pub pid: u32,
+    /// 展示名（entry id 或应用名）
+    pub name: String,
+    /// 进程类型（"entry" / "passthrough"）
+    pub kind: String,
+    /// 实际执行命令串
+    pub cmd: String,
+    /// 启动时刻（unix millis）
+    pub started_at: u64,
+    /// 状态："running" / "exited"
+    pub status: String,
+    /// 退出码（running 时 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// 已捕获 stdio 字节数
+    pub stdio_len: usize,
+}
+
+/// 列出托管进程（apps.ps）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppsPs;
+
+/// apps.ps 响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppsPsResp {
+    pub processes: Vec<ManagedProcess>,
+}
+
+/// 获取某进程捕获的 stdio（apps.logs）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppLogs {
+    pub pid: u32,
+}
+
+/// apps.logs 响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppLogsResp {
+    pub pid: u32,
+    /// 捕获的 stdout+stderr（有损 UTF-8；超出上限丢弃最旧）
+    pub stdio: String,
+}
+
+/// 终止托管进程（apps.kill；SIGTERM）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppKill {
+    pub pid: u32,
+}
+
+// ============================================================================
 // passthrough: Passthrough 管理族
 // ============================================================================
 

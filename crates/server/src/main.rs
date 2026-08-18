@@ -38,7 +38,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use connection::handle_connection;
 use http::start_http_server;
-use services::apps::{child_reaper_task, launch_entry_command};
+use services::apps::{child_prune_task, launch_entry_command};
 use services::lifecycle::perform_graceful_shutdown;
 use setup::{fixup_xdg_data_dirs, setup_fontconfig, setup_user_mapping};
 use state::ServerState;
@@ -89,10 +89,10 @@ async fn main() -> Result<()> {
         shutting_down: Arc::new(AtomicBool::new(false)),
     });
 
-    // Spawn child reaper
+    // Spawn child prune task（清理已退出的托管进程条目）
     let reaper_state = state.clone();
     tokio::spawn(async move {
-        child_reaper_task(reaper_state).await;
+        child_prune_task(reaper_state).await;
     });
 
     // 用户一致性映射（distrobox 式）：容器内用户 = 宿主用户（同名/同 uid/gid）。

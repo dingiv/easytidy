@@ -1,5 +1,5 @@
 //! 桌面应用服务：.desktop 枚举/图标解析/launch + 托管进程（spawn/reaper）。
-use crate::state::{ChildInfo, ServerState};
+use crate::state::{ChildInfo, ProcessStatus, ServerState, APP_LOG_MAX};
 use crate::setup::user_map;
 
 use std::fs;
@@ -12,11 +12,25 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use easytidy_protocol::{
-    AppGetIcon, AppGetIconResp, AppInfo, AppsLaunch, AppsLaunchResp,
-    AppsLaunchResult, AppsListResp, Frame, Message, MsgKind,
+    AppGetIcon, AppGetIconResp, AppInfo, AppKill, AppLogs, AppLogsResp, AppsLaunch, AppsLaunchResp,
+    AppsLaunchResult, AppsListResp, AppsPsResp, ChildExited, Frame, ManagedProcess, Message,
+    MsgKind,
 };
 use tokio::process::Command as TokioCommand;
+use tokio::sync::mpsc;
 use tracing::{error, info, warn};
+
+/// 当前 unix millis（进程时间戳用；跨平台不可靠但容器内仅 Linux，够用）
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 已退出进程在注册表中的保留时长（ms）：apps.ps 展示「已退出」状态的窗口，
+/// 超过即由 prune 清理（防内存膨胀）
+const EXITED_TTL_MS: u64 = 120_000;
 
 /// Handle apps.list
 pub(crate) async fn handle_apps_list(msg: Message) -> Result<Frame> {
@@ -183,14 +197,21 @@ pub(crate) async fn handle_apps_get_icon(msg: Message) -> Result<Frame> {
 /// 直接作 su -c 参数交给目标用户 shell 解析——**不做单引号转义**：util-linux
 /// su 经 argv 传参，不经宿主 shell 二次解析；转义会破坏含引号/重定向的
 /// 复杂命令（实测 auto-start 命令 127 失败））；否则 root 直接 spawn。
-/// stdout/stderr 丢弃（GUI 应用自管窗口）；注册 state.children 并后台
-/// wait（退出后移除 + 日志）。env 继承 server 进程 env（create 时已注入
-/// DISPLAY 等显示透传变量）。
+/// env 继承 server 进程 env（create 时已注入 DISPLAY 等显示透传变量）。
+///
+/// **server 全权负责生命周期**：
+/// - stdio：stdout/stderr 合并捕获进有界环形缓冲（[`APP_LOG_MAX`]，`apps.logs`
+///   查询）
+/// - 生命周期：后台 wait，退出后记录退出码（[`ProcessStatus::Exited`]），
+///   并经 `event_tx` 发 `child.exited` 事件（无订阅方则静默丢弃）
+/// - 注册表：`state.children` 保留（含已退出，供 `apps.ps` 查询），由
+///   [`child_prune_task`] 周期清理超时条目
 pub(crate) async fn spawn_managed_process(
     state: &Arc<ServerState>,
     cmd: &str,
     kind: &str,
-    entry_id: Option<String>,
+    name: String,
+    event_tx: Option<mpsc::UnboundedSender<Frame>>,
 ) -> Result<u32> {
     if cmd.trim().is_empty() {
         return Err(anyhow!("Empty command"));
@@ -201,8 +222,8 @@ pub(crate) async fn spawn_managed_process(
             .arg("-c")
             .arg(cmd)
             .arg(&user.name)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .context("Failed to spawn command (su)")?
     } else {
@@ -211,62 +232,136 @@ pub(crate) async fn spawn_managed_process(
         let args = &parts[1..];
         TokioCommand::new(cmd0)
             .args(args)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .spawn()
             .context("Failed to spawn command")?
     };
 
     let pid = child.id().unwrap();
 
-    // Track child
-    {
-        let mut children = state.children.write().await;
-        children.insert(pid, ChildInfo {
-            pid,
-            kind: kind.to_string(),
-            entry_id: entry_id.clone(),
-        });
+    // 捕获 stdio：stdout/stderr 合并进有界环形缓冲（调试/排障用）
+    let stdio_buf = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let streams: [Option<Box<dyn tokio::io::AsyncRead + Unpin + Send>>; 2] = [
+        child
+            .stdout
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+        child
+            .stderr
+            .take()
+            .map(|s| Box::new(s) as Box<dyn tokio::io::AsyncRead + Unpin + Send>),
+    ];
+    for stream in streams.into_iter().flatten() {
+        let buf = stdio_buf.clone();
+        tokio::spawn(read_stream_into_buffer(stream, buf));
     }
 
-    // Wait for child in background（退出后移除跟踪）
+    let started_at = unix_millis();
+    {
+        let mut children = state.children.write().await;
+        children.insert(
+            pid,
+            ChildInfo {
+                kind: kind.to_string(),
+                name: name.clone(),
+                cmd: cmd.to_string(),
+                started_at,
+                status: ProcessStatus::Running,
+                stdio: stdio_buf,
+            },
+        );
+    }
+
+    // 后台 wait：退出后记录状态 + 发 child.exited 事件（条目保留供 apps.ps
+    // 查询，由 child_prune_task 过期清理）
     let state = state.clone();
     let kind_owned = kind.to_string();
     tokio::spawn(async move {
-        match child.wait().await {
-            Ok(status) => {
-                info!("Managed process exited: pid={pid}, kind={kind_owned}, status={status}");
-                let mut children = state.children.write().await;
-                children.remove(&pid);
-            }
+        let code = match child.wait().await {
+            Ok(status) => status.code().unwrap_or(-1),
             Err(e) => {
                 error!("Failed to wait for managed process {pid}: {e}");
-                let mut children = state.children.write().await;
-                children.remove(&pid);
+                -1
             }
+        };
+        let at = unix_millis();
+        {
+            let mut children = state.children.write().await;
+            if let Some(info) = children.get_mut(&pid) {
+                info.status = ProcessStatus::Exited { code, at };
+            }
+        }
+        info!("Managed process exited: pid={pid}, kind={kind_owned}, code={code}");
+        if let Some(tx) = &event_tx {
+            // 无订阅方（启动期拉起 entry，尚未有连接）时 send 静默失败
+            let _ = tx.send(Frame::Json(Message {
+                id: 0,
+                kind: MsgKind::Evt,
+                op: "child.exited".to_string(),
+                payload: serde_json::to_value(ChildExited {
+                    pid,
+                    code,
+                    kind: kind_owned,
+                })
+                .unwrap_or(serde_json::json!(null)),
+                err: None,
+            }));
         }
     });
 
     Ok(pid)
 }
 
+/// 把子进程 stdout/stderr 读入有界环形缓冲（超出 [`APP_LOG_MAX`] 丢最旧）。
+async fn read_stream_into_buffer(
+    mut stream: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    buf: Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut chunk = vec![0u8; 4096];
+    loop {
+        match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let mut b = buf.lock().unwrap();
+                b.extend(chunk[..n].iter().copied());
+                while b.len() > APP_LOG_MAX {
+                    b.pop_front();
+                }
+            }
+        }
+    }
+}
+
 /// Launch entry command on startup
 pub(crate) async fn launch_entry_command(state: &Arc<ServerState>, entry_cmd: String) -> Result<()> {
     info!("Launching entry command: {}", entry_cmd);
-    let pid = spawn_managed_process(state, &entry_cmd, "entry", Some("default".to_string())).await?;
+    let pid = spawn_managed_process(state, &entry_cmd, "entry", "default".to_string(), None).await?;
     info!("Entry command launched: pid={pid}");
     Ok(())
 }
 
 /// Handle apps.launch（passthrough auto-start：批量拉起，逐条独立成败）
-pub(crate) async fn handle_apps_launch(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+pub(crate) async fn handle_apps_launch(
+    msg: Message,
+    state: &Arc<ServerState>,
+    event_tx: mpsc::UnboundedSender<Frame>,
+) -> Result<Frame> {
     let req: AppsLaunch = serde_json::from_value(msg.payload)
         .context("Failed to parse AppsLaunch")?;
 
     info!("apps.launch：{} 个应用", req.apps.len());
     let mut results = Vec::with_capacity(req.apps.len());
     for app in &req.apps {
-        match spawn_managed_process(state, &app.cmd, "passthrough", Some(app.name.clone())).await
+        match spawn_managed_process(
+            state,
+            &app.cmd,
+            "passthrough",
+            app.name.clone(),
+            Some(event_tx.clone()),
+        )
+        .await
         {
             Ok(pid) => {
                 info!("passthrough 应用已拉起：{} (pid={pid})", app.name);
@@ -297,46 +392,110 @@ pub(crate) async fn handle_apps_launch(msg: Message, state: &Arc<ServerState>) -
     }))
 }
 
-/// Child reaper task
-pub(crate) async fn child_reaper_task(state: Arc<ServerState>) {
-    info!("Child reaper task started");
+/// 列出托管进程（含已退出，供生命周期监控；先 prune 过期条目）
+pub(crate) async fn handle_apps_ps(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    prune_children(state).await;
+    let children = state.children.read().await;
+    let mut processes: Vec<ManagedProcess> = children
+        .iter()
+        .map(|(pid, info)| ManagedProcess {
+            pid: *pid,
+            name: info.name.clone(),
+            kind: info.kind.clone(),
+            cmd: info.cmd.clone(),
+            started_at: info.started_at,
+            status: match info.status {
+                ProcessStatus::Running => "running".to_string(),
+                ProcessStatus::Exited { .. } => "exited".to_string(),
+            },
+            exit_code: info.status.exit_code(),
+            stdio_len: info.stdio.lock().unwrap().len(),
+        })
+        .collect();
+    processes.sort_by_key(|p| p.started_at);
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "apps.ps".to_string(),
+        payload: serde_json::to_value(AppsPsResp { processes })?,
+        err: None,
+    }))
+}
 
+/// 获取某托管进程捕获的 stdio（有损 UTF-8；进程不存在返回空）
+pub(crate) async fn handle_apps_logs(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: AppLogs = serde_json::from_value(msg.payload)
+        .context("Failed to parse AppLogs")?;
+    let children = state.children.read().await;
+    let stdio = children
+        .get(&req.pid)
+        .map(|info| {
+            let mut buf = info.stdio.lock().unwrap();
+            String::from_utf8_lossy(buf.make_contiguous()).to_string()
+        })
+        .unwrap_or_default();
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "apps.logs".to_string(),
+        payload: serde_json::to_value(AppLogsResp { pid: req.pid, stdio })?,
+        err: None,
+    }))
+}
+
+/// 终止托管进程（SIGTERM；退出由 wait 任务记录）。
+pub(crate) async fn handle_apps_kill(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: AppKill = serde_json::from_value(msg.payload)
+        .context("Failed to parse AppKill")?;
+    let running = {
+        let children = state.children.read().await;
+        matches!(
+            children.get(&req.pid).map(|i| i.status),
+            Some(ProcessStatus::Running)
+        )
+    };
+    if !running {
+        return Err(anyhow!("进程 {} 不存在或已退出", req.pid));
+    }
+    let status = TokioCommand::new("kill")
+        .arg("-TERM")
+        .arg(req.pid.to_string())
+        .status()
+        .await
+        .context("Failed to send SIGTERM")?;
+    if !status.success() {
+        return Err(anyhow!("SIGTERM 失败（exit={}）", status));
+    }
+    info!("Managed process terminated: pid={}", req.pid);
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "apps.kill".to_string(),
+        payload: serde_json::json!(null),
+        err: None,
+    }))
+}
+
+/// 清理已退出且超过保留时长的托管进程条目（防注册表无限增长）。
+async fn prune_children(state: &Arc<ServerState>) {
+    let now = unix_millis();
+    let mut children = state.children.write().await;
+    children.retain(|_, info| match info.status {
+        ProcessStatus::Running => true,
+        ProcessStatus::Exited { at, .. } => now.saturating_sub(at) < EXITED_TTL_MS,
+    });
+}
+
+/// 周期清理任务：过期退出条目（替代旧的 kill -0 轮询 reaper——wait 任务
+/// 已负责精确退出记录，轮询既冗余又可能误判复用的 PID）。
+pub(crate) async fn child_prune_task(state: Arc<ServerState>) {
+    info!("Child prune task started");
     loop {
-        tokio::time::sleep(Duration::from_secs(1)).await;
-
-        let children_to_remove = {
-            let children = state.children.read().await;
-            let mut to_remove = Vec::new();
-
-            for pid in children.keys() {
-                // Check if process is still alive
-                if let Ok(output) = TokioCommand::new("kill")
-                    .arg("-0")
-                    .arg(pid.to_string())
-                    .output()
-                    .await
-                {
-                    if !output.status.success() {
-                        to_remove.push(*pid);
-                    }
-                }
-            }
-
-            to_remove
-        };
-
-        for pid in children_to_remove {
-            let mut children = state.children.write().await;
-            if let Some(child_info) = children.remove(&pid) {
-                info!("Child reaped: pid={}, kind={}", pid, child_info.kind);
-                // TODO: Emit child.exited event
-            }
-        }
-
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        prune_children(&state).await;
         if state.shutting_down.load(Ordering::SeqCst) {
             break;
         }
     }
-
-    info!("Child reaper task ended");
+    info!("Child prune task ended");
 }

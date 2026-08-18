@@ -1,6 +1,6 @@
 //! 生命周期服务：entry 拉起 / shutdown / 优雅退出。
-use crate::state::{ChildInfo, ServerState};
-use crate::setup::user_map;
+use crate::services::apps::spawn_managed_process;
+use crate::state::{ProcessStatus, ServerState};
 
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ use easytidy_protocol::{
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Handle lifecycle.entryLaunch
 pub(crate) async fn handle_lifecycle_entry_launch(
@@ -24,58 +24,21 @@ pub(crate) async fn handle_lifecycle_entry_launch(
     let req: LifecycleEntryLaunch = serde_json::from_value(msg.payload)
         .context("Failed to parse LifecycleEntryLaunch")?;
 
-    // TODO: Look up entry config and spawn the entry process
-    // For now, just spawn a simple shell；用户映射生效时同样经 su 拉起
+    // TODO: Look up entry config and spawn the entry process。
+    // 现阶段：登录 shell 占位；真正的 entry 经 launch_entry_command →
+    // spawn_managed_process 全权管理（stdio 捕获 + 生命周期监控）
     info!("Entry launch requested: {}", req.entry_id);
-
-    let mut child = if let Some(user) = user_map() {
-        TokioCommand::new("su")
-            .args(["-", &user.name])
-            .spawn()
-            .context("Failed to spawn entry (su)")?
-    } else {
-        TokioCommand::new("/bin/sh")
-            .spawn()
-            .context("Failed to spawn entry")?
-    };
-
-    let pid = child.id().unwrap();
-
-    // Track child
-    {
-        let mut children = state.children.write().await;
-        children.insert(pid, ChildInfo {
-            pid,
-            kind: "entry".to_string(),
-            entry_id: Some(req.entry_id.clone()),
-        });
-    }
-
-    // Wait for child in background
-    let msg_id = state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64;
-    let entry_id = req.entry_id.clone();
-
-    // FIXME: tokio spawn 的返回值没有处理
-    tokio::spawn(async move {
-        match child.wait().await {
-            Ok(status) => {
-                info!("Entry process exited: pid={}, entry_id={}, status={}", pid, entry_id, status);
-                // TODO: Emit child.exited event
-            }
-            Err(e) => {
-                error!("Failed to wait for entry process: {}", e);
-            }
-        }
-    });
+    let pid =
+        spawn_managed_process(state, "/bin/sh -l", "entry", req.entry_id.clone(), Some(event_tx.clone()))
+            .await?;
 
     // Emit entry.started event
+    let msg_id = state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64;
     event_tx.send(Frame::Json(Message {
         id: msg_id,
         kind: MsgKind::Evt,
         op: "entry.started".to_string(),
-        payload: serde_json::json!({
-            "pid": pid,
-        }),
+        payload: json!({ "pid": pid }),
         err: None,
     }))?;
 
@@ -111,9 +74,12 @@ pub(crate) async fn perform_graceful_shutdown(state: Arc<ServerState>) -> Result
     // Give children time to exit gracefully
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Force kill remaining children
+    // Force kill remaining children（仅仍运行的；已退出条目留待 apps.ps 展示）
     let children = state.children.read().await;
     for (pid, child_info) in children.iter() {
+        if child_info.status != ProcessStatus::Running {
+            continue;
+        }
         info!("Killing child: pid={}, kind={}", pid, child_info.kind);
         if let Err(e) = TokioCommand::new("kill")
             .arg("-SIGKILL")

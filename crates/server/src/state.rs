@@ -60,14 +60,47 @@ pub(crate) type Subscribers = std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<e
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
 pub(crate) const RING_MAX: usize = 128 * 1024;
 
-/// Child process info
+/// 托管进程 stdio 捕获上限（64KB；超出丢最旧——调试/排障足够，防内存膨胀）
+pub(crate) const APP_LOG_MAX: usize = 64 * 1024;
+
+/// 托管进程状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProcessStatus {
+    /// 仍在运行
+    Running,
+    /// 已退出（退出码 + 退出时刻 unix millis）
+    Exited { code: i32, at: u64 },
+}
+
+impl ProcessStatus {
+    /// 退出码（Running = None）
+    pub(crate) fn exit_code(&self) -> Option<i32> {
+        match self {
+            ProcessStatus::Running => None,
+            ProcessStatus::Exited { code, .. } => Some(*code),
+        }
+    }
+}
+
+/// 托管进程信息（server 拉起并全权管理的应用：entry / passthrough）。
+///
+/// server 负责其生命周期：spawn 时捕获 stdio（stdout+stderr 合并进有界
+/// 环形缓冲）、后台 wait 记录退出状态；GUI 经 `apps.ps` / `apps.logs`
+/// / `apps.kill` 查询与管控。
 #[derive(Debug, Clone)]
 pub(crate) struct ChildInfo {
-    #[allow(dead_code)]
-    pub(crate) pid: u32,
+    /// 进程类型（"entry" / "passthrough"）
     pub(crate) kind: String,
-    #[allow(dead_code)]
-    pub(crate) entry_id: Option<String>,
+    /// 展示名（entry id 或应用名）
+    pub(crate) name: String,
+    /// 实际执行命令串
+    pub(crate) cmd: String,
+    /// 启动时刻（unix millis）
+    pub(crate) started_at: u64,
+    /// 运行状态（退出码经 wait 记录）
+    pub(crate) status: ProcessStatus,
+    /// 捕获的 stdio（stdout+stderr 合并，有界环形缓冲）
+    pub(crate) stdio: Arc<std::sync::Mutex<std::collections::VecDeque<u8>>>,
 }
 
 impl Clone for ServerState {
