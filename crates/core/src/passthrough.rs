@@ -14,10 +14,14 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use easytidy_protocol::ops::{AppsLaunch, AppsLaunchItem, AppsLaunchResp, AppsLaunchResult};
+use easytidy_protocol::ops::{
+    AppLogs, AppLogsResp, AppsLaunch, AppsLaunchItem, AppsLaunchResp, AppsLaunchResult, AppsPsResp,
+    ManagedProcess,
+};
 use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::{Frame, Handshake, Message, MsgKind, PROTOCOL_VERSION};
 use futures::{SinkExt, StreamExt};
+use serde_json::json;
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 
@@ -314,17 +318,10 @@ pub async fn autostart_apps(container: &str) {
     }
 }
 
-/// 经 server socket 拉起应用（apps.launch；server spawn 的子进程独立于
-/// 连接存活）。连接重试 2s 窗口容忍 server 就绪延迟；返回逐条结果
-/// （成功 pid / 失败 error）。
-pub async fn launch_apps(
-    container: &str,
-    apps: &[PassthroughApp],
-) -> Result<Vec<AppsLaunchResult>> {
-    if apps.is_empty() {
-        return Ok(Vec::new());
-    }
-
+/// 连接到容器 server 并完成 apps 握手（apps.launch/ps/logs 共用）。
+///
+/// 连接重试 2s 窗口容忍 server 就绪延迟。
+async fn connect_apps(container: &str) -> Result<Framed<UnixStream, FrameCodec>> {
     let socket_path = crate::host_socket_path(container)?;
 
     let mut framed: Option<Framed<UnixStream, FrameCodec>> = None;
@@ -362,6 +359,22 @@ pub async fn launch_apps(
         _ => return Err(Error::Connect("握手未确认".to_string())),
     }
 
+    Ok(framed)
+}
+
+/// 经 server socket 拉起应用（apps.launch；server spawn 的子进程独立于
+/// 连接存活）。连接重试 2s 窗口容忍 server 就绪延迟；返回逐条结果
+/// （成功 pid / 失败 error）。
+pub async fn launch_apps(
+    container: &str,
+    apps: &[PassthroughApp],
+) -> Result<Vec<AppsLaunchResult>> {
+    if apps.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut framed = connect_apps(container).await?;
+
     // apps.launch
     let launch = Frame::Json(Message {
         id: 2,
@@ -387,6 +400,49 @@ pub async fn launch_apps(
             .map(|r| r.results)
             .map_err(|e| Error::Connect(format!("解析 apps.launch 响应失败：{e}"))),
         _ => Err(Error::Connect("apps.launch 响应异常".to_string())),
+    }
+}
+
+/// 查询 server 托管的进程列表（apps.ps：含运行中与最近退出的，带退出码
+/// 与 stdio 长度）。用于拉起后检测即时退出（如命令不存在 → 127）。
+pub async fn list_managed_processes(container: &str) -> Result<Vec<ManagedProcess>> {
+    let mut framed = connect_apps(container).await?;
+    let ps = Frame::Json(Message {
+        id: 2,
+        kind: MsgKind::Req,
+        op: "apps.ps".to_string(),
+        payload: json!(null),
+        err: None,
+    });
+    if framed.send(ps).await.is_err() {
+        return Err(Error::Connect("发送 apps.ps 失败".to_string()));
+    }
+    match framed.next().await {
+        Some(Ok(Frame::Json(resp))) => serde_json::from_value::<AppsPsResp>(resp.payload)
+            .map(|r| r.processes)
+            .map_err(|e| Error::Connect(format!("解析 apps.ps 响应失败：{e}"))),
+        _ => Err(Error::Connect("apps.ps 响应异常".to_string())),
+    }
+}
+
+/// 获取某托管进程捕获的 stdio（apps.logs：stdout+stderr 合并的有界缓冲）。
+pub async fn fetch_process_logs(container: &str, pid: u32) -> Result<String> {
+    let mut framed = connect_apps(container).await?;
+    let logs = Frame::Json(Message {
+        id: 2,
+        kind: MsgKind::Req,
+        op: "apps.logs".to_string(),
+        payload: serde_json::to_value(AppLogs { pid }).unwrap_or_default(),
+        err: None,
+    });
+    if framed.send(logs).await.is_err() {
+        return Err(Error::Connect("发送 apps.logs 失败".to_string()));
+    }
+    match framed.next().await {
+        Some(Ok(Frame::Json(resp))) => serde_json::from_value::<AppLogsResp>(resp.payload)
+            .map(|r| r.stdio)
+            .map_err(|e| Error::Connect(format!("解析 apps.logs 响应失败：{e}"))),
+        _ => Err(Error::Connect("apps.logs 响应异常".to_string())),
     }
 }
 

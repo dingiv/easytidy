@@ -243,12 +243,54 @@ pub async fn passthrough_launch(
         Some(r) => match r.pid {
             Some(pid) => {
                 info!("收藏应用已拉起：{id} (pid={pid})");
+                // 拉起后检测即时退出：命令不存在（127）等情况下 spawn 成功但
+                // 马上退出，「启动成功」是误导——轮询 server apps.ps，退出码
+                // 非 0 时返回错误 + 捕获的 stdio（server 已捕获 stdout/stderr）
+                detect_early_exit(container, pid).await?;
                 Ok(pid)
             }
             None => Err(r.error.clone().unwrap_or_else(|| "拉起失败".to_string())),
         },
         None => Err("server 无响应".to_string()),
     }
+}
+
+/// 拉起后短暂轮询 server 进程表，检测命令是否立即退出（非 0 码）。
+///
+/// 命令不存在（如 google-chrome-stable 未安装）时 spawn 成功但 `su -c` 立即
+/// 127 退出——若只返回 pid，前端显示「启动成功」而用户看不到窗口。此处轮询
+/// `apps.ps`（server 已记录退出码），非 0 即拉 `apps.logs` 的 stdio 一并返回，
+/// 让「启动成功」变成诚实的「启动失败：命令不存在」。
+async fn detect_early_exit(container: &str, pid: u32) -> Result<(), String> {
+    // 给命令失败留出时间（su -c 找不到命令 → 立即 127）
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    for _ in 0..3 {
+        let procs = easytidy_core::passthrough::list_managed_processes(container)
+            .await
+            .map_err(|e| e.to_string())?;
+        match procs.iter().find(|p| p.pid == pid) {
+            // 仍在运行或正常退出（0）→ 视为启动成功
+            Some(p) if p.status == "running" => return Ok(()),
+            Some(p) if p.status == "exited" && p.exit_code == Some(0) => return Ok(()),
+            Some(p) => {
+                // 退出码非 0 → 拉捕获的 stdio 展示原因
+                let logs = easytidy_core::passthrough::fetch_process_logs(container, pid)
+                    .await
+                    .unwrap_or_default();
+                let code = p.exit_code.unwrap_or(-1);
+                let detail = logs.trim();
+                return Err(if detail.is_empty() {
+                    format!("应用启动后立即退出（退出码 {code}）")
+                } else {
+                    format!("应用启动后立即退出（退出码 {code}）：{detail}")
+                });
+            }
+            // 进程已从注册表消失（退出后待 prune）——等一轮再查
+            None => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+        }
+    }
+    // 三轮未发现明确失败，视为启动成功（避免误报长启动应用）
+    Ok(())
 }
 
 /// passthrough 配置文件（默认路径）
