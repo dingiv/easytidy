@@ -418,9 +418,17 @@ pub async fn list_managed_processes(container: &str) -> Result<Vec<ManagedProces
         return Err(Error::Connect("发送 apps.ps 失败".to_string()));
     }
     match framed.next().await {
-        Some(Ok(Frame::Json(resp))) => serde_json::from_value::<AppsPsResp>(resp.payload)
-            .map(|r| r.processes)
-            .map_err(|e| Error::Connect(format!("解析 apps.ps 响应失败：{e}"))),
+        Some(Ok(Frame::Json(resp))) => {
+            if let Some(err) = resp.err {
+                return Err(Error::Connect(format!(
+                    "apps.ps 失败：{} {}",
+                    err.code, err.message
+                )));
+            }
+            serde_json::from_value::<AppsPsResp>(resp.payload)
+                .map(|r| r.processes)
+                .map_err(|e| Error::Connect(format!("解析 apps.ps 响应失败：{e}")))
+        }
         _ => Err(Error::Connect("apps.ps 响应异常".to_string())),
     }
 }
@@ -439,9 +447,17 @@ pub async fn fetch_process_logs(container: &str, pid: u32) -> Result<String> {
         return Err(Error::Connect("发送 apps.logs 失败".to_string()));
     }
     match framed.next().await {
-        Some(Ok(Frame::Json(resp))) => serde_json::from_value::<AppLogsResp>(resp.payload)
-            .map(|r| r.stdio)
-            .map_err(|e| Error::Connect(format!("解析 apps.logs 响应失败：{e}"))),
+        Some(Ok(Frame::Json(resp))) => {
+            if let Some(err) = resp.err {
+                return Err(Error::Connect(format!(
+                    "apps.logs 失败：{} {}",
+                    err.code, err.message
+                )));
+            }
+            serde_json::from_value::<AppLogsResp>(resp.payload)
+                .map(|r| r.stdio)
+                .map_err(|e| Error::Connect(format!("解析 apps.logs 响应失败：{e}")))
+        }
         _ => Err(Error::Connect("apps.logs 响应异常".to_string())),
     }
 }

@@ -261,13 +261,22 @@ pub async fn passthrough_launch(
 /// 127 退出——若只返回 pid，前端显示「启动成功」而用户看不到窗口。此处轮询
 /// `apps.ps`（server 已记录退出码），非 0 即拉 `apps.logs` 的 stdio 一并返回，
 /// 让「启动成功」变成诚实的「启动失败：命令不存在」。
+///
+/// **best-effort**：检测本身不能阻塞拉起——`apps.ps` 不可用（server 二进制
+/// 过旧未含该 op / 容器 server 未就绪）时跳过检测，视为启动成功，绝不让
+/// 探测失败反过来破坏一次本来成功的拉起。
 async fn detect_early_exit(container: &str, pid: u32) -> Result<(), String> {
     // 给命令失败留出时间（su -c 找不到命令 → 立即 127）
     tokio::time::sleep(std::time::Duration::from_millis(700)).await;
     for _ in 0..3 {
-        let procs = easytidy_core::passthrough::list_managed_processes(container)
-            .await
-            .map_err(|e| e.to_string())?;
+        // server 过旧（无 apps.ps）/未就绪时无法核实 → 优雅降级，不阻断拉起
+        let procs = match easytidy_core::passthrough::list_managed_processes(container).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("apps.ps 查询失败（server 可能过旧/未就绪），跳过即时退出检测：{e}");
+                return Ok(());
+            }
+        };
         match procs.iter().find(|p| p.pid == pid) {
             // 仍在运行或正常退出（0）→ 视为启动成功
             Some(p) if p.status == "running" => return Ok(()),
