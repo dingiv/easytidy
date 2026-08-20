@@ -1,0 +1,13 @@
+/* 模板面板（FlavorsPanel）——布局补丁。
+   flavor-list/item/title/.../form-row/panel-hint 等已在 styles.css 全局定义，
+   此处仅补本面板独有的 loading 区与标题间距。 */
+
+.flavors-loading {
+  display: flex;
+  justify-content: center;
+  padding: 48px 0;
+}
+
+.panel-title {
+  margin: 0 !important;
+}
