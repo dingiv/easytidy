@@ -1,7 +1,7 @@
 //! GUI 进程锁（防多实例）。
 //!
-//! - 主 GUI（中心化模式）：`$XDG_RUNTIME_DIR/easytidy/gui.lock`
-//! - 每个容器的 per-container GUI：`$XDG_RUNTIME_DIR/easytidy/gui-<name>.lock`
+//! - Master GUI：`$XDG_RUNTIME_DIR/easytidy/gui.lock`
+//! - 每容器的 Worker GUI：`$XDG_RUNTIME_DIR/easytidy/gui-<name>.lock`
 //!
 //! XDG_RUNTIME_DIR 即 `/run/user/<uid>`（系统保证归当前用户、0700、登录清空
 //! 语义）——直接写 `/run` 无权限，`/run/user/<uid>` 是规范位置，且与
@@ -29,8 +29,8 @@ pub struct LockGuard {
 
 /// 获取 GUI 进程锁。
 ///
-/// - `container: None` → 主 GUI（中心化模式），单实例
-/// - `container: Some(name)` → 该容器的 per-container GUI，每容器单实例
+/// - `container: None` → Master GUI，单实例
+/// - `container: Some(name)` → 该容器的 Worker GUI，每容器单实例
 ///
 /// 已有实例持有锁时返回 Err（调用方提示后退出）。
 pub fn acquire(container: Option<&str>) -> Result<LockGuard> {
@@ -64,7 +64,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", temp.path());
 
-        // 主 GUI 锁：第二次获取失败（flock 同文件两个 OFD 互斥）
+        // Master GUI 锁：第二次获取失败（flock 同文件两个 OFD 互斥）
         let l1 = acquire(None).expect("首次获取主锁应成功");
         assert!(acquire(None).is_err(), "重复获取主锁应失败");
         drop(l1);

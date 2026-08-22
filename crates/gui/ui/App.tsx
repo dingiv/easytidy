@@ -1,6 +1,6 @@
 import { App as AntApp } from 'antd';
-import { Centralized } from './components/Centralized';
-import { PerContainer } from './components/PerContainer';
+import { MasterView } from './components/MasterView';
+import { WorkerView } from './components/WorkerView';
 import { useAppMode } from './hooks/useAppMode';
 
 function App() {
@@ -37,8 +37,8 @@ function AppInner({ mode, error }: { mode: any; error: string | null }) {
     );
   }
 
-  // Centralized mode
-  if ('Centralized' in mode) {
+  // Master mode
+  if ('Master' in mode) {
     return (
       <div className="app">
         <header className="menu-bar">
@@ -50,16 +50,16 @@ function AppInner({ mode, error }: { mode: any; error: string | null }) {
             <button className="menu-item">Help</button>
           </nav>
         </header>
-        <main className="main-content centralized-main">
-          <Centralized />
+        <main className="main-content master-main">
+          <MasterView />
         </main>
       </div>
     );
   }
 
-  // Per-container mode
-  if ('PerContainer' in mode) {
-    return <PerContainer containerName={mode.PerContainer.name} />;
+  // Worker mode
+  if ('Worker' in mode) {
+    return <WorkerView containerName={mode.Worker.name} />;
   }
 
   return (

@@ -127,7 +127,7 @@ pub async fn passthrough_state(
 ///
 /// - `"off"`：关闭（卸载 unit + disable）
 /// - `"silent"`：静默（登录后仅后台启动容器）
-/// - `"gui"`：非静默（登录后启动容器 + 拉起 per-container GUI 窗口）
+/// - `"gui"`：非静默（登录后启动容器 + 拉起 Worker GUI 窗口）
 ///
 /// 对应 systemd user unit `easytidy-<name>.service`（WantedBy=default.target）；
 /// ExecStart = `<cli> boot --container <name> [--gui]`，cli 取 passthrough
@@ -600,7 +600,7 @@ pub async fn passthrough_revoke(
 
 /// 导出本容器的 GUI 管理界面桌面快捷方式（菜单 + 桌面图标）。
 ///
-/// Exec = 当前 GUI 二进制 --container <name>（per-container 模式），
+/// Exec = 当前 GUI 二进制 --container <name>（Worker GUI 模式），
 /// TryExec 同；内置品牌 SVG 图标；桌面副本 chmod +x + gio trusted。
 /// 返回应用菜单路径。
 #[tauri::command]
@@ -613,7 +613,7 @@ pub async fn export_gui_shortcut(
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    // 当前进程即 GUI 二进制（per-container 模式入口）；current_exe 失败
+    // 当前进程即 GUI 二进制（Worker GUI 模式入口）；current_exe 失败
     // 回退命令行 argv[0]，再不行报错（Exec 必须绝对路径）
     let gui_path = std::env::current_exe()
         .ok()

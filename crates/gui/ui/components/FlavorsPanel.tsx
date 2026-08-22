@@ -6,7 +6,7 @@
 //
 // 与容器管理分离：模板是配置的批量管理层（存意图），容器是实例（存
 // 快照）。「启动」把模板预填进创建表单——经 onLaunch 回调切到容器 tab
-// 并打开页内创建表单（Centralized 持有 createRequest 触发器）。
+// 并打开页内创建表单（MasterView 持有 createRequest 触发器）。
 //
 // 血缘：派生计数 + 「同步派生」批量重展开（config ← flavor）。
 

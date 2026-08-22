@@ -1,13 +1,13 @@
 /// Application mode types
-export interface AppModeCentralized {
-  Centralized: null;
+export interface AppModeMaster {
+  Master: null;
 }
 
-export interface AppModePerContainer {
-  PerContainer: { name: string };
+export interface AppModeWorker {
+  Worker: { name: string };
 }
 
-export type AppMode = AppModeCentralized | AppModePerContainer;
+export type AppMode = AppModeMaster | AppModeWorker;
 
 /// Container summary from list_containers
 export interface ContainerSummary {

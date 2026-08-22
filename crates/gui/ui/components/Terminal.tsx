@@ -1,6 +1,6 @@
 // 终端组件：xterm + server PTY 流。
 //
-// 多终端（2026-08-08）：每条会话一条专用连接，面板由 PerContainer 常驻渲染
+// 多终端（2026-08-08）：每条会话一条专用连接，面板由 WorkerView 常驻渲染
 // （display 切换，切 tab 不销毁）。会话生命周期由 server 持有：
 // - 新开：pty_open{persistent} → 独立持久会话（不随连接断开清理）
 // - 重开窗口/重挂载：pty_open{attach_stream} → server 清屏 + 环形缓冲回放

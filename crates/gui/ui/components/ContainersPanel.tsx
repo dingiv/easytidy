@@ -3,7 +3,7 @@
 // 与模板分离：容器是实例（存快照），模板是配置的批量管理层（存意图，
 // 见 FlavorsPanel）。创建走页内 ContainerCreateForm（与单实例 GUI 配置
 // 管理同一套 ContainerConfig 编辑器）；模板「启动」经 createRequest
-// 触发器从外部打开本面板的创建表单并预选模板（Centralized 持有该状态）。
+// 触发器从外部打开本面板的创建表单并预选模板（MasterView 持有该状态）。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -57,7 +57,7 @@ interface ContainersPanelProps {
   /** 外部请求打开创建表单（模板「启动」预选；名称就绪后自动展开）。
    *  每次触发用新 token，确保连续多次「启动」同一模板也能打开表单 */
   createRequest?: { flavor?: string; token: number } | null;
-  /** 创建表单打开/关闭时同步外部状态（Centralized 清除触发器） */
+  /** 创建表单打开/关闭时同步外部状态（MasterView 清除触发器） */
   onCreateRequestConsumed?: () => void;
 }
 

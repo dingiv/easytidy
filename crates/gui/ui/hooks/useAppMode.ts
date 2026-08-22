@@ -10,10 +10,10 @@ export function useAppMode() {
   useEffect(() => {
     invoke<{ mode: string; name?: string }>('get_app_mode')
       .then((result) => {
-        if (result.mode === 'centralized') {
-          setMode({ Centralized: null });
-        } else if (result.mode === 'per_container') {
-          setMode({ PerContainer: { name: result.name ?? '' } });
+        if (result.mode === 'master') {
+          setMode({ Master: null });
+        } else if (result.mode === 'worker') {
+          setMode({ Worker: { name: result.name ?? '' } });
         } else {
           setError(`未知应用模式：${result.mode}`);
         }

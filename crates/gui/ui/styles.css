@@ -90,7 +90,7 @@ body {
   overflow: hidden;
 }
 
-.centralized-main {
+.master-main {
   display: block;
   overflow: auto;
   padding: 1rem;
@@ -592,21 +592,21 @@ button:disabled {
   border-radius: 4px;
 }
 
-/* Centralized mode */
-.centralized {
+/* Master mode */
+.master-view {
   height: 100%;
   display: flex;
   flex-direction: column;
 }
 
-.centralized-header {
+.master-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 1rem;
 }
 
-.centralized-header h2 {
+.master-header h2 {
   margin: 0;
 }
 

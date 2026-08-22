@@ -51,7 +51,8 @@ GUI 等价操作：环境卡片上的 新建 / 删除（确认框）/ 快照 / f
 
 ### 运行/关闭
 - start/stop 与 create/rm 完全分离：环境可长期停止、随时恢复
-- stop 走优雅关闭链（podman stop → SIGTERM → server 收尾 → catatonit 退出）
+- stop 走优雅关闭链（podman stop → SIGTERM → server 收尾 → server 退出 → conmon 退出 →容器停止）
+  （v0.6 起 server = PID 1，不再经 catatonit 转发；catatonit 仅在兼容分支下保留）
 
 ## 4. 与 Docker 心智的对比
 

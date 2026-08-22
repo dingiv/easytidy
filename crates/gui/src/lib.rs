@@ -14,7 +14,7 @@ pub use state::AppMode;
 
 /// Tauri 启动入口。
 ///
-/// `mode`:中心化(容器管理)或单容器(per-container 窗口,`--container <name>`)。
+/// `mode`:Master(总控)或 Worker(单容器窗口,`--container <name>`)。
 pub fn run(mode: AppMode, _config_file: Option<String>) {
     // 第一步：应用 NVIDIA 规避措施（在 Tauri 初始化之前）
     commands::common::apply_nvidia_workaround();
@@ -48,7 +48,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
     // 第二步：启动 Tauri 应用
     // 根据模式决定是否初始化 GuiSession
     let gui_session = match &mode {
-        AppMode::Container { name } => Some(state::GuiSession {
+        AppMode::Worker { name } => Some(state::GuiSession {
             container_name: name.clone(),
             socket: tokio::sync::Mutex::new(None),
             next_msg_id: AtomicU64::new(2), // 握手已用 1
@@ -56,7 +56,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             active_execs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             next_exec_id: AtomicU32::new(state::EXEC_STREAM_ID_BASE),
         }),
-        AppMode::Centralized => None,
+        AppMode::Master => None,
     };
 
     tauri::Builder::default()
@@ -68,7 +68,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             // 通用
             commands::common::toggle_devtools,
             commands::common::get_app_mode,
-            // 中心化模式
+            // Master GUI（容器管理 + 模板 + 镜像 + 配置）
             commands::containers::list_containers,
             commands::containers::flavor_expand,
             commands::containers::start_container,

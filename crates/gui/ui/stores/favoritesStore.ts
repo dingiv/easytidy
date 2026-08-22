@@ -1,7 +1,7 @@
 // 收藏（pin 到工具栏）状态（zustand）。
 //
 // 数据源：passthrough_state.pinned（PassthroughManager 加载后同步）；
-// PerContainer 工具栏订阅展示——pin/unpin 在两处即时反映，不做模块级全局变量。
+// WorkerView 工具栏订阅展示——pin/unpin 在两处即时反映，不做模块级全局变量。
 
 import { create } from 'zustand';
 import type { PinnedApp } from '../types';

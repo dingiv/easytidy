@@ -1,4 +1,4 @@
-// per-container 窗口：浏览器式多面板（open + close + multi-panel）。
+// Worker GUI 窗口：单容器浏览器式多面板（open + close + multi-panel）。
 //
 // - 头部工具栏：方形图标按钮打开面板——Terminal（下拉选身份 node/root）、
 //   Passthrough、Config；Close Container（圆角方形图标，唯一保留的容器操作）
@@ -33,7 +33,7 @@ import { ImageViewer } from './ImageViewer';
 import { PassthroughManager } from './PassthroughManager';
 import { ConfigManager } from './ConfigManager';
 
-interface PerContainerProps {
+interface WorkerViewProps {
   containerName: string;
 }
 
@@ -58,7 +58,7 @@ function terminalTitle(t: TerminalInfo): string {
   return cmd.length > 24 ? `${cmd.slice(0, 24)}…` : cmd;
 }
 
-function PerContainerInner({ containerName }: PerContainerProps) {
+function WorkerViewInner({ containerName }: WorkerViewProps) {
   const { message } = AntApp.useApp();
   // 收藏（pin 到工具栏）：PassthroughManager 经 store 同步；此处订阅展示
   const pinnedApps = useFavoritesStore((s) => s.pinned);
@@ -332,7 +332,7 @@ function PerContainerInner({ containerName }: PerContainerProps) {
   };
 
   return (
-    <div className="per-container app">
+    <div className="worker-view app">
       {/* 左右布局：左 = 标题 + 文件浏览器；右 = 工具栏 + 标签栏 + 面板 */}
       <div className="per-layout">
         {/* 左列：标题 + 文件浏览器；右边界可拖拽调宽（折叠按钮在工具栏第一个） */}
@@ -509,10 +509,10 @@ function PerContainerInner({ containerName }: PerContainerProps) {
 }
 
 /** antd App 包裹：让子组件（FileBrowser 等）的 message/notification 可用 */
-export function PerContainer(props: PerContainerProps) {
+export function WorkerView(props: WorkerViewProps) {
   return (
     <AntApp>
-      <PerContainerInner {...props} />
+      <WorkerViewInner {...props} />
     </AntApp>
   );
 }

@@ -7,7 +7,7 @@ use std::env;
 fn main() {
     // 在 Tauri 初始化之前解析命令行参数
     let args: Vec<String> = env::args().collect();
-    let mut mode = AppMode::Centralized;
+    let mut mode = AppMode::Master;
     let mut config_file: Option<String> = None;
 
     let mut i = 1;
@@ -15,7 +15,7 @@ fn main() {
         match args[i].as_str() {
             "--container" => {
                 if i + 1 < args.len() {
-                    mode = AppMode::Container {
+                    mode = AppMode::Worker {
                         name: args[i + 1].clone(),
                     };
                     i += 2;
@@ -41,13 +41,13 @@ fn main() {
     }
 
     // 进程锁（$XDG_RUNTIME_DIR/easytidy/ 下 flock）：
-    // - 主 GUI（中心化模式）：gui.lock，单实例
-    // - per-container GUI：gui-<name>.lock，每容器实例单实例
+    // - Master GUI：gui.lock，单实例
+    // - Worker GUI：gui-<name>.lock，每容器实例单实例
     // 锁由进程持有 fd，退出/崩溃自动释放；已存在实例时直接退出。
     let _lock = {
         let container = match &mode {
-            AppMode::Container { name } => Some(name.as_str()),
-            AppMode::Centralized => None,
+            AppMode::Worker { name } => Some(name.as_str()),
+            AppMode::Master => None,
         };
         match easytidy_core::guilock::acquire(container) {
             Ok(lock) => lock,

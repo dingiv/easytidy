@@ -1,7 +1,7 @@
 //! GUI 托管状态（Tauri State 类型）。
 //!
 //! - AppMode（启动时解析的命令行参数）
-//! - PodmanState（中心化模式,延迟连接）
+//! - PodmanState（Master GUI 模式,延迟连接）
 //! - GuiSession（单容器模式,socket 会话）
 //! - PtyEvent 等命令返回类型
 
@@ -21,10 +21,10 @@ use easytidy_protocol::{Frame, FrameCodec};
 /// GUI 应用模式（main.rs 传入）
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
-    /// 中心化管理模式（管理所有容器）
-    Centralized,
-    /// 单容器管理模式
-    Container { name: String },
+    /// Master GUI：管理所有容器（中心化管理界面）
+    Master,
+    /// Worker GUI：单容器窗口（从前称 per-container / 单实例 GUI）
+    Worker { name: String },
 }
 
 /// 单条 PTY 会话的写侧（该 PTY 专用连接的 sink）
@@ -109,7 +109,7 @@ impl PodmanState {
     }
 }
 
-/// 前端按 result.mode 判断："centralized" | "per_container"。
+/// 前端按 result.mode 判断："master" | "worker"。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppModeResponse {
     pub mode: String,

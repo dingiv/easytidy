@@ -23,7 +23,7 @@ interface FileBrowserProps {
   onOpenFile?: (path: string) => void;
   /** 右键"预览图片"回调（图片预览面板） */
   onPreviewImage?: (path: string) => void;
-  /** 跟随终端开关（PerContainer 订阅 cwd 事件后导航） */
+  /** 跟随终端开关（WorkerView 订阅 cwd 事件后导航） */
   followTerminal?: boolean;
   onToggleFollow?: () => void;
 }

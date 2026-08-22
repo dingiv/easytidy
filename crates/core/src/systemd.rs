@@ -3,7 +3,7 @@
 //! 登录时自启动（WantedBy=default.target）：
 //! - 静默启动：`ExecStart = <cli> boot --container <name>`——仅后台启动容器
 //! - 非静默启动：`ExecStart = <cli> boot --container <name> --gui`——
-//!   启动容器后拉起 per-container GUI 窗口
+//!   启动容器后拉起 Worker GUI 窗口
 //! - 关闭：卸载 unit 并 disable
 //!
 //! unit 文件在 `~/.config/systemd/user/easytidy-<name>.service`
@@ -38,7 +38,7 @@ WantedBy=default.target
 /// 生成容器自启动 unit 内容。
 ///
 /// - `cli_path`：easytidy CLI 绝对路径（systemd 用户单元 PATH 受限，必须绝对）
-/// - `gui`：true = 非静默（启动容器后拉起 per-container GUI）
+/// - `gui`：true = 非静默（启动容器后拉起 Worker GUI）
 pub fn generate_boot_unit(name: &str, cli_path: &str, gui: bool) -> String {
     let gui_flag = if gui { " --gui" } else { "" };
     SYSTEMD_UNIT_TEMPLATE

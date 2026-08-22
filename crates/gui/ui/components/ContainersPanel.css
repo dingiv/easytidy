@@ -1,21 +1,21 @@
 /* 环境语义面板（docs/13-mutable-env-paradigm.md） */
 
-/* Tabs 占满剩余高度，内容区滚动（Centralized 容器 | 环境 双页签） */
-.centralized-tabs {
+/* Tabs 占满剩余高度，内容区滚动（MasterView 容器 | 模板 | 镜像 三页签） */
+.master-tabs {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
 }
 
-.centralized-tabs .ant-tabs-content-holder {
+.master-tabs .ant-tabs-content-holder {
   flex: 1;
   min-height: 0;
   overflow: auto;
 }
 
-.centralized-tabs .ant-tabs-content,
-.centralized-tabs .ant-tabs-tabpane {
+.master-tabs .ant-tabs-content,
+.master-tabs .ant-tabs-tabpane {
   height: 100%;
 }
 

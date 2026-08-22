@@ -247,12 +247,12 @@ pub fn ensure_gui_icon() -> Option<String> {
 }
 
 /// 导出本容器的 GUI 管理界面桌面快捷方式（distrobox "进入容器"入口的
-/// easytidy 变体：Exec 打开 per-container 管理窗口）。
+/// easytidy 变体：Exec 打开 Worker 管理窗口）。
 ///
 /// - 应用菜单：~/.local/share/applications/easytidy-gui-<container>.desktop
 /// - 桌面图标：桌面路径同名文件 + chmod +x + `gio metadata::trusted`
 ///   （GNOME 双击必需；`desktop_icon=true` 且桌面目录存在时）
-/// - `gui_path`：per-container 模式启动的 GUI 二进制绝对路径（Exec/TryExec）
+/// - `gui_path`：Worker 模式启动的 GUI 二进制绝对路径（Exec/TryExec）
 ///
 /// 返回应用菜单路径。
 pub fn write_gui_entry(container: &str, gui_path: &str, desktop_icon: bool) -> Result<PathBuf> {

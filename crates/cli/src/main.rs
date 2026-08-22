@@ -158,7 +158,7 @@ enum Commands {
         /// 容器名
         #[arg(long)]
         container: String,
-        /// 非静默模式：容器启动后拉起 per-container GUI 窗口
+        /// 非静默模式：容器启动后拉起 Worker GUI 窗口
         #[arg(long)]
         gui: bool,
     },
@@ -431,7 +431,7 @@ async fn cmd_start(podman: Podman, container: String) -> Result<()> {
 /// 自启动入口（systemd user unit 登录时触发）。
 ///
 /// - 容器未运行 → 启动（`Podman::start` 顺带触发 passthrough auto-start 拉起）
-/// - `gui=true`（非静默模式）→ 等待 server socket 就绪后拉起 per-container GUI
+/// - `gui=true`（非静默模式）→ 等待 server socket 就绪后拉起 Worker GUI
 async fn cmd_boot(container: String, gui: bool) -> Result<()> {
     let podman = Podman::connect().await?;
     let containers = podman.list_containers().await?;
@@ -460,20 +460,20 @@ async fn cmd_boot(container: String, gui: bool) -> Result<()> {
         if !ready {
             bail!("等待容器 server 就绪超时（{}）", socket.display());
         }
-        // 拉起 per-container GUI（CLI 同目录 / 安装目录 / PATH 探测）
+        // 拉起 Worker GUI（CLI 同目录 / 安装目录 / PATH 探测）
         let gui_bin = gui_binary_path()
             .ok_or_else(|| anyhow::anyhow!("找不到 easytidy-gui 可执行文件"))?;
         std::process::Command::new(&gui_bin)
             .arg("--container")
             .arg(&container)
             .spawn()
-            .map_err(|e| anyhow::anyhow!("拉起 per-container GUI 失败：{e}"))?;
-        info!("非静默启动：已拉起 per-container GUI（{}）", gui_bin.display());
+            .map_err(|e| anyhow::anyhow!("拉起 Worker GUI 失败：{e}"))?;
+        info!("非静默启动：已拉起 Worker GUI（{}）", gui_bin.display());
     }
     Ok(())
 }
 
-/// 探测 per-container GUI 二进制（① CLI 同目录 ② 安装目录 ③ PATH）。
+/// 探测 Worker GUI 二进制（① CLI 同目录 ② 安装目录 ③ PATH）。
 fn gui_binary_path() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {

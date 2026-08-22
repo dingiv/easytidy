@@ -1,7 +1,7 @@
 //! GUI Tauri 命令模块。
 //!
 //! - common:通用(NVIDIA 规避/devtools/应用模式)
-//! - containers:中心化容器生命周期 + env 语义 + flavor
+//! - containers: Master GUI 容器生命周期 + env 语义 + flavor
 //! - config:配置管理器(读取/应用)
 //! - socket:容器 server socket 连接与请求
 //! - pty:终端(attach 常驻会话)

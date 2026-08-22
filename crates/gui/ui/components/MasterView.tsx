@@ -1,4 +1,4 @@
-// 主 GUI（中心化模式）：容器管理 + 模板 + 镜像管理，三 tab。
+// Master GUI 总控：容器管理 + 模板 + 镜像管理，三 tab。
 //
 // 容器与模板分离：容器是实例（存快照，ContainersPanel），模板是配置的
 // 批量管理层（存意图，FlavorsPanel）。唯一耦合点是模板「启动」—— 经
@@ -11,7 +11,7 @@ import { ContainersPanel } from './ContainersPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { ImagesPanel } from './ImagesPanel';
 
-export function Centralized() {
+export function MasterView() {
   const [activeKey, setActiveKey] = useState('containers');
   // 模板「启动」→ 容器 tab 的创建表单触发器（token 保证连续多次启动都能触发）
   const [createRequest, setCreateRequest] = useState<{
@@ -26,9 +26,9 @@ export function Centralized() {
   }, []);
 
   return (
-    <div className="centralized">
+    <div className="master-view">
       <Tabs
-        className="centralized-tabs"
+        className="master-tabs"
         activeKey={activeKey}
         onChange={setActiveKey}
         items={[

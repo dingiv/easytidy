@@ -1,4 +1,4 @@
-//! 中心化模式命令：容器生命周期 + 环境（env）语义 + flavor。
+//! Master GUI 命令：容器生命周期 + 环境（env）语义 + flavor。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -14,7 +14,7 @@ use crate::state::{GuiSession, PodmanState};
 use easytidy_protocol::ops::LifecycleShutdown;
 
 // ============================================================================
-// 中心化模式命令（容器生命周期管理）
+// Master GUI 命令（容器生命周期管理）
 // ============================================================================
 
 /// 容器生命周期命令的统一错误出口：完整信息返回前端（UI Modal 展示）
@@ -504,12 +504,12 @@ pub async fn build_server() -> Result<String, String> {
     Ok("构建成功".to_string())
 }
 
-/// 打开容器专属窗口（从中心化 GUI 双击容器）
+/// 打开容器专属窗口（从 Master GUI 双击容器）
 #[tauri::command]
 pub fn open_container_window(name: String) -> Result<(), String> {
     use std::process::Command;
 
-    // 用当前可执行文件自身启动 per-container 实例（dev/prod 通用，不依赖 PATH）
+    // 用当前可执行文件自身启动 Worker 实例（dev/prod 通用，不依赖 PATH）
     let exe = std::env::current_exe().map_err(|e| format!("解析当前可执行文件失败：{}", e))?;
     let _child = Command::new(exe)
         .arg("--container")

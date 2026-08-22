@@ -73,16 +73,16 @@ pub fn toggle_devtools(webview: tauri::WebviewWindow) {
 }
 
 /// 应用模式响应（结构体，避开 serde 单元变体→裸字符串的歧义）。
-/// 前端按 result.mode 判断："centralized" | "per_container"。
+/// 前端按 result.mode 判断："master" | "worker"。
 #[tauri::command]
 pub fn get_app_mode(mode: tauri::State<'_, AppMode>) -> Result<AppModeResponse, String> {
     Ok(match mode.inner() {
-        AppMode::Centralized => AppModeResponse {
-            mode: "centralized".to_string(),
+        AppMode::Master => AppModeResponse {
+            mode: "master".to_string(),
             name: None,
         },
-        AppMode::Container { name } => AppModeResponse {
-            mode: "per_container".to_string(),
+        AppMode::Worker { name } => AppModeResponse {
+            mode: "worker".to_string(),
             name: Some(name.clone()),
         },
     })
