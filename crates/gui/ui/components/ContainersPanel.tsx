@@ -246,7 +246,7 @@ function ContainersPanelInner(
       ) : envs.length === 0 ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description="暂无容器,点击左侧「新建容器」或先到「模板」面板按模板快速启动"
+          description="暂无容器,点击左侧「配置编辑器」或先到「模板」面板按模板快速启动"
         />
       ) : (
         <div className="env-list">

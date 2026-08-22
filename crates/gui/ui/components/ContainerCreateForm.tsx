@@ -1,24 +1,24 @@
-// 新建容器页内表单 —— 主 GUI 两个入口（容器 tab / 环境 tab）共用。
+// 新建容器页内表单 —— Master GUI「新建容器」图标入口的主面板。
 //
-// 页内呈现（用户偏好，替代模态）：创建方式（flavor 模板展开 / 镜像默认值）
-// + 统一编辑器（ContainerConfigEditor，与单实例 GUI 配置管理同一套表单）
-// + 提交栏。提交走 env_new(config)（统一创建入口）。
+// 单一职责:输入容器名 + 选 flavor(可选)+ 填剩余字段 → 提交 env_new。
+// 镜像字段就是 ContainerConfigEditor "容器" section 里的镜像输入框。
 //
-// flavor 展开在宿主侧执行（GUI 透传注入宿主 DISPLAY/探测字体目录），
-// 预填表单后任何字段可继续改——模板只是预填。
+// flavor 处理逻辑:
+// - 挂载时拉一次 flavor_list;有 flavor 时在表单顶部显示 Select(默认禁用,
+//   等用户先输入名称后启用)用于把模板声明预填进表单
+// - 没 flavor 时直接用空白表单,等同于旧的"image"模式(用户填镜像即可)
+// - 选了 flavor 后任何字段都可继续改——flavor 仅作预填,不是约束
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { App as AntApp, Alert, Button, Radio, Select, Typography } from 'antd';
+import { App as AntApp, Alert, Button, Select, Typography } from 'antd';
 import { PlayCircleOutlined } from '@ant-design/icons';
 import type { ContainerConfig } from '../types';
 import { BLANK_CONTAINER_CONFIG, ContainerConfigEditor } from './config/ContainerConfigEditor';
 import './ContainerCreateForm.css';
 
 interface ContainerCreateFormProps {
-  /** 放弃创建，返回列表 */
-  onCancel(): void;
   /** 创建成功后回调（刷新列表并退出表单） */
   onCreated(): void;
   /** 预选模板（flavor 卡片「启动」进入）：名称就绪后自动展开预填 */
@@ -28,7 +28,6 @@ interface ContainerCreateFormProps {
 function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateFormProps) {
   const { message, modal } = AntApp.useApp();
 
-  const [mode, setMode] = useState<'flavor' | 'image'>('flavor');
   const [flavors, setFlavors] = useState<string[]>([]);
   const [selectedFlavor, setSelectedFlavor] = useState<string | undefined>(initialFlavor);
   const [config, setConfig] = useState<ContainerConfig>(BLANK_CONTAINER_CONFIG);
@@ -36,17 +35,13 @@ function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateF
   // 预选模板的自动展开只做一次（名称就绪后）；此后切换/手选均为手动
   const [autoExpanded, setAutoExpanded] = useState(false);
 
-  // 可用 flavor 模板（挂载即取；无模板时回退镜像方式）
+  // 可用 flavor 模板（挂载即取；空数组表示"无模板,直接走镜像方式"）
   useEffect(() => {
     invoke<string[]>('flavor_list')
-      .then((list) => {
-        setFlavors(list);
-        if (list.length === 0) setMode('image');
-      })
+      .then(setFlavors)
       .catch((err) => {
         console.error('flavor_list failed:', err);
         setFlavors([]);
-        setMode('image');
       });
   }, []);
 
@@ -63,6 +58,16 @@ function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateF
     }
   };
 
+  /** 切换 flavor 选中 → 清掉模板预填,保留已输入名称 + 镜像 */
+  const handleFlavorClear = () => {
+    setSelectedFlavor(undefined);
+    setConfig((prev) => ({
+      ...BLANK_CONTAINER_CONFIG,
+      name: prev.name,
+      image: prev.image,
+    }));
+  };
+
   const handleCreate = async () => {
     const name = config.name.trim();
     if (!name) {
@@ -70,7 +75,7 @@ function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateF
       return;
     }
     if (!config.image.trim()) {
-      message.error('请输入镜像（需已拉取）');
+      message.error('请输入镜像（需已拉取，未拉取请到「镜像」面板）');
       return;
     }
     setCreating(true);
@@ -94,59 +99,36 @@ function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateF
     }
   };
 
-  const switchMode = (next: 'flavor' | 'image') => {
-    setMode(next);
-    setSelectedFlavor(undefined);
-    // 切到镜像方式回到默认值（flavor 预填的挂载/env 不残留）；
-    // 已输入的名称保留（展开按名称绑定）
-    setConfig((prev) => ({
-      ...BLANK_CONTAINER_CONFIG,
-      name: prev.name,
-      image: mode === 'flavor' ? '' : prev.image,
-    }));
-  };
-
   const nameReady = config.name.trim().length > 0;
+  const hasFlavors = flavors.length > 0;
 
   // 预选模板（flavor 卡片「启动」进入）：名称就绪后自动展开预填一次
   useEffect(() => {
-    if (!initialFlavor || mode !== 'flavor' || autoExpanded || !nameReady) return;
+    if (!initialFlavor || autoExpanded || !nameReady) return;
     setAutoExpanded(true);
     handleFlavorSelect(initialFlavor);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialFlavor, mode, autoExpanded, nameReady]);
+  }, [initialFlavor, autoExpanded, nameReady]);
 
   return (
     <div className="container-create-form">
-      <div className="container-create-head">
-        <Radio.Group value={mode} onChange={(e) => switchMode(e.target.value)}>
-          <Radio.Button value="flavor" disabled={flavors.length === 0}>
-            模板（flavor）
-          </Radio.Button>
-          <Radio.Button value="image">镜像</Radio.Button>
-        </Radio.Group>
-        <div className="container-create-head-actions">
-          <Button
-            type="primary"
-            icon={<PlayCircleOutlined />}
-            loading={creating}
-            onClick={handleCreate}
-          >
-            创建并启动
-          </Button>
-        </div>
-      </div>
-
-      {mode === 'flavor' && (
+      {/* flavor 入口：仅当本地存在 flavor 时显示（空 flavor_list 时直接走镜像方式） */}
+      {hasFlavors && (
         <div className="container-create-flavor">
           <Select
             style={{ minWidth: 260 }}
-            placeholder={nameReady ? '选择预配置模板（展开预填表单，可继续调整任何字段）' : '请先输入容器名称'}
+            placeholder={
+              nameReady
+                ? '选择预设配置预填表单（可继续调整任何字段）'
+                : '请先在下方「容器」section 输入名称'
+            }
             value={selectedFlavor}
             onChange={handleFlavorSelect}
+            onClear={handleFlavorClear}
+            allowClear
             disabled={!nameReady}
             options={flavors.map((f) => ({ value: f, label: f }))}
-            notFoundContent="暂无可用模板（Flavor 面板可创建）"
+            notFoundContent="暂无可用模板"
           />
           {!nameReady && (
             <Alert
@@ -160,9 +142,21 @@ function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateF
 
       <ContainerConfigEditor mode="create" value={config} onChange={setConfig} />
 
-      <Typography.Text type="secondary" className="container-create-hint">
-        镜像需已在「镜像」面板拉取；创建后自动注册配置并生成桌面图标。
-      </Typography.Text>
+      <div className="container-create-foot">
+        <Typography.Text type="secondary" className="container-create-hint">
+          {selectedFlavor
+            ? `由模板「${selectedFlavor}」预填，镜像需已拉取。修改字段后再次保存将以当前表单内容为准。`
+            : '镜像需已在「镜像」面板拉取；创建后自动注册配置并生成桌面图标。'}
+        </Typography.Text>
+        <Button
+          type="primary"
+          icon={<PlayCircleOutlined />}
+          loading={creating}
+          onClick={handleCreate}
+        >
+          创建并启动
+        </Button>
+      </div>
     </div>
   );
 }

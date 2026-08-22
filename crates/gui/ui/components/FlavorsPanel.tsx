@@ -277,7 +277,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
                   <div className="flavor-image">{f.image}</div>
                 </div>
                 <div className="flavor-actions">
-                  <Tooltip title="按模板创建容器（打开「新建容器」表单，预填该模板）">
+                  <Tooltip title="按模板创建容器（打开「配置编辑器」表单，预填该模板）">
                     <Button type="primary" icon={<RocketOutlined />} onClick={() => onLaunch(f.name)}>
                       启动
                     </Button>

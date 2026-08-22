@@ -41,7 +41,7 @@ interface Pane {
 
 const PANE_TITLE: Record<PaneKind, string> = {
   containers: '容器',
-  'new-container': '新建容器',
+  'new-container': '配置编辑器',
   flavors: '模板',
   images: '镜像',
 };
@@ -82,7 +82,7 @@ function MasterViewInner() {
       const id = useUiStore.getState().nextPaneId();
       const title =
         kind === 'new-container' && opts?.initialFlavor
-          ? `新建容器 · ${truncateFlavor(opts.initialFlavor)}`
+          ? `配置编辑器 · ${truncateFlavor(opts.initialFlavor)}`
           : PANE_TITLE[kind];
       const pane: Pane = {
         id,
@@ -172,7 +172,7 @@ function MasterViewInner() {
             />
             <hr className="master-sidebar-divider" />
             <SidebarIcon
-              label="新建容器"
+              label="配置编辑器"
               icon={<PlusOutlined />}
               active={isActive('new-container')}
               onClick={() => openPane('new-container')}
@@ -226,7 +226,6 @@ function MasterViewInner() {
                 {p.kind === 'new-container' && (
                   <ContainerCreateForm
                     initialFlavor={p.initialFlavor}
-                    onCancel={() => closePane(p.id)}
                     onCreated={() => handleNewContainerCreated(p.id)}
                   />
                 )}
@@ -234,7 +233,7 @@ function MasterViewInner() {
             ))}
             {panes.length === 0 && (
               <div className="pane-empty">
-                点击左侧图标打开面板(容器 / 镜像 / 新建容器 / 模板)
+                点击左侧图标打开面板(容器 / 镜像 / 配置编辑器 / 模板)
               </div>
             )}
           </section>
