@@ -1,59 +1,254 @@
-// Master GUI 总控：容器管理 + 模板 + 镜像管理，三 tab。
+// Master GUI 总控：浏览器式多面板架构（与 WorkerView 对齐）。
 //
-// 容器与模板分离：容器是实例（存快照，ContainersPanel），模板是配置的
-// 批量管理层（存意图，FlavorsPanel）。唯一耦合点是模板「启动」—— 经
-// createRequest 触发器在本组件协调：切到容器 tab + 打开页内创建表单 +
-// 预选模板。镜像 tab 负责拉取/清理。
+// - 左侧 sidebar：图标入口 + 固定 56px 宽、不折叠、不拖拽（与 Worker
+//   的可折叠文件浏览器侧栏区分 —— Master 侧栏是纯图标导航）
+// - 右侧多 pane 多 tab：与 Worker 同款 `.pane-tabs` / `.pane-tab` /
+//   `.tab-pane` / `.pane-empty` 模式。常驻渲染 + display 切换，
+//   关闭面板才卸载
+// - Pane kind 集合：`containers`(单实例) / `new-container`(多实例,
+//   按 initialFlavor 区分) / `flavors`(单实例) / `images`(单实例)
+// - 模板「启动」:FlavorsPanel 通过 onLaunch(flavor) 回调 → openPane
+//   ('new-container', { initialFlavor: flavor }),激活新 pane；表单
+//   提交成功后关 pane + refreshTick++ 触发 containers 列表 reload
+//
+// 样式复用 WorkerView 既有 class；侧栏自身新增 `.master-sidebar*` 一组。
 
-import { useCallback, useState } from 'react';
-import { Tabs } from 'antd';
-import { ContainersPanel } from './ContainersPanel';
+import React, { useCallback, useRef, useState } from 'react';
+import { App as AntApp, Tooltip } from 'antd';
+import {
+  AppstoreOutlined,
+  CloseOutlined,
+  DatabaseOutlined,
+  PictureOutlined,
+  PlusOutlined,
+} from '@ant-design/icons';
+import { useUiStore } from '../stores/uiStore';
+import { ContainerCreateForm } from './ContainerCreateForm';
+import { ContainersPanel, ContainerRef } from './ContainersPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { ImagesPanel } from './ImagesPanel';
+import logo from '../assets/logo.png';
 
-export function MasterView() {
-  const [activeKey, setActiveKey] = useState('containers');
-  // 模板「启动」→ 容器 tab 的创建表单触发器（token 保证连续多次启动都能触发）
-  const [createRequest, setCreateRequest] = useState<{
-    flavor?: string;
-    token: number;
-  } | null>(null);
+type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images';
 
-  /** 模板「启动」：切到容器 tab 并打开创建表单预选该模板 */
-  const launchFlavor = useCallback((flavor: string) => {
-    setCreateRequest({ flavor, token: Date.now() });
-    setActiveKey('containers');
+interface Pane {
+  id: string;
+  kind: PaneKind;
+  title: string;
+  /** 仅 new-container:预选 flavor */
+  initialFlavor?: string;
+}
+
+const PANE_TITLE: Record<PaneKind, string> = {
+  containers: '容器',
+  'new-container': '新建容器',
+  flavors: '模板',
+  images: '镜像',
+};
+
+/** 长 flavor 名截断(避免 tab 标题撑开) */
+function truncateFlavor(name: string, max = 16): string {
+  return name.length > max ? `${name.slice(0, max)}…` : name;
+}
+
+function MasterViewInner() {
+  // 容器列表刷新触发器：new-container 提交成功 / 模板同步派生成功后 +1
+  const [refreshTick, setRefreshTick] = useState(0);
+
+  // 容器列表 ref：直接调 reload() 拉新数据
+  const containersRef = useRef<ContainerRef>(null);
+
+  // 默认开一个 containers pane —— 避免初次进入 0ms 空态闪烁
+  const initialPane: Pane = {
+    id: useUiStore.getState().nextPaneId(),
+    kind: 'containers',
+    title: PANE_TITLE.containers,
+  };
+  const [panes, setPanes] = useState<Pane[]>([initialPane]);
+  const [activePaneId, setActivePaneId] = useState<string | null>(initialPane.id);
+  // 初始激活第一个 pane（惰性：panes 始终包含初始项,这里主要是类型兼容）
+  const activeId = activePaneId ?? panes[0]?.id ?? null;
+
+  /** 打开 pane：'new-container' 始终新建,其他 kind 同类已开则聚焦 */
+  const openPane = useCallback((kind: PaneKind, opts?: { initialFlavor?: string }) => {
+    setPanes((prev) => {
+      if (kind !== 'new-container') {
+        const existing = prev.find((p) => p.kind === kind);
+        if (existing) {
+          setActivePaneId(existing.id);
+          return prev;
+        }
+      }
+      const id = useUiStore.getState().nextPaneId();
+      const title =
+        kind === 'new-container' && opts?.initialFlavor
+          ? `新建容器 · ${truncateFlavor(opts.initialFlavor)}`
+          : PANE_TITLE[kind];
+      const pane: Pane = {
+        id,
+        kind,
+        title,
+        initialFlavor: opts?.initialFlavor,
+      };
+      setActivePaneId(id);
+      return [...prev, pane];
+    });
   }, []);
+
+  /** 关闭 pane：激活相邻项；终端/PTY 清理钩子在 Worker,Master 用不到 */
+  const closePane = useCallback((id: string) => {
+    setPanes((prev) => {
+      const idx = prev.findIndex((p) => p.id === id);
+      if (idx === -1) return prev;
+      const next = prev.filter((p) => p.id !== id);
+      if (activeId === id) {
+        const neighbor = next[Math.min(idx, next.length - 1)];
+        setActivePaneId(neighbor ? neighbor.id : null);
+      }
+      return next;
+    });
+  }, [activeId]);
+
+  /** 模板「启动」：直接 openPane new-container + 预填 flavor */
+  const handleLaunchFlavor = useCallback(
+    (flavor: string) => {
+      openPane('new-container', { initialFlavor: flavor });
+    },
+    [openPane],
+  );
+
+  /** 新建容器表单提交成功：关 pane + 触发刷新 + 切回列表 */
+  const handleNewContainerCreated = useCallback(
+    (paneId: string) => {
+      closePane(paneId);
+      setRefreshTick((t) => t + 1);
+      containersRef.current?.reload();
+    },
+    [closePane],
+  );
+
+  /** 侧栏图标项(包装 tooltip + active 高亮) */
+  const SidebarIcon: React.FC<{
+    label: string;
+    icon: React.ReactNode;
+    active: boolean;
+    onClick(): void;
+  }> = ({ label, icon, active, onClick }) => (
+    <Tooltip title={label} placement="right" mouseEnterDelay={4}>
+      <button
+        className={`master-sidebar-icon ${active ? 'active' : ''}`}
+        onClick={onClick}
+        aria-label={label}
+      >
+        {icon}
+      </button>
+    </Tooltip>
+  );
+
+  /** 是否 active:同 kind 已开 + 当前 pane 焦点 */
+  const isActive = (kind: PaneKind): boolean =>
+    panes.some((p) => p.kind === kind && p.id === activeId);
 
   return (
     <div className="master-view">
-      <Tabs
-        className="master-tabs"
-        activeKey={activeKey}
-        onChange={setActiveKey}
-        items={[
-          {
-            key: 'containers',
-            label: '容器',
-            children: (
-              <ContainersPanel
-                createRequest={createRequest}
-                onCreateRequestConsumed={() => setCreateRequest(null)}
-              />
-            ),
-          },
-          {
-            key: 'flavors',
-            label: '模板',
-            children: <FlavorsPanel onLaunch={launchFlavor} />,
-          },
-          {
-            key: 'images',
-            label: '镜像',
-            children: <ImagesPanel />,
-          },
-        ]}
-      />
+      <div className="per-layout">
+        {/* 左侧：固定 56px 图标侧栏 */}
+        <aside className="per-left master-sidebar">
+          <div className="master-sidebar-brand">
+            <img src={logo} className="app-logo" alt="easytidy" />
+          </div>
+          <nav className="master-sidebar-icons">
+            <SidebarIcon
+              label="容器管理"
+              icon={<DatabaseOutlined />}
+              active={isActive('containers')}
+              onClick={() => openPane('containers')}
+            />
+            <SidebarIcon
+              label="镜像管理"
+              icon={<PictureOutlined />}
+              active={isActive('images')}
+              onClick={() => openPane('images')}
+            />
+            <hr className="master-sidebar-divider" />
+            <SidebarIcon
+              label="新建容器"
+              icon={<PlusOutlined />}
+              active={isActive('new-container')}
+              onClick={() => openPane('new-container')}
+            />
+            <hr className="master-sidebar-divider" />
+            <SidebarIcon
+              label="模板管理"
+              icon={<AppstoreOutlined />}
+              active={isActive('flavors')}
+              onClick={() => openPane('flavors')}
+            />
+          </nav>
+        </aside>
+
+        {/* 右侧：标签栏 + 内容区 */}
+        <div className="per-right">
+          {panes.length > 0 && (
+            <div className="pane-tabs">
+              {panes.map((p) => (
+                <div
+                  key={p.id}
+                  className={`pane-tab ${activeId === p.id ? 'active' : ''}`}
+                  onClick={() => setActivePaneId(p.id)}
+                  title={p.title}
+                >
+                  <span className="pane-tab-title">{p.title}</span>
+                  <CloseOutlined
+                    className="pane-tab-close"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closePane(p.id);
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          <section className="main-panel">
+            {panes.map((p) => (
+              <div
+                key={p.id}
+                className="tab-pane"
+                style={{ display: activeId === p.id ? undefined : 'none' }}
+              >
+                {p.kind === 'containers' && (
+                  <ContainersPanel ref={containersRef} refreshTick={refreshTick} />
+                )}
+                {p.kind === 'images' && <ImagesPanel />}
+                {p.kind === 'flavors' && <FlavorsPanel onLaunch={handleLaunchFlavor} />}
+                {p.kind === 'new-container' && (
+                  <ContainerCreateForm
+                    initialFlavor={p.initialFlavor}
+                    onCancel={() => closePane(p.id)}
+                    onCreated={() => handleNewContainerCreated(p.id)}
+                  />
+                )}
+              </div>
+            ))}
+            {panes.length === 0 && (
+              <div className="pane-empty">
+                点击左侧图标打开面板(容器 / 镜像 / 新建容器 / 模板)
+              </div>
+            )}
+          </section>
+        </div>
+      </div>
     </div>
+  );
+}
+
+/** antd App 包裹：让子组件 message/modal/notification 可用 */
+export function MasterView() {
+  return (
+    <AntApp className='app'>
+      <MasterViewInner />
+    </AntApp>
   );
 }

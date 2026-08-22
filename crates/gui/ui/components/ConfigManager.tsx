@@ -205,11 +205,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
   );
 }
 
-export function ConfigManager({ containerName }: ConfigManagerProps) {
-  // antd App 包裹：让 message 等静态方法继承暗色主题与中文 locale
-  return (
-    <AntApp>
-      <ConfigManagerInner containerName={containerName} />
-    </AntApp>
-  );
+export function ConfigManager(props: ConfigManagerProps) {
+  // antd App 包裹由 WorkerView 提供(单一上下文,避免嵌套)
+  return <ConfigManagerInner {...props} />;
 }

@@ -18,20 +18,14 @@
   margin: 0 !important;
 }
 
+.container-create-head-actions {
+  margin-left: auto;
+}
+
 .container-create-flavor {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-.container-create-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
-  margin-top: auto; /* 提交栏沉底：编辑器较高时保持可视 */
 }
 
 .container-create-hint {

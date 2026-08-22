@@ -1,24 +1,5 @@
 /* 环境语义面板（docs/13-mutable-env-paradigm.md） */
 
-/* Tabs 占满剩余高度，内容区滚动（MasterView 容器 | 模板 | 镜像 三页签） */
-.master-tabs {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.master-tabs .ant-tabs-content-holder {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.master-tabs .ant-tabs-content,
-.master-tabs .ant-tabs-tabpane {
-  height: 100%;
-}
-
 /* 面板主体 */
 .env-panel {
   height: 100%;

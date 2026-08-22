@@ -1,12 +1,12 @@
-// 模板管理（主 GUI 独立 tab）：flavor 启动配置模板。
+// 模板管理（主 GUI 浏览器式面板之一）：flavor 启动配置模板。
 //
 // flavor = "将一个镜像 run 起来"需要的完整配置清单：镜像 + GUI 透传 +
 // setup 安装 + entry 应用 + 挂载 + 网络。预设模板让用户一键拉起预配置
 // 容器（~/.easytidy/flavors/*.toml）。
 //
 // 与容器管理分离：模板是配置的批量管理层（存意图），容器是实例（存
-// 快照）。「启动」把模板预填进创建表单——经 onLaunch 回调切到容器 tab
-// 并打开页内创建表单（MasterView 持有 createRequest 触发器）。
+// 快照）。「启动」把模板预填进创建表单——经 onLaunch 回调让 MasterView
+// 打开 `new-container` pane + 预填该 flavor。
 //
 // 血缘：派生计数 + 「同步派生」批量重展开（config ← flavor）。
 
@@ -234,7 +234,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
 
       <p className="panel-hint">
         模板描述「将一个镜像 run 起来」的完整配置清单（GUI 透传 / 安装命令 /
-        entry 应用 / 挂载 / 网络），「启动」一键展开创建预配置容器。
+        entry 应用 / 挂载 / 网络），「启动」一键打开新建容器表单并预填该模板。
       </p>
 
       {error && (
@@ -277,7 +277,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
                   <div className="flavor-image">{f.image}</div>
                 </div>
                 <div className="flavor-actions">
-                  <Tooltip title="按模板创建容器（切到容器 tab，输入名称后自动展开预填）">
+                  <Tooltip title="按模板创建容器（打开「新建容器」表单，预填该模板）">
                     <Button type="primary" icon={<RocketOutlined />} onClick={() => onLaunch(f.name)}>
                       启动
                     </Button>
@@ -403,11 +403,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
   );
 }
 
-/** antd App 包裹（message/modal 继承暗色主题与中文 locale） */
+/** antd App 包裹由 MasterView 提供 */
 export function FlavorsPanel(props: FlavorsPanelProps) {
-  return (
-    <AntApp>
-      <FlavorsPanelInner {...props} />
-    </AntApp>
-  );
+  return <FlavorsPanelInner {...props} />;
 }

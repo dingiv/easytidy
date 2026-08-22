@@ -37,24 +37,9 @@ function AppInner({ mode, error }: { mode: any; error: string | null }) {
     );
   }
 
-  // Master mode
+  // Master mode（侧栏 + 多 pane 由 MasterView 内部自带,App 只包外壳）
   if ('Master' in mode) {
-    return (
-      <div className="app">
-        <header className="menu-bar">
-          <div className="menu-title">easytidy</div>
-          <nav className="menu-items">
-            <button className="menu-item">File</button>
-            <button className="menu-item">Edit</button>
-            <button className="menu-item">View</button>
-            <button className="menu-item">Help</button>
-          </nav>
-        </header>
-        <main className="main-content master-main">
-          <MasterView />
-        </main>
-      </div>
-    );
+    return <MasterView />;
   }
 
   // Worker mode

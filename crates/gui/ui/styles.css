@@ -90,12 +90,6 @@ body {
   overflow: hidden;
 }
 
-.master-main {
-  display: block;
-  overflow: auto;
-  padding: 1rem;
-}
-
 /* Left sidebar */
 .sidebar-left {
   width: 300px;
@@ -592,63 +586,10 @@ button:disabled {
   border-radius: 4px;
 }
 
-/* Master mode */
-.master-view {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
-
-.master-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1rem;
-}
-
-.master-header h2 {
-  margin: 0;
-}
-
-.header-actions {
+/* Left sidebar */
+.sidebar-left {
   display: flex;
   gap: 0.5rem;
-}
-
-.container-list {
-  display: flex;
-  flex-direction: column;
-  gap: 0.8rem;
-}
-
-.container-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 1rem;
-  background: #181825;
-  border-radius: 8px;
-  border: 1px solid #45475a;
-}
-
-.container-info h3 {
-  margin: 0 0 0.5rem 0;
-  font-size: 1.1rem;
-}
-
-.container-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.8rem;
-  flex-wrap: wrap;
-}
-
-.status {
-  padding: 0.2rem 0.6rem;
-  border-radius: 4px;
-  font-size: 0.85rem;
-  font-weight: bold;
-  text-transform: uppercase;
 }
 
 .status-running {
@@ -908,6 +849,7 @@ button:disabled {
   display: flex;
   flex: 1;
   min-height: 0;
+  height: 100%;
 }
 
 .per-left {
@@ -1214,6 +1156,74 @@ button:disabled {
 .panel-header h2 {
   margin: 0;
   font-size: 1.1rem;
+}
+
+/* ============================================================================
+ * Master GUI：左侧图标侧栏 + 右侧多 pane 多 tab
+ * ========================================================================== */
+.master-view {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.master-sidebar {
+  width: 56px;
+}
+
+.master-sidebar-brand {
+  height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-bottom: 1px solid #313244;
+  padding: 8px 0;
+}
+
+.master-sidebar-brand img.app-logo {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.master-sidebar-icons {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0;
+}
+
+.master-sidebar-divider {
+  width: 28px;
+  border: none;
+  border-top: 1px solid #313244;
+  margin: 4px 0;
+}
+
+.master-sidebar-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-left: 3px solid transparent;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 1.05rem;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.master-sidebar-icon:hover {
+  background: #313244;
+}
+
+.master-sidebar-icon.active {
+  background: #89b4fa22;
+  border-left-color: #89b4fa;
 }
 
 .header-actions {

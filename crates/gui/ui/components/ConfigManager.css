@@ -1,9 +1,11 @@
-/* Config Manager —— 右侧 tab 面板内容，铺满可用高度，内部滚动 */
+/* Config Manager —— 单页 section 布局 */
 .config-manager {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
+  overflow: auto;
+  padding: 4px 4px 24px;
 }
 
 .config-manager-header {
@@ -29,23 +31,31 @@
   height: 120px;
 }
 
-/* Tabs 占满剩余高度，内容区滚动 */
-.config-manager-tabs {
-  flex: 1;
-  min-height: 0;
+/* 单页 section 编辑器（容器 / 挂载 / 网络 / 环境变量 / 用户） */
+.config-editor {
   display: flex;
   flex-direction: column;
+  gap: 16px;
 }
 
-.config-manager-tabs .ant-tabs-content-holder {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
+.config-section {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 8px;
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
-.config-manager-tabs .ant-tabs-content,
-.config-manager-tabs .ant-tabs-tabpane {
-  height: 100%;
+.config-section-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #cdd6f4;
 }
 
 .config-pane {
