@@ -35,13 +35,13 @@ interface Pane {
   id: string;
   kind: PaneKind;
   title: string;
-  /** 仅 new-container:预选 flavor */
-  initialFlavor?: string;
+  /** 仅 new-container:预选 conf 模板 */
+  initialTemplate?: string;
 }
 
 const PANE_TITLE: Record<PaneKind, string> = {
   containers: '容器',
-  'new-container': '配置编辑器',
+  'new-container': '新建容器',
   flavors: '模板',
   images: '镜像',
 };
@@ -70,7 +70,7 @@ function MasterViewInner() {
   const activeId = activePaneId ?? panes[0]?.id ?? null;
 
   /** 打开 pane：'new-container' 始终新建,其他 kind 同类已开则聚焦 */
-  const openPane = useCallback((kind: PaneKind, opts?: { initialFlavor?: string }) => {
+  const openPane = useCallback((kind: PaneKind, opts?: { initialTemplate?: string }) => {
     setPanes((prev) => {
       if (kind !== 'new-container') {
         const existing = prev.find((p) => p.kind === kind);
@@ -81,14 +81,14 @@ function MasterViewInner() {
       }
       const id = useUiStore.getState().nextPaneId();
       const title =
-        kind === 'new-container' && opts?.initialFlavor
-          ? `配置编辑器 · ${truncateFlavor(opts.initialFlavor)}`
+        kind === 'new-container' && opts?.initialTemplate
+          ? `新建容器 · ${truncateFlavor(opts.initialTemplate)}`
           : PANE_TITLE[kind];
       const pane: Pane = {
         id,
         kind,
         title,
-        initialFlavor: opts?.initialFlavor,
+        initialTemplate: opts?.initialTemplate,
       };
       setActivePaneId(id);
       return [...prev, pane];
@@ -109,10 +109,10 @@ function MasterViewInner() {
     });
   }, [activeId]);
 
-  /** 模板「启动」：直接 openPane new-container + 预填 flavor */
+  /** 模板「使用」：直接 openPane new-container + 预填模板 */
   const handleLaunchFlavor = useCallback(
     (flavor: string) => {
-      openPane('new-container', { initialFlavor: flavor });
+      openPane('new-container', { initialTemplate: flavor });
     },
     [openPane],
   );
@@ -225,7 +225,7 @@ function MasterViewInner() {
                 {p.kind === 'flavors' && <FlavorsPanel onLaunch={handleLaunchFlavor} />}
                 {p.kind === 'new-container' && (
                   <ContainerCreateForm
-                    initialFlavor={p.initialFlavor}
+                    initialTemplate={p.initialTemplate}
                     onCreated={() => handleNewContainerCreated(p.id)}
                   />
                 )}

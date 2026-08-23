@@ -118,6 +118,27 @@ impl Flavor {
         Ok(())
     }
 
+    /// 复制模板为一键快捷动作：加载 → 改名 → 保存为新文件（原子写）。
+    ///
+    /// `to` 已存在时报错防覆盖；调用方（GUI 复制按钮）负责生成不冲突的
+    /// 目标名（如 `name-copy`、冲突则 `name-copy2/3…`）。
+    pub fn duplicate(from: &str, to: &str) -> Result<()> {
+        if to.trim().is_empty() {
+            return Err(Error::Config("目标模板名不能为空".to_string()));
+        }
+        if to == from {
+            return Err(Error::Config("目标名与源模板相同，无法复制".to_string()));
+        }
+        let mut copy = Self::load(from)?;
+        let dir = Self::flavors_dir()?;
+        let path = dir.join(format!("{to}.toml"));
+        if path.exists() {
+            return Err(Error::Config(format!("模板 {to} 已存在，不能覆盖")));
+        }
+        copy.name = to.to_string();
+        copy.save()
+    }
+
     /// 展开为容器配置（模板 → 实例快照）。
     ///
     /// 基座（`params`）整体继承（含 `entry_args`——曾在此处丢失）；GUI 透传
@@ -136,72 +157,9 @@ impl Flavor {
     pub fn build_config(&self, name: &str) -> Result<ContainerConfig> {
         let mut env = Vec::new();
         let mut params = self.params.clone();
-
         if self.gui {
-            for key in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_RUNTIME_DIR"] {
-                if let Ok(v) = std::env::var(key) {
-                    if !v.is_empty() {
-                        env.push(format!("{key}={v}"));
-                    }
-                }
-            }
-            // X11 socket
-            params.mounts.push(MountConfig {
-                host_path: "/tmp/.X11-unix".to_string(),
-                container_path: "/tmp/.X11-unix".to_string(),
-                read_only: false,
-            });
-            // Wayland / dbus / XAUTHORITY（$XDG_RUNTIME_DIR）
-            if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-                params.mounts.push(MountConfig {
-                    host_path: runtime.clone(),
-                    container_path: runtime,
-                    read_only: false,
-                });
-            }
-            // 字体/图标透传（只读）。⚠️ 不能直接覆盖容器自身 /usr/share/fonts 或
-            // /usr/share/icons——图标/字体包的 dpkg postinst 会写入这两个目录
-            // （update-icon-caches / fc-cache），只读挂载导致安装失败（实测）。
-            // 因此挂到非冲突路径 /usr/share/easytidy-host/，由 fontconfig local.conf
-            // （server 启动时写）+ XDG_DATA_DIRS 接入。
-            // 用户级目录（~/.local/share/*）无此问题（postinst 不写），可原地挂。
-            let mut env_extra = Vec::new();
-            for (host, container) in [
-                ("/usr/share/fonts", "/usr/share/easytidy-host/fonts"),
-                ("/usr/share/icons", "/usr/share/easytidy-host/icons"),
-            ] {
-                if Path::new(host).exists() {
-                    params.mounts.push(MountConfig {
-                        host_path: host.to_string(),
-                        container_path: container.to_string(),
-                        read_only: true,
-                    });
-                }
-            }
-            // ⚠️ 必须**追加**系统默认目录，不能纯覆盖：gdk-pixbuf 2.42 经
-            // $XDG_DATA_DIRS/gdk-pixbuf-2.0/2.10.0/loaders.cache 查找 loader
-            // 注册表，覆盖后系统 cache 不可达 → 容器内 PNG 图标解码失败 →
-            // GTK 文件选择器断言崩溃（2026-08-07 Chrome 保存图片实测）。
-            env_extra.push(
-                "XDG_DATA_DIRS=/usr/share/easytidy-host:/usr/local/share:/usr/share".to_string(),
-            );
-            if let Ok(home) = std::env::var("HOME") {
-                for sub in [".local/share/fonts", ".local/share/icons"] {
-                    let p = format!("{home}/{sub}");
-                    if Path::new(&p).exists() {
-                        params.mounts.push(MountConfig {
-                            host_path: p.clone(),
-                            container_path: format!("/usr/share/easytidy-host/{sub}"),
-                            read_only: true,
-                        });
-                    }
-                }
-            }
-            env.extend(env_extra);
-            // gui=true 恒开用户一致性映射（GUI 应用需以宿主用户身份读写宿主挂载目录）
-            params.user_home = true;
+            inject_gui_passthrough(&mut params, &mut env);
         }
-
         Ok(ContainerConfig {
             name: name.to_string(),
             params,
@@ -212,6 +170,117 @@ impl Flavor {
             flavor: Some(self.name.clone()),
         })
     }
+}
+
+/// GUI 透传注入（共享）：从宿主探测 DISPLAY/WAYLAND_DISPLAY + 字体/图标挂载 +
+/// $XDG_RUNTIME_DIR 挂载，追加到 env 与 params.mounts。
+///
+/// 供 [`Flavor::build_config`] 与 conf 模板 expand 共用。
+///
+/// 设计意图：YAML 模板只存静态意图(`image`/`entry`/mounts 等),宿主耦合数据
+/// (DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR)留到此函数在创建时实时探测注入——
+/// 避免模板硬编 session 特有的值。
+///
+/// **`XAUTHORITY` 不在此处注入**:路径含随机后缀(`mutter-Xwaylandauth.<random>`
+/// 或 `xauth_<random>`),由容器内 `easytidy-server` 在启动时自动探
+/// `$XDG_RUNTIME_DIR` 下已知模式并覆盖进程 env (见 `crates/server/src/setup.rs`
+/// `ensure_xauthority`)。这是 server 内置 GUI 透传功能,**不依赖用户配置**,
+/// 也不会被容器 env 残留覆盖——避免历史 `.XXXXXX` 字面占位符 bug。
+///
+/// 注:
+/// - 必须**追加**系统默认 XDG_DATA_DIRS,不能纯覆盖:gdk-pixbuf 2.42 经
+///   `$XDG_DATA_DIRS/gdk-pixbuf-2.0/2.10.0/loaders.cache` 查找 loader
+///   注册表,覆盖后系统 cache 不可达 → 容器内 PNG 图标解码失败 → GTK
+///   文件选择器断言崩溃(2026-08-07 Chrome 保存图片实测)。
+/// - 字体/图标挂到非冲突路径 `/usr/share/easytidy-host/`,由 fontconfig local.conf
+///   (server 启动时写) + XDG_DATA_DIRS 接入。不能覆盖容器自身 `/usr/share/fonts`
+///   或 `/usr/share/icons`——图标/字体包 dpkg postinst 会写入这两个目录
+///   (update-icon-caches / fc-cache),只读挂载导致安装失败(实测)。
+pub fn inject_gui_passthrough(params: &mut ContainerParams, env: &mut Vec<String>) {
+    // 幂等:模板可能已声明同 destination / 同 key 的 mount 与 env(YAML + 注入共存),
+    // podman create 拒绝 duplicate mount destination,env 重复则以末值胜出但语义混淆。
+    // 策略:已存在则跳过注入——以模板作者声明为准(他们写下的就是想要的)。
+    // 用 owned String 副本断开与 params.mounts/env 的借用,后续 push 才合法。
+    let existing_mount_targets: std::collections::HashSet<String> = params
+        .mounts
+        .iter()
+        .map(|m| m.container_path.clone())
+        .collect();
+    let existing_env_keys: std::collections::HashSet<String> = env
+        .iter()
+        .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
+        .collect();
+
+    // 1. 显示相关 env:从宿主探测注入(空值跳过)。XAUTHORITY 由 server
+    // ensure_xauthority() 自动注入,不在此处处理——见 fn 注释。
+    for key in ["DISPLAY", "WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"] {
+        if existing_env_keys.contains(key) {
+            continue;
+        }
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                env.push(format!("{key}={v}"));
+            }
+        }
+    }
+    // 2. X11 socket 挂载(/tmp/.X11-unix → /tmp/.X11-unix)
+    if !existing_mount_targets.contains("/tmp/.X11-unix") {
+        params.mounts.push(MountConfig {
+            host_path: "/tmp/.X11-unix".to_string(),
+            container_path: "/tmp/.X11-unix".to_string(),
+            read_only: false,
+        });
+    }
+    // 3. $XDG_RUNTIME_DIR 挂载(Wayland / dbus / XAUTHORITY)
+    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
+        if !existing_mount_targets.contains(runtime.as_str()) {
+            params.mounts.push(MountConfig {
+                host_path: runtime.clone(),
+                container_path: runtime,
+                read_only: false,
+            });
+        }
+    }
+    // 4. 字体/图标只读挂载(系统级 + 用户级,只在宿主路径存在时挂)
+    for (host, container) in [
+        ("/usr/share/fonts", "/usr/share/easytidy-host/fonts"),
+        ("/usr/share/icons", "/usr/share/easytidy-host/icons"),
+    ] {
+        if existing_mount_targets.contains(container) {
+            continue;
+        }
+        if Path::new(host).exists() {
+            params.mounts.push(MountConfig {
+                host_path: host.to_string(),
+                container_path: container.to_string(),
+                read_only: true,
+            });
+        }
+    }
+    // 5. XDG_DATA_DIRS 追加系统默认(不能纯覆盖——见 fn 注释)
+    if !existing_env_keys.contains("XDG_DATA_DIRS") {
+        env.push(
+            "XDG_DATA_DIRS=/usr/share/easytidy-host:/usr/local/share:/usr/share".to_string(),
+        );
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        for sub in [".local/share/fonts", ".local/share/icons"] {
+            let container = format!("/usr/share/easytidy-host/{sub}");
+            if existing_mount_targets.contains(container.as_str()) {
+                continue;
+            }
+            let p = format!("{home}/{sub}");
+            if Path::new(&p).exists() {
+                params.mounts.push(MountConfig {
+                    host_path: p.clone(),
+                    container_path: container,
+                    read_only: true,
+                });
+            }
+        }
+    }
+    // 6. gui=true 恒开用户一致性映射(GUI 应用需以宿主用户身份读写宿主挂载目录)
+    params.user_home = true;
 }
 
 // ============================================================================

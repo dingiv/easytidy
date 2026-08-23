@@ -1,14 +1,14 @@
-// 模板管理（主 GUI 浏览器式面板之一）：flavor 启动配置模板。
+// 模板管理（主 GUI 浏览器式面板之一）：conf YAML 启动配置模板。
 //
-// flavor = "将一个镜像 run 起来"需要的完整配置清单：镜像 + GUI 透传 +
-// setup 安装 + entry 应用 + 挂载 + 网络。预设模板让用户一键拉起预配置
-// 容器（~/.easytidy/flavors/*.toml）。
+// conf 模板 = 容器关键参数(镜像/entry/挂载/网络/用户映射)+ 可选 setup 安装命令。
+// 存放:`~/.easytidy/conf/<name>.yaml`（运行时权威；源码 crates/gui/conf/*.yaml
+// 编译期打进首跑播种）。本面板数据源全部从 conf 目录读取，模板 tab 不再展示
+// TOML flavor 预设（已退役，CLI flavor apply 仍可访问 ~/.easytidy/flavors/）。
 //
 // 与容器管理分离：模板是配置的批量管理层（存意图），容器是实例（存
-// 快照）。「启动」把模板预填进创建表单——经 onLaunch 回调让 MasterView
-// 打开 `new-container` pane + 预填该 flavor。
-//
-// 血缘：派生计数 + 「同步派生」批量重展开（config ← flavor）。
+// 快照）。每卡片操作：使用（预填创建）/ 编辑 / 复制 / 删除；列表支持
+// 多选 → 批量删除。血缘：派生计数 + 「同步派生」（次级入口）。
+// 「使用」经 onLaunch 回调让 MasterView 打开 `new-container` pane + 预填。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -17,6 +17,7 @@ import {
   App as AntApp,
   Alert,
   Button,
+  Checkbox,
   Input,
   Modal,
   Select,
@@ -28,6 +29,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  CopyOutlined,
   DeleteOutlined,
   EditOutlined,
   PlusOutlined,
@@ -35,22 +37,26 @@ import {
   RocketOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
-import type { Flavor, MountConfig } from '../types';
+import type { ConfTemplate, MountConfig } from '../types';
+import { BLANK_CONTAINER_CONFIG } from './config/ContainerConfigEditor';
 import './FlavorsPanel.css';
 
-/** 空白 flavor（新建表单初始值；user_home 与 Rust 共享基座对齐：bool 默认 true） */
-function emptyFlavor(): Flavor {
+/** 空白 conf 模板（新建表单初始值；user_home 默认 true 与 Rust 共享基座对齐） */
+function emptyConfTemplate(): ConfTemplate {
   return {
-    name: '',
-    image: 'docker.io/library/ubuntu:24.04',
-    gui: true,
+    ...BLANK_CONTAINER_CONFIG,
+    gui: false,
     setup: [],
-    entry: null,
-    entry_args: [],
-    mounts: [],
-    user_home: true,
-    network: { mode: 'host', ports: [] },
-  };
+  } as ConfTemplate;
+}
+
+/** 生成不冲突的复制名：`base-copy`，冲突则 `base-copy2`、`base-copy3`… */
+function nextCopyName(base: string, existing: string[]): string {
+  const candidate = `${base}-copy`;
+  if (!existing.includes(candidate)) return candidate;
+  let i = 2;
+  while (existing.includes(`${base}-copy${i}`)) i++;
+  return `${base}-copy${i}`;
 }
 
 /** mounts 行文本（"host:container[:ro]"）→ MountConfig */
@@ -69,39 +75,42 @@ function mountToLine(m: MountConfig): string {
 }
 
 interface FlavorsPanelProps {
-  /** 模板卡「启动」：切到容器 tab 并打开页内创建表单，预选该模板 */
-  onLaunch(flavor: string): void;
+  /** 模板卡「使用」：打开配置编辑器并预填该模板（创建新容器） */
+  onLaunch(templateName: string): void;
 }
 
 function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
   const { message, modal } = AntApp.useApp();
 
-  const [flavors, setFlavors] = useState<Flavor[]>([]);
+  const [templates, setTemplates] = useState<ConfTemplate[]>([]);
   const [lineage, setLineage] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [syncingFlavor, setSyncingFlavor] = useState<string | null>(null);
+  const [syncingTemplate, setSyncingTemplate] = useState<string | null>(null);
 
-  // flavor 编辑器（模板表单）
-  const [editing, setEditing] = useState<Flavor | null>(null);
+  // conf 模板编辑器（模板表单）
+  const [editing, setEditing] = useState<ConfTemplate | null>(null);
   const [isNew, setIsNew] = useState(false);
   const [setupText, setSetupText] = useState('');
   const [mountsText, setMountsText] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // 多选（批量删除）
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const [flavorList, lineageMap] = await Promise.all([
-        invoke<Flavor[]>('flavor_list_detailed'),
-        invoke<Record<string, string[]>>('flavor_lineage'),
+      const [templateList, lineageMap] = await Promise.all([
+        invoke<ConfTemplate[]>('conf_templates'),
+        invoke<Record<string, string[]>>('template_lineage'),
       ]);
-      setFlavors(flavorList);
+      setTemplates(templateList);
       setLineage(lineageMap ?? {});
     } catch (err: any) {
       setError(errMsg(err, '加载模板失败'));
-      console.error('load (flavors) failed:', err);
+      console.error('load (conf templates) failed:', err);
     } finally {
       setLoading(false);
     }
@@ -111,59 +120,61 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
     load();
   }, []);
 
-  /** 模板编辑器打开（flavor=null → 新建） */
-  const openEditor = (flavor: Flavor | null) => {
-    const f = flavor ?? emptyFlavor();
+  /** 模板编辑器打开（t=null → 新建） */
+  const openEditor = (t: ConfTemplate | null) => {
+    const f = t ?? emptyConfTemplate();
     setEditing(f);
-    setIsNew(flavor === null);
+    setIsNew(t === null);
     setSetupText(f.setup.join('\n'));
     setMountsText(f.mounts.map(mountToLine).join('\n'));
   };
 
   const handleSave = async () => {
-    const f = editing;
-    if (!f) return;
-    if (!f.name.trim() || !f.image.trim()) {
+    const t = editing;
+    if (!t) return;
+    if (!t.name.trim() || !t.image.trim()) {
       message.warning('名称与镜像不能为空');
       return;
     }
     setSaving(true);
     try {
-      const toSave: Flavor = {
-        ...f,
-        name: f.name.trim(),
-        image: f.image.trim(),
+      const toSave: ConfTemplate = {
+        ...t,
+        name: t.name.trim(),
+        image: t.image.trim(),
         setup: setupText.split('\n').map((s) => s.trim()).filter(Boolean),
-        mounts: mountsText
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean)
-          .map(parseMountLine)
-          .filter((m): m is MountConfig => m !== null),
       };
-      await invoke('flavor_save', { flavor: toSave });
+      // mountsText → mounts（mountsText 是局部分离编辑态）
+      const parsedMounts = mountsText
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .map(parseMountLine)
+        .filter((m): m is MountConfig => m !== null);
+      toSave.mounts = parsedMounts;
+      await invoke('conf_save_template', { template: toSave });
       message.success(`模板已保存：${toSave.name}`);
       setEditing(null);
       await load();
     } catch (err: any) {
       message.error(errMsg(err, '保存失败'));
-      console.error('flavor_save failed:', err);
+      console.error('conf_save_template failed:', err);
     } finally {
       setSaving(false);
     }
   };
 
-  const handleDelete = (f: Flavor) => {
+  const handleDelete = (t: ConfTemplate) => {
     modal.confirm({
-      title: `删除模板 ${f.name}?`,
-      content: '已创建的容器不受影响，仅删除模板。',
+      title: `删除模板 ${t.name}?`,
+      content: '已创建的容器不受影响（血缘仍保留），仅删除模板。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
         try {
-          await invoke('flavor_delete', { name: f.name });
-          message.success(`已删除：${f.name}`);
+          await invoke('conf_rm_template', { name: t.name });
+          message.success(`已删除：${t.name}`);
           await load();
         } catch (err: any) {
           message.error(errMsg(err, '删除失败'));
@@ -172,12 +183,80 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
     });
   };
 
+  const toggleSelect = (name: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  const clearSelection = () => setSelected(new Set());
+  const selectedNames = () => templates.filter((t) => selected.has(t.name)).map((t) => t.name);
+  const allSelected = templates.length > 0 && templates.every((t) => selected.has(t.name));
+
+  const handleToggleSelectAll = () => {
+    if (allSelected) clearSelection();
+    else setSelected(new Set(templates.map((t) => t.name)));
+  };
+
+  /** 复制：一键生成不冲突的「name-copy」→ 后端复制 → 刷新列表 */
+  const handleCopy = async (t: ConfTemplate) => {
+    const to = nextCopyName(t.name, templates.map((x) => x.name));
+    try {
+      await invoke('conf_duplicate_template', { from: t.name, to });
+      message.success(`已复制为「${to}」`);
+      await load();
+    } catch (err: any) {
+      message.error(errMsg(err, '复制失败'));
+    }
+  };
+
+  /** 批量删除（多选动作；确认框列名字） */
+  const handleBatchDelete = () => {
+    const names = selectedNames();
+    if (names.length === 0) return;
+    modal.confirm({
+      title: `删除所选 ${names.length} 个模板?`,
+      content: (
+        <div>
+          <p>以下模板将被删除（已创建的容器不受影响，仅删模板）：</p>
+          <p style={{ paddingLeft: 12 }}>{names.join('、')}</p>
+        </div>
+      ),
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        const failures: string[] = [];
+        for (const name of names) {
+          try {
+            await invoke('conf_rm_template', { name });
+          } catch (err: any) {
+            failures.push(`${name}：${errMsg(err)}`);
+          }
+        }
+        clearSelection();
+        await load();
+        if (failures.length > 0) {
+          modal.error({
+            title: `删除完成，${failures.length} 个失败`,
+            width: 620,
+            content: <pre className="error-detail">{failures.join('\n\n')}</pre>,
+            okText: '知道了',
+          });
+        } else {
+          message.success(`已删除 ${names.length} 个模板`);
+        }
+      },
+    });
+  };
+
   /** 批量同步：把模板当前声明重新展开到全部派生容器（逐个重建） */
-  const handleSyncAll = (f: Flavor) => {
-    const derived = lineage[f.name] ?? [];
+  const handleSyncAll = (t: ConfTemplate) => {
+    const derived = lineage[t.name] ?? [];
     if (derived.length === 0) return;
     modal.confirm({
-      title: `按模板「${f.name}」重新同步全部派生容器？`,
+      title: `按模板「${t.name}」重新同步全部派生容器？`,
       content: (
         <div>
           <p>以下 {derived.length} 个容器将按模板当前声明重新展开并逐个重建（本地的自启/常驻设置保留，其余本地修改被模板覆盖）：</p>
@@ -188,12 +267,12 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
-        setSyncingFlavor(f.name);
+        setSyncingTemplate(t.name);
         const failures: string[] = [];
         try {
           for (const name of derived) {
             try {
-              await invoke('config_sync_from_flavor', { name });
+              await invoke('config_sync_from_template', { name });
             } catch (err: any) {
               failures.push(`${name}：${errMsg(err)}`);
             }
@@ -206,11 +285,11 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
               okText: '知道了',
             });
           } else {
-            message.success(`已按模板「${f.name}」同步 ${derived.length} 个容器`);
+            message.success(`已按模板「${t.name}」同步 ${derived.length} 个容器`);
           }
           await load();
         } finally {
-          setSyncingFlavor(null);
+          setSyncingTemplate(null);
         }
       },
     });
@@ -233,8 +312,9 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
       </div>
 
       <p className="panel-hint">
-        模板描述「将一个镜像 run 起来」的完整配置清单（GUI 透传 / 安装命令 /
-        entry 应用 / 挂载 / 网络），「启动」一键打开新建容器表单并预填该模板。
+        模板描述「将一个镜像 run 起来」的完整配置清单（镜像 / entry 应用 / 挂载 / 网络 /
+        用户映射 / setup 安装命令），存放于 <code>~/.easytidy/conf/</code>。
+        「使用」一键打开配置编辑器并预填该模板；列表支持多选后批量删除。
       </p>
 
       {error && (
@@ -255,57 +335,118 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
           </Spin>
         </div>
       ) : (
-        <div className="flavor-list">
-          {flavors.map((f) => {
-            const derived = lineage[f.name] ?? [];
+        <div className="flavor-panel-body">
+          {templates.length > 0 && (
+            <div className="flavor-toolbar">
+              <Checkbox
+                checked={allSelected}
+                indeterminate={selected.size > 0 && !allSelected}
+                onChange={handleToggleSelectAll}
+              >
+                全选
+              </Checkbox>
+              {selected.size > 0 && (
+                <Space className="flavor-batch">
+                  <Typography.Text type="secondary">已选 {selected.size} 个</Typography.Text>
+                  <Button
+                    size="small"
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={handleBatchDelete}
+                  >
+                    批量删除
+                  </Button>
+                  <Button size="small" onClick={clearSelection}>
+                    取消选择
+                  </Button>
+                </Space>
+              )}
+            </div>
+          )}
+          <div className="flavor-list">
+          {templates.map((t) => {
+            const derived = lineage[t.name] ?? [];
             return (
-              <div key={f.name} className="flavor-item">
+              <div
+                key={t.name}
+                className={`flavor-item${selected.has(t.name) ? ' selected' : ''}`}
+              >
+                <Checkbox
+                  className="flavor-check"
+                  checked={selected.has(t.name)}
+                  onChange={() => toggleSelect(t.name)}
+                  title={`选择 ${t.name}`}
+                />
                 <div className="flavor-main">
                   <div className="flavor-title">
-                    <span className="flavor-name">{f.name}</span>
-                    {f.gui && <Tag color="blue">GUI</Tag>}
-                    {f.entry && <Tag color="green">entry: {f.entry}</Tag>}
-                    {f.setup.length > 0 && <Tag>setup ×{f.setup.length}</Tag>}
-                    {f.mounts.length > 0 && <Tag>mounts ×{f.mounts.length}</Tag>}
-                    <Tag>{f.network.mode === 'host' ? 'host 网络' : 'bridge'}</Tag>
+                    <span className="flavor-name">{t.name}</span>
+                    {t.entry && <Tag color="green">entry: {t.entry}</Tag>}
+                    {t.gui && <Tag color="blue">GUI 透传</Tag>}
+                    {t.setup.length > 0 && <Tag color="purple">setup ×{t.setup.length}</Tag>}
+                    {t.mounts.length > 0 && (
+                      <Tag>mounts ×{t.mounts.length}</Tag>
+                    )}
+                    <Tag>{t.network.mode === 'host' ? 'host 网络' : 'bridge'}</Tag>
                     {derived.length > 0 && (
                       <Tooltip title={`派生容器：${derived.join('、')}`}>
-                        <Tag color="purple">派生 ×{derived.length}</Tag>
+                        <Tag color="gold">派生 ×{derived.length}</Tag>
                       </Tooltip>
                     )}
                   </div>
-                  <div className="flavor-image">{f.image}</div>
+                  <div className="flavor-image">{t.image}</div>
                 </div>
                 <div className="flavor-actions">
-                  <Tooltip title="按模板创建容器（打开「配置编辑器」表单，预填该模板）">
-                    <Button type="primary" icon={<RocketOutlined />} onClick={() => onLaunch(f.name)}>
-                      启动
+                  <Tooltip title="使用模板创建容器（打开配置编辑器并预填，可继续修改）">
+                    <Button
+                      type="primary"
+                      icon={<RocketOutlined />}
+                      onClick={() => onLaunch(t.name)}
+                    >
+                      使用
                     </Button>
                   </Tooltip>
+                  <Button
+                    icon={<EditOutlined />}
+                    onClick={() => openEditor(t)}
+                    title="编辑"
+                  />
+                  <Button
+                    icon={<CopyOutlined />}
+                    onClick={() => handleCopy(t)}
+                    title="复制"
+                  />
                   {derived.length > 0 && (
-                    <Tooltip title={`按模板当前声明重新同步全部派生容器（${derived.join('、')}）`}>
+                    <Tooltip
+                      title={`按模板当前声明重新同步全部派生容器（${derived.join(
+                        '、',
+                      )}）`}
+                    >
                       <Button
                         icon={<SyncOutlined />}
-                        loading={syncingFlavor === f.name}
-                        onClick={() => handleSyncAll(f)}
-                      >
-                        同步派生
-                      </Button>
+                        loading={syncingTemplate === t.name}
+                        onClick={() => handleSyncAll(t)}
+                        title="同步派生"
+                      />
                     </Tooltip>
                   )}
-                  <Button icon={<EditOutlined />} onClick={() => openEditor(f)} title="编辑" />
-                  <Button danger icon={<DeleteOutlined />} onClick={() => handleDelete(f)} title="删除" />
+                  <Button
+                    danger
+                    icon={<DeleteOutlined />}
+                    onClick={() => handleDelete(t)}
+                    title="删除"
+                  />
                 </div>
               </div>
             );
           })}
-          {flavors.length === 0 && (
+          {templates.length === 0 && (
             <div className="empty-message">暂无模板，点击「新建模板」创建启动配置。</div>
           )}
+          </div>
         </div>
       )}
 
-      {/* flavor 编辑器（模板表单） */}
+      {/* conf 模板编辑器（模板表单） */}
       <Modal
         title={isNew ? '新建模板' : `编辑 ${editing?.name}`}
         open={editing !== null}
@@ -331,7 +472,9 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
               <label>镜像</label>
               <Input
                 value={editing.image}
-                onChange={(e) => setEditing({ ...editing, image: e.target.value })}
+                onChange={(e) =>
+                  setEditing({ ...editing, image: e.target.value })
+                }
                 placeholder="docker.io/library/ubuntu:24.04"
               />
             </div>
@@ -341,13 +484,17 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
                 checked={editing.gui}
                 onChange={(v) => setEditing({ ...editing, gui: v })}
               />
-              <span className="form-hint">注入宿主显示环境 + 字体/图标 + 用户映射</span>
+              <span className="form-hint">
+                展开时按宿主实时 env 注入 DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR + 字体图标挂载
+              </span>
             </div>
             <div className="form-row">
               <label>entry 应用</label>
               <Input
                 value={editing.entry ?? ''}
-                onChange={(e) => setEditing({ ...editing, entry: e.target.value || null })}
+                onChange={(e) =>
+                  setEditing({ ...editing, entry: e.target.value || null })
+                }
                 placeholder="容器内可执行名（可留空）"
               />
             </div>
@@ -365,7 +512,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
               />
             </div>
             <div className="form-row">
-              <label>安装命令</label>
+              <label>安装命令（setup）</label>
               <Input.TextArea
                 rows={3}
                 value={setupText}
@@ -387,7 +534,10 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
               <Select
                 value={editing.network.mode}
                 onChange={(v) =>
-                  setEditing({ ...editing, network: { ...editing.network, mode: v } })
+                  setEditing({
+                    ...editing,
+                    network: { ...editing.network, mode: v },
+                  })
                 }
                 style={{ width: 160 }}
                 options={[
@@ -396,6 +546,9 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
                 ]}
               />
             </div>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              setup 安装命令本轮只存不执行（执行链路与 data 启动脚本一起留待下一步）。
+            </Typography.Text>
           </div>
         )}
       </Modal>

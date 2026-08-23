@@ -518,16 +518,9 @@ button:disabled {
   color: #f38ba8;
 }
 
-/* Config manager */
-.config-manager {
-  height: 100%;
-  overflow: auto;
-  padding: 1rem;
-}
+/* Config editor — Shell + 各 Pane 子组件样式集中在下方
+ * `配置编辑器统一 Shell（ConfigEditorPane）` 区块 */
 
-.config-manager h3 {
-  margin-top: 0;
-}
 
 .config-section {
   margin-bottom: 1.5rem;
@@ -539,6 +532,17 @@ button:disabled {
 .config-section h4 {
   margin-top: 0;
   margin-bottom: 0.8rem;
+}
+
+/* 配置编辑器顶部工具条（示例模板 / 加载 / 导出 YAML） */
+.conf-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.75rem;
+  background: #181825;
+  border-radius: 6px;
 }
 
 .config-row {
@@ -1296,6 +1300,34 @@ button:disabled {
   flex: none;
 }
 
+/* flavor 多选 + 批量操作 */
+.flavor-panel-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.flavor-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  padding: 0.3rem 0.2rem;
+}
+
+.flavor-batch {
+  display: flex;
+  align-items: center;
+}
+
+.flavor-item .flavor-check {
+  flex: none;
+}
+
+.flavor-item.selected {
+  border-color: #89b4fa;
+}
+
 /* flavor 编辑表单 */
 .flavor-form .form-row {
   display: flex;
@@ -1331,4 +1363,176 @@ button:disabled {
   word-break: break-all;
   margin: 0;
   user-select: text;
+}
+
+/* ============================================================
+ * 配置编辑器统一 Shell（ConfigEditorPane）+ 编辑器/各 Pane 子组件样式
+ *
+ * 历史：原 ConfigManager / ContainerCreateForm 各自持有平行 CSS（.config-manager-*、
+ * .container-create-form-*）并各自 import 自己的 .css 文件。统一重构后：
+ *   - 两个入口都通过 ConfigEditorPane Shell 渲染（默认 class .config-editor-pane）
+ *   - 编辑器本体 + 5 个 Pane 子组件样式集中在本文件
+ *   - 入口-specific 的 footer/hint 等局部样式仍在各自的 *.css 文件
+ * ============================================================ */
+
+/* Shell 骨架：外层 + header 行 + title + body + footer + loading 占位 */
+.config-editor-pane {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+  padding: 4px 4px 24px;
+}
+
+.config-editor-pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.config-editor-pane-title {
+  margin: 0 !important;
+}
+
+.config-editor-pane-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.config-editor-pane-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin-top: auto;
+}
+
+.config-editor-pane-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 160px;
+}
+
+.spin-block {
+  height: 120px;
+}
+
+/* 编辑器本体（ContainerConfigEditor）单页 section 布局 */
+.config-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.config-section {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 8px;
+  padding: 16px 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-section-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #cdd6f4;
+}
+
+.config-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* 新增行（挂载 / 端口） */
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.add-row .ant-input {
+  flex: 1;
+  min-width: 160px;
+}
+
+.add-row .ant-input-number {
+  flex: 1;
+  min-width: 120px;
+}
+
+/* 路径 / 端口单元格等宽字体 */
+.path-cell,
+.port-cell {
+  font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono CJK SC", monospace;
+  font-size: 0.85rem;
+}
+
+.proto-cell {
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.mode-hint {
+  margin-top: 4px;
+}
+
+/* 容器 tab 字段 */
+.config-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  max-width: 680px;
+}
+
+.config-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-field > label {
+  font-size: 0.85rem;
+  color: #a6adc8;
+}
+
+.section-hint {
+  color: #6c7086;
+  font-size: 0.8rem;
+}
+
+/* 环境变量 / 用户 tab */
+.env-key-cell {
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  font-size: 0.85rem;
+}
+
+.env-src-user {
+  color: #a6e3a1;
+}
+
+.env-src-system {
+  color: #6c7086;
+}
+
+.config-subsection {
+  margin-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }

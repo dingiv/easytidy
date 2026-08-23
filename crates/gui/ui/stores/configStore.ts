@@ -42,8 +42,8 @@ interface ConfigState {
   update: (mutator: (edit: ContainerConfig) => ContainerConfig) => void;
   /** 保存并重启容器（成功后重载） */
   apply: (name: string) => Promise<void>;
-  /** 从来源模板重新同步（重展开 + 重建；成功后重载）。返回成功提示文案（失败 undefined） */
-  syncFromFlavor: (name: string) => Promise<string | undefined>;
+  /** 从来源 conf 模板重新同步（重读 YAML 模板 → rebuild；成功后重载）。返回成功提示（失败 undefined） */
+  syncFromTemplate: (name: string) => Promise<string | undefined>;
   /** 重置错误 */
   clearError: () => void;
 }
@@ -111,16 +111,16 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     }
   },
 
-  syncFromFlavor: async (name) => {
+  syncFromTemplate: async (name) => {
     set({ syncing: true, error: null });
     try {
-      const note = await invoke<string>('config_sync_from_flavor', { name });
-      // 同步即重建容器：重载（血缘状态刷新,漂移清零）
+      const note = await invoke<string>('config_sync_from_template', { name });
+      // 同步即重建容器：重载（血缘状态刷新，漂移清零）
       await get().load(name);
       return note;
     } catch (err: any) {
       set({ error: errMsg(err, '从模板同步失败') });
-      console.error('config_sync_from_flavor failed:', err);
+      console.error('config_sync_from_template failed:', err);
     } finally {
       set({ syncing: false });
     }

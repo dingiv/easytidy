@@ -1,26 +1,26 @@
-/* 新建容器页内表单（ContainerCreateForm）——替代模态的页内布局 */
-
-.container-create-form {
+/* 新建容器页 footer(创建按钮 + hint)——由 ContainerCreateForm 渲染,
+   作为 ConfigEditorPane 的兄弟节点(页面级提交按钮,不属于编辑器内部) */
+.container-create-page {
+  height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  min-height: 100%;
+  overflow: hidden;
 }
 
-.container-create-flavor {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.container-create-page > .config-editor-pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .container-create-foot {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-top: 8px;
+  padding: 12px 0 0;
   border-top: 1px solid rgba(255, 255, 255, 0.08);
-  margin-top: auto;
 }
 
 .container-create-hint {

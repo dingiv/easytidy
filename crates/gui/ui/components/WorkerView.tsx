@@ -260,7 +260,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
         setActivePaneId(existing.id);
         return prev;
       }
-      const title = kind === 'passthrough' ? 'Passthrough' : '配置';
+      const title = kind === 'passthrough' ? 'Passthrough' : '容器配置';
       const pane: Pane = {
         id: useUiStore.getState().nextPaneId(),
         kind,
@@ -497,7 +497,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
             {panes.length === 0 && (
               <div className="pane-empty">
                 {sessionReady
-                  ? '从工具栏打开面板（终端 / Passthrough / 配置）'
+                  ? '从工具栏打开面板（终端 / Passthrough / 容器配置）'
                   : '正在连接容器 server 并同步会话…'}
               </div>
             )}

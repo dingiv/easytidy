@@ -1,4 +1,7 @@
-//! Master GUI 命令：容器生命周期 + 环境（env）语义 + flavor。
+//! Master GUI 命令：容器生命周期 + 环境（env）语义。
+//!
+//! 模板管理(fui 侧)由 conf YAML 取代 flavor TOML——见 `commands::config::*`。
+//! CLI 仍使用 core::flavor；GUI 模板 tab 直接读写 `~/.easytidy/conf`。
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -6,7 +9,6 @@ use tracing::{debug, error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
-use easytidy_core::flavor::Flavor;
 use easytidy_core::models::{ContainerConfig, ContainerSummary};
 
 use crate::commands::socket::send_json_request;
@@ -143,12 +145,6 @@ pub struct EnvView {
     pub managed: bool,
 }
 
-/// 列出可用 flavor 模板（$XDG_CONFIG_HOME/easytidy/flavors/*.toml）。
-#[tauri::command]
-pub fn flavor_list() -> Result<Vec<String>, String> {
-    Flavor::list().map_err(|e| e.to_string())
-}
-
 // ============================================================================
 // 镜像管理命令（GUI 镜像板块）
 // ============================================================================
@@ -192,28 +188,8 @@ pub async fn image_remove(
 }
 
 // ============================================================================
-// flavor 管理命令（GUI flavor 板块：启动配置模板）
+// 环境（env）语义 + conf 模板扩展（doc 镜像管理命令之后、env_list 之前）
 // ============================================================================
-
-/// 列出全部 flavor（含完整配置：镜像/gui/setup/entry/mounts/网络）。
-/// 首次调用补齐内置预设（chrome/firefox/code 快速 GUI 拉起模板）。
-#[tauri::command]
-pub fn flavor_list_detailed() -> Result<Vec<Flavor>, String> {
-    easytidy_core::flavor::ensure_presets();
-    Flavor::list_detailed().map_err(|e| e.to_string())
-}
-
-/// 保存 flavor（新建或覆盖；原子写 ~/.easytidy/flavors/<name>.toml）。
-#[tauri::command]
-pub fn flavor_save(flavor: Flavor) -> Result<(), String> {
-    flavor.save().map_err(|e| e.to_string())
-}
-
-/// 删除 flavor。
-#[tauri::command]
-pub fn flavor_delete(name: String) -> Result<(), String> {
-    Flavor::delete(&name).map_err(|e| e.to_string())
-}
 
 /// 列出所有环境（managed 容器 + configfile 注册表合并）。
 #[tauri::command]
@@ -258,19 +234,9 @@ pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvVi
     Ok(views)
 }
 
-/// 展开 flavor 模板为完整 [`ContainerConfig`]（创建表单预填用）。
-///
-/// 展开必须在宿主侧执行：GUI 透传要注入宿主 DISPLAY/WAYLAND_DISPLAY/
-/// XDG_RUNTIME_DIR、探测宿主字体/图标目录存在性（`Flavor::build_config`）。
-/// 展开结果交回表单，用户可继续修改后经 [`env_new`] 提交——模板只是预填，
-/// 创建入口统一收 `ContainerConfig`（与单实例 GUI 配置管理同一定义）。
-#[tauri::command]
-pub fn flavor_expand(name: String, flavor: String) -> Result<ContainerConfig, String> {
-    let flavor = Flavor::load(&flavor).map_err(|e| format!("加载 flavor {flavor} 失败：{e}"))?;
-    flavor
-        .build_config(&name)
-        .map_err(|e| format!("展开 flavor 配置失败：{e}"))
-}
+/// 模板展开已迁移到 conf YAML（`commands::config::conf_template_get`）：
+/// conf 模板 = 完整 ContainerConfig flatten + 可选 setup；创建表单预填直接
+/// 读 conf/<name>.yaml 并解析为 ContainerConfig。flutter 已退役。
 
 /// 新建环境：统一创建入口，收完整 [`ContainerConfig`]（创建后启动并注册）。
 ///
@@ -335,10 +301,13 @@ pub async fn env_new(
     Ok(())
 }
 
-/// 模板派生清单：每个 flavor 有哪些容器以其为血缘（FlavorsPanel 展示
+/// 模板派生清单：每个 conf 模板有哪些容器以其为血缘（FlavorsPanel 展示
 /// 「派生容器」+ 批量同步入口）。自由创建的容器（无血缘）不出现。
+///
+/// 数据源：`configfile` 注册表里每个容器的 `flavor` 字段——容器从 conf 模板创建
+/// 时该字段存模板名（与旧 TOML flavor 共用同一血缘语义）。
 #[tauri::command]
-pub fn flavor_lineage() -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+pub fn template_lineage() -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
     let config_file = ConfigFile::with_path(config_path);
     let containers = config_file

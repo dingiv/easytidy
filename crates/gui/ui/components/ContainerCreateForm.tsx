@@ -1,66 +1,67 @@
-// 新建容器页内表单 —— Master GUI「新建容器」图标入口的主面板。
+// 新建容器页 —— 配置编辑器的「创建容器」入口。
 //
-// 单一职责:输入容器名 + 选 flavor(可选)+ 填剩余字段 → 提交 env_new。
-// 镜像字段就是 ContainerConfigEditor "容器" section 里的镜像输入框。
-//
-// flavor 处理逻辑:
-// - 挂载时拉一次 flavor_list;有 flavor 时在表单顶部显示 Select(默认禁用,
-//   等用户先输入名称后启用)用于把模板声明预填进表单
-// - 没 flavor 时直接用空白表单,等同于旧的"image"模式(用户填镜像即可)
-// - 选了 flavor 后任何字段都可继续改——flavor 仅作预填,不是约束
+// 入口 specific 逻辑：本地 useState + conf 模板预填 + 提交校验 + 创建按钮。
+// 布局/标题/Spin/Alert 由 `ConfigEditorPane` Shell 统一。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
 import { App as AntApp, Alert, Button, Select, Typography } from 'antd';
 import { PlayCircleOutlined } from '@ant-design/icons';
-import type { ContainerConfig } from '../types';
-import { BLANK_CONTAINER_CONFIG, ContainerConfigEditor } from './config/ContainerConfigEditor';
+import type { ConfTemplate, ContainerConfig } from '../types';
+import { BLANK_CONTAINER_CONFIG } from './config/ContainerConfigEditor';
+import { ConfigEditorPane } from './config/ConfigEditorPane';
 import './ContainerCreateForm.css';
 
 interface ContainerCreateFormProps {
   /** 创建成功后回调（刷新列表并退出表单） */
   onCreated(): void;
-  /** 预选模板（flavor 卡片「启动」进入）：名称就绪后自动展开预填 */
-  initialFlavor?: string;
+  /** 预选模板（conf 模板卡片「使用」进入）：名称就绪后自动展开预填 */
+  initialTemplate?: string;
 }
 
-function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateFormProps) {
+function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreateFormProps) {
   const { message, modal } = AntApp.useApp();
 
-  const [flavors, setFlavors] = useState<string[]>([]);
-  const [selectedFlavor, setSelectedFlavor] = useState<string | undefined>(initialFlavor);
+  const [templates, setTemplates] = useState<ConfTemplate[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState<string | undefined>(initialTemplate);
   const [config, setConfig] = useState<ContainerConfig>(BLANK_CONTAINER_CONFIG);
   const [creating, setCreating] = useState(false);
   // 预选模板的自动展开只做一次（名称就绪后）；此后切换/手选均为手动
   const [autoExpanded, setAutoExpanded] = useState(false);
 
-  // 可用 flavor 模板（挂载即取；空数组表示"无模板,直接走镜像方式"）
+  // 可用 conf 模板（挂载即取；空数组表示"无模板,直接走镜像方式"）
   useEffect(() => {
-    invoke<string[]>('flavor_list')
-      .then(setFlavors)
+    invoke<ConfTemplate[]>('conf_templates')
+      .then(setTemplates)
       .catch((err) => {
-        console.error('flavor_list failed:', err);
-        setFlavors([]);
+        console.error('conf_templates failed:', err);
+        setTemplates([]);
       });
   }, []);
 
-  /** 选定 flavor → 宿主侧展开为完整 ContainerConfig 预填表单（可继续改） */
-  const handleFlavorSelect = async (flavor: string) => {
-    const name = config.name.trim();
-    if (!name) return; // Select 已按名称非空启用，防御
+  /** 选定 conf 模板 → 预填表单。`name` 显式传入；缺省用表单当前名（切换模板场景）。 */
+  const handleTemplateSelect = async (name: string, containerName?: string) => {
+    const resolvedName = (containerName ?? config.name).trim();
+    if (!resolvedName) return; // 展开结果含容器名，无名称时无意义
     try {
-      const expanded = await invoke<ContainerConfig>('flavor_expand', { name, flavor });
-      setConfig(expanded); // expanded.name = name，保留用户输入
-      setSelectedFlavor(flavor);
+      // conf_template_expand 直接返回已注入宿主 env 的 ContainerConfig：
+      // gui=true 时按宿主实时 DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR 注入,
+      // 并盖 flavor=模板名(血缘追溯)。省去前端再展开 / 拼装。
+      const expanded = await invoke<ContainerConfig>('conf_template_expand', {
+        name,
+        containerName: resolvedName,
+      });
+      setConfig(expanded);
+      setSelectedTemplate(name);
     } catch (err: any) {
-      message.error(errMsg(err, `展开模板 ${flavor} 失败`));
+      message.error(errMsg(err, `展开模板 ${name} 失败`));
     }
   };
 
-  /** 切换 flavor 选中 → 清掉模板预填,保留已输入名称 + 镜像 */
-  const handleFlavorClear = () => {
-    setSelectedFlavor(undefined);
+  /** 切换模板选中 → 清掉模板预填,保留已输入名称 + 镜像 */
+  const handleTemplateClear = () => {
+    setSelectedTemplate(undefined);
     setConfig((prev) => ({
       ...BLANK_CONTAINER_CONFIG,
       name: prev.name,
@@ -100,52 +101,63 @@ function ContainerCreateFormInner({ onCreated, initialFlavor }: ContainerCreateF
   };
 
   const nameReady = config.name.trim().length > 0;
-  const hasFlavors = flavors.length > 0;
+  const hasTemplates = templates.length > 0;
 
-  // 预选模板（flavor 卡片「启动」进入）：名称就绪后自动展开预填一次
+  // 模板「使用」直达：挂载即有 initialTemplate 时立即展开预填（容器名预填
+  // 模板名，可改），不再等用户先输名称。
   useEffect(() => {
-    if (!initialFlavor || autoExpanded || !nameReady) return;
+    if (!initialTemplate || autoExpanded) return;
     setAutoExpanded(true);
-    handleFlavorSelect(initialFlavor);
+    // 先乐观填入容器名（展开返回前避免空名闪现，也让模板 Select 立即可用）
+    setConfig((prev) => (prev.name.trim() ? prev : { ...prev, name: initialTemplate }));
+    void handleTemplateSelect(initialTemplate, initialTemplate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialFlavor, autoExpanded, nameReady]);
+  }, [initialTemplate, autoExpanded]);
 
   return (
-    <div className="container-create-form">
-      {/* flavor 入口：仅当本地存在 flavor 时显示（空 flavor_list 时直接走镜像方式） */}
-      {hasFlavors && (
-        <div className="container-create-flavor">
-          <Select
-            style={{ minWidth: 260 }}
-            placeholder={
-              nameReady
-                ? '选择预设配置预填表单（可继续调整任何字段）'
-                : '请先在下方「容器」section 输入名称'
-            }
-            value={selectedFlavor}
-            onChange={handleFlavorSelect}
-            onClear={handleFlavorClear}
-            allowClear
-            disabled={!nameReady}
-            options={flavors.map((f) => ({ value: f, label: f }))}
-            notFoundContent="暂无可用模板"
-          />
-          {!nameReady && (
+    <div className="container-create-page">
+      <ConfigEditorPane
+        title="新建容器"
+        mode="create"
+        value={config}
+        onChange={setConfig}
+        headerActions={
+          hasTemplates && (
+            <Select
+              style={{ minWidth: 260 }}
+              placeholder={
+                nameReady
+                  ? '选择预设模板预填表单（可继续调整任何字段）'
+                  : '请先在下方「容器」section 输入名称'
+              }
+              value={selectedTemplate}
+              onChange={(value) => handleTemplateSelect(value)}
+              onClear={handleTemplateClear}
+              allowClear
+              disabled={!nameReady}
+              options={templates.map((t) => ({ value: t.name, label: t.name }))}
+              notFoundContent="暂无可用模板"
+            />
+          )
+        }
+        notices={
+          hasTemplates && !nameReady && (
             <Alert
               type="info"
               showIcon
               message="模板按容器名称展开（挂载/环境变量与其绑定），请先在下方「容器」section 输入名称"
             />
-          )}
-        </div>
-      )}
+          )
+        }
+      />
 
-      <ContainerConfigEditor mode="create" value={config} onChange={setConfig} />
-
+      {/* 提交操作栏：放在 ConfigEditorPane 外，作为页面级动作。
+        概念上「创建并启动」是表单提交按钮，不是编辑器的 footer——后者只承载
+        编辑器自身的状态（如容器配置的 saved/apply），不混入跨生命周期的页面动作。 */}
       <div className="container-create-foot">
         <Typography.Text type="secondary" className="container-create-hint">
-          {selectedFlavor
-            ? `由模板「${selectedFlavor}」预填，镜像需已拉取。修改字段后再次保存将以当前表单内容为准。`
+          {selectedTemplate
+            ? `由模板「${selectedTemplate}」预填，镜像需已拉取。修改字段后再次保存将以当前表单内容为准。`
             : '镜像需已在「镜像」面板拉取；创建后自动注册配置并生成桌面图标。'}
         </Typography.Text>
         <Button

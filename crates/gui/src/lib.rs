@@ -70,7 +70,6 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::common::get_app_mode,
             // Master GUI（容器管理 + 模板 + 镜像 + 配置）
             commands::containers::list_containers,
-            commands::containers::flavor_expand,
             commands::containers::start_container,
             commands::containers::stop_container,
             commands::containers::restart_container,
@@ -79,16 +78,11 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::build_server,
             commands::containers::open_container_window,
             commands::containers::container_shutdown,
-            // 环境（env）语义
-            commands::containers::flavor_list,
             // 镜像管理
             commands::containers::images_list,
             commands::containers::image_pull,
             commands::containers::image_remove,
-            // flavor 管理（启动配置模板）
-            commands::containers::flavor_list_detailed,
-            commands::containers::flavor_save,
-            commands::containers::flavor_delete,
+            // 环境（env）语义
             commands::containers::env_list,
             commands::containers::env_new,
             commands::containers::env_rebuild,
@@ -97,11 +91,23 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::env_fork,
             commands::containers::env_start,
             commands::containers::env_stop,
-            // 配置管理器
+            // 模板派生清单（conf 模板按 container.flavor 字段分组）
+            commands::containers::template_lineage,
+            // 配置管理器（单实例 GUI：get/apply/sync + 血缘）
             commands::config::get_container_config,
             commands::config::apply_container_config,
-            commands::config::config_sync_from_flavor,
-            commands::containers::flavor_lineage,
+            commands::config::config_sync_from_template,
+            // 配置编辑器 YAML 桥 + conf 模板管理（GUI 全面切 YAML 后取代 flavor）
+            commands::config::conf_parse,
+            commands::config::conf_load_dialog,
+            commands::config::conf_save_dialog,
+            commands::config::conf_examples,
+            commands::config::conf_templates,
+            commands::config::conf_template_get,
+            commands::config::conf_template_expand,
+            commands::config::conf_save_template,
+            commands::config::conf_rm_template,
+            commands::config::conf_duplicate_template,
             // PTY 终端
             commands::pty::get_terminals,
             commands::pty::pty_open,

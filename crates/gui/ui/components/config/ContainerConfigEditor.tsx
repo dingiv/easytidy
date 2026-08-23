@@ -8,14 +8,27 @@
 //   预填后任何字段可继续改
 // - mode='edit'：名称恒定（改名 = 另一个容器）、镜像只读展示 + 血缘标签；
 //   effective（podman inspect 投影）与 hostUser 提供对照视图，创建时缺省
+//
+// 顶部工具条（两种模式共用）：配置 YAML 桥 ——
+//   「示例模板」下拉：conf_examples() 内置模板 → conf_parse 预填
+//   「加载 YAML」：conf_load_dialog()（rfd 选取宿主 YAML → 解析 → 整表预填）
+//   「导出 YAML」：conf_save_dialog()（表单 → YAML → rfd 保存对话框落盘）
+// edit 模式下加载只替换"可编辑载荷"（容器身份 name / 血缘 flavor 保留——
+// apply_container_config 会强制当前容器名，血缘断开是不可逆的身份变更）。
 
 import {
   ApiOutlined,
   CodeOutlined,
   DatabaseOutlined,
+  ExportOutlined,
   FolderOpenOutlined,
+  ImportOutlined,
   UserOutlined,
 } from '@ant-design/icons';
+import { useEffect, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { App as AntApp, Button, Select, Tooltip } from 'antd';
+import { errMsg } from '../../lib/errors';
 import type {
   ContainerConfig,
   ContainerConfigView,
@@ -58,16 +71,140 @@ export interface ContainerConfigEditorProps {
   hostUser?: HostUser | null;
 }
 
+/** 后端 LoadConfResp（加载 YAML 对话框返回） */
+interface LoadConfResp {
+  path: string;
+  config: ContainerConfig;
+}
+
+/** 后端 ExampleConf（内置示例模板条目） */
+interface ExampleConf {
+  name: string;
+  yaml: string;
+}
+
 /** 单页容器配置编辑器：自上而下 section（容器 / 挂载 / 网络 / 环境变量 / 用户） */
 export function ContainerConfigEditor({
   value, onChange, mode, effective = null, hostUser = null,
 }: ContainerConfigEditorProps) {
+  const { message } = AntApp.useApp();
+  const [examples, setExamples] = useState<ExampleConf[]>([]);
+  const [exampleSel, setExampleSel] = useState<string | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+
+  // 挂载即拉内置示例模板（conf/*.yaml 编译期打进二进制的三件套）
+  useEffect(() => {
+    invoke<ExampleConf[]>('conf_examples')
+      .then(setExamples)
+      .catch((err) => console.error('conf_examples failed:', err));
+  }, []);
+
   const update = (patch: Partial<ContainerConfig>) => onChange({ ...value, ...patch });
   const updateNetwork = (patch: Partial<ContainerConfig['network']>) =>
     onChange({ ...value, network: { ...value.network, ...patch } });
 
+  /**
+   * 应用外部加载的配置（YAML 文件 / 内置示例共用）。
+   * edit 模式保留容器身份（name / flavor）——改名 = 另一个容器，
+   * 血缘断开是不可逆身份变更；加载只替换可编辑载荷。
+   */
+  const applyLoaded = (loaded: ContainerConfig) => {
+    if (mode === 'edit') {
+      onChange({
+        ...loaded,
+        name: value.name,
+        flavor: value.flavor ?? loaded.flavor ?? null,
+      });
+    } else {
+      onChange(loaded);
+    }
+  };
+
+  /** 「加载 YAML」：rfd 选文件 → 后端解析 → 整表预填 */
+  const handleLoad = async () => {
+    setBusy(true);
+    try {
+      const resp = await invoke<LoadConfResp>('conf_load_dialog');
+      applyLoaded(resp.config);
+      message.success(`已加载配置：${resp.path}`);
+    } catch (err) {
+      const msg = errMsg(err);
+      if (msg !== '已取消') message.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 「示例模板」下拉：选中 → conf_parse → 预填 */
+  const handleExampleSelect = async (name: string | undefined) => {
+    if (!name) return;
+    const ex = examples.find((e) => e.name === name);
+    if (!ex) return;
+    setBusy(true);
+    setExampleSel(name);
+    try {
+      const config = await invoke<ContainerConfig>('conf_parse', { text: ex.yaml });
+      applyLoaded(config);
+      message.success(`已按示例「${name}」预填表单`);
+    } catch (err) {
+      message.error(errMsg(err, '解析示例模板失败'));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 「导出 YAML」：表单 → YAML → rfd 保存对话框落盘 */
+  const handleExport = async () => {
+    setBusy(true);
+    try {
+      const dest = await invoke<string>('conf_save_dialog', { config: value });
+      message.success(`已导出：${dest}`);
+    } catch (err) {
+      const msg = errMsg(err);
+      if (msg !== '已取消') message.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="config-editor">
+      <div className="conf-toolbar">
+        <Select
+          size="small"
+          style={{ minWidth: 150 }}
+          placeholder="示例模板"
+          value={exampleSel}
+          onChange={handleExampleSelect}
+          loading={examples.length === 0}
+          disabled={busy}
+          options={examples.map((e) => ({ value: e.name, label: e.name }))}
+          notFoundContent="无内置示例"
+        />
+        <Tooltip title="从宿主选择 .yaml 配置载入并预填表单">
+          <Button
+            size="small"
+            icon={<ImportOutlined />}
+            disabled={busy}
+            loading={busy}
+            onClick={handleLoad}
+          >
+            加载 YAML
+          </Button>
+        </Tooltip>
+        <Tooltip title="将当前表单导出为 .yaml（可分享/复用）">
+          <Button
+            size="small"
+            icon={<ExportOutlined />}
+            disabled={busy}
+            loading={busy}
+            onClick={handleExport}
+          >
+            导出 YAML
+          </Button>
+        </Tooltip>
+      </div>
+
       <section className="config-section">
         <h3 className="config-section-title">
           <DatabaseOutlined /> 容器

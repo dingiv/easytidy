@@ -196,26 +196,18 @@ export interface ImageSummary {
   created: number;
 }
 
-/// flavor 启动配置模板（flavor_list_detailed / flavor_save；
-/// 描述"将一个镜像 run 起来"需要向 easytidy 传递的完整配置清单）
-export interface Flavor {
-  name: string;
-  /// 基础镜像
-  image: string;
-  /// GUI 透传（显示环境注入 + 字体/图标 + 用户映射）
+/// conf 启动配置模板（conf_templates / conf_template_get / conf_save_template；
+/// GUI 全面切 YAML 后取代 flavor TOML 模板——见 `commands::config::conf_templates`）。
+///
+/// 后端 `ConfTemplate` 用 `#[serde(flatten)]` 平铺 `ContainerConfig` 字段,
+/// YAML 序列化形状 = 容器关键参数 + `setup` + `gui`。前端用 `extends ContainerConfig`
+/// 直接继承平铺字段。
+export interface ConfTemplate extends ContainerConfig {
+  /// GUI 透传开关（后端 `gui: bool`）：`true` 时宿主实时 env + 字体图标挂载
+  /// 在 `conf_template_expand` 展开时注入，避免模板硬编 session 特有值
   gui: boolean;
-  /// 创建后按序执行的安装命令
+  /// 创建后按序执行的安装命令（本轮只存不执行；执行链路下一步接入）
   setup: string[];
-  /// entry 应用（容器内可执行名）
-  entry?: string | null;
-  /// entry 应用参数
-  entry_args: string[];
-  /// 额外路径映射
-  mounts: MountConfig[];
-  /// 用户一致性映射（gui=true 时强制开启；Rust 侧为共享基座 bool，默认 true）
-  user_home?: boolean;
-  /// 网络配置
-  network: ContainerNetworkConfig;
 }
 
 /// PTY event from pty_open

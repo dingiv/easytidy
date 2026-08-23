@@ -40,7 +40,7 @@ use connection::handle_connection;
 use http::start_http_server;
 use services::apps::{child_prune_task, launch_entry_command};
 use services::lifecycle::perform_graceful_shutdown;
-use setup::{fixup_xdg_data_dirs, setup_fontconfig, setup_user_mapping};
+use setup::{ensure_xauthority, fixup_xdg_data_dirs, setup_fontconfig, setup_user_mapping};
 use state::ServerState;
 
 #[derive(Parser, Debug)]
@@ -65,6 +65,11 @@ async fn main() -> Result<()> {
     // 崩溃（2026-08-07 Chrome 保存图片实测）。对 env 已固化的旧容器追加系统
     // 默认目录（/usr/local/share:/usr/share，glib 默认；缺失路径无害）。
     fixup_xdg_data_dirs();
+
+    // XAUTHORITY server 内置自动注入：路径含随机后缀,每次会话都变,不让用户配——
+    // 自动探 /run/user/$uid 下 mutter-Xwaylandauth.* 或 xauth_*,覆盖进程 env
+    // (忽略 podman create 时可能注入的旧值)。
+    ensure_xauthority();
 
     // Initialize tracing
     let env_filter = EnvFilter::from_default_env()

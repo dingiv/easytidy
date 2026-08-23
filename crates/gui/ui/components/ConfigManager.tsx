@@ -1,13 +1,12 @@
-// 容器配置管理器（zustand 驱动 + 统一编辑器）。
+// 容器配置管理器（编辑既有容器）—— 配置编辑器的「实例编辑」入口。
 //
-// 状态在 stores/configStore：saved/effective/edit/hostUser/flavorStatus +
-// **dirty 标志位**（编辑动作显式置位,不再深比较推断——比较法对引擎注入
-// env/mounts/userns 回显的过滤有漏网,未修改也误报"配置已修改",
-// 2026-08-08 实测）。保存即"保存并重启容器",成功后重载,不存在
-// "已保存未生效"状态。
+// 本入口复用 `ConfigEditorPane` Shell：仅承载 entry-specific 逻辑：
+//   - zustand store 订阅（load / apply / syncFromTemplate）
+//   - handleApply 提交校验（mounts / ports / env —— entry-specific 提交语义）
+//   - header 操作（模板 sync / 刷新 / 保存并重启）
+//   - 警示（模板漂移 / 未保存修改）
 //
-// 表单体是统一编辑器 ContainerConfigEditor（与主 GUI 创建共用同一套
-// ContainerConfig 编辑 UI）；本组件只承担：加载/校验/保存重启/模板同步。
+// 布局/标题/Spin/Alert 位置由 Shell 统一。
 
 import { useEffect } from 'react';
 import {
@@ -16,8 +15,6 @@ import {
   Button,
   Popconfirm,
   Space,
-  Spin,
-  Typography,
 } from 'antd';
 import {
   ForkOutlined,
@@ -25,9 +22,8 @@ import {
   SaveOutlined,
 } from '@ant-design/icons';
 import { validateEnv } from './config/utils';
-import { ContainerConfigEditor } from './config/ContainerConfigEditor';
+import { ConfigEditorPane } from './config/ConfigEditorPane';
 import { useConfigStore } from '../stores/configStore';
-import './ConfigManager.css';
 
 interface ConfigManagerProps {
   containerName: string;
@@ -37,7 +33,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
   const { message } = AntApp.useApp();
   const {
     effective, hostUser, edit, loading, applying, syncing, error, dirty,
-    flavorStatus, load, update, apply, syncFromFlavor, clearError,
+    flavorStatus, load, update, apply, syncFromTemplate, clearError,
   } = useConfigStore();
 
   useEffect(() => {
@@ -48,7 +44,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
   // ---------- 从模板同步（血缘） ----------
 
   const handleSync = async () => {
-    const note = await syncFromFlavor(containerName);
+    const note = await syncFromTemplate(containerName);
     if (note) message.success(note);
   };
 
@@ -56,7 +52,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
 
   const handleApply = async () => {
     if (!edit) return;
-    // 提交前校验（编辑操作已校验,此处防陈旧状态）
+    // 提交前校验（编辑操作已校验，此处防陈旧状态）
     for (const m of edit.mounts) {
       if (!m.host_path.trim() || !m.container_path.trim()) {
         message.error('存在路径为空的挂载项');
@@ -94,12 +90,36 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
     }
   };
 
+  // 加载失败且无缓存 edit：只显示错误，避免编辑器拿不到 value（ContainerConfigEditor 必填）
+  if (!loading && !edit) {
+    return (
+      <div className="config-editor-pane">
+        {error && (
+          <Alert
+            type="error"
+            showIcon
+            message="操作失败"
+            description={error}
+            closable={Boolean(clearError)}
+            onClose={clearError}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="config-manager">
-      <div className="config-manager-header">
-        <Typography.Title level={4} className="config-manager-title">
-          容器配置
-        </Typography.Title>
+    <ConfigEditorPane
+      title="容器配置"
+      mode="edit"
+      value={edit!}
+      onChange={(next) => update(() => next)}
+      effective={effective}
+      hostUser={hostUser}
+      error={error}
+      onClearError={clearError}
+      loading={loading}
+      headerActions={
         <Space>
           {/* 血缘：来源模板 + 漂移状态 + 从模板同步（重建容器） */}
           {flavorStatus && (
@@ -148,60 +168,38 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
             onConfirm={handleApply}
             disabled={!edit || applying || !dirty}
           >
-            <Button type="primary" icon={<SaveOutlined />} loading={applying} disabled={!edit || !dirty}>
+            <Button
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={applying}
+              disabled={!edit || !dirty}
+            >
               保存并重启
             </Button>
           </Popconfirm>
         </Space>
-      </div>
-
-      {error && (
-        <Alert
-          type="error"
-          showIcon
-          message="操作失败"
-          description={error}
-          closable
-          onClose={clearError}
-        />
-      )}
-
-      {!loading && flavorStatus?.exists && flavorStatus.drifted && !dirty && (
-        <Alert
-          type="info"
-          showIcon
-          message={`模板「${flavorStatus.flavor}」与当前配置存在差异`}
-          description="来源模板已修改（或宿主显示环境变化导致展开结果不同）。可点击右上角「模板: …」按钮按模板重新同步（重建容器）。"
-        />
-      )}
-
-      {!loading && edit && dirty && (
-        <Alert
-          type="warning"
-          showIcon
-          message="有未保存的修改"
-          description="修改将在保存并重启容器后生效。"
-        />
-      )}
-
-      {loading ? (
-        <div className="config-manager-loading">
-          <Spin tip="加载配置…" size="large">
-            <div className="spin-block" />
-          </Spin>
-        </div>
-      ) : !edit ? null : (
-        // 统一编辑器（与主 GUI 创建共用）：受控 onChange → store.update
-        // （dirty 置位）；edit 模式携带 inspect 投影 + 宿主用户对照
-        <ContainerConfigEditor
-          mode="edit"
-          value={edit}
-          onChange={(next) => update(() => next)}
-          effective={effective}
-          hostUser={hostUser}
-        />
-      )}
-    </div>
+      }
+      notices={
+        <>
+          {!loading && flavorStatus?.exists && flavorStatus.drifted && !dirty && (
+            <Alert
+              type="info"
+              showIcon
+              message={`模板「${flavorStatus.flavor}」与当前配置存在差异`}
+              description="来源模板已修改（或宿主显示环境变化导致展开结果不同）。可点击右上角「模板: …」按钮按模板重新同步（重建容器）。"
+            />
+          )}
+          {!loading && edit && dirty && (
+            <Alert
+              type="warning"
+              showIcon
+              message="有未保存的修改"
+              description="修改将在保存并重启容器后生效。"
+            />
+          )}
+        </>
+      }
+    />
   );
 }
 

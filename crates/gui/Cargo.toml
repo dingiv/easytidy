@@ -20,6 +20,7 @@ tauri = { version = "2", features = ["devtools"] }
 tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 easytidy-core = { path = "../core" }
 easytidy-protocol = { path = "../protocol" }
 dirs = { workspace = true }
@@ -32,3 +33,6 @@ futures = { workspace = true }
 tokio-util = { workspace = true }
 base64 = "0.22"
 tracing-appender = "0.2.5"
+
+[dev-dependencies]
+tempfile = { workspace = true }

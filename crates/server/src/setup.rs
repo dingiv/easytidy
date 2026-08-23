@@ -346,6 +346,54 @@ pub(crate) async fn username_for_uid(uid: u32) -> Option<String> {
     })
 }
 
+/// 探测 X11 auth 文件并强制覆盖进程 `XAUTHORITY`(server 内置 GUI 透传)。
+///
+/// **为什么不让用户配 XAUTHORITY**:
+/// - 路径含随机后缀(典型 `/run/user/$uid/mutter-Xwaylandauth.<random>` 或
+///   `xauth_<random>`,由 compositor 在登录会话时随机生成,会变)。
+/// - 用户写在 YAML/容器配置里的字面值无法跟住 session 变化——历史上因
+///   `.mutter-Xwaylandauth.XXXXXX` 字面占位符 + 文件不存在 → Chrome "Authorization
+///   required" 的 bug 链就是这条。
+/// - 这是 session 耦合运行时数据,不是用户配置。把它做进 server:
+///   容器每次启动 server 时,**忽略** podman create 时可能注入的任何
+///   `XAUTHORITY`(包括 host 注入 + 用户模板声明),由 server 自己探 $XDG_RUNTIME_DIR
+///   下已知模式,覆盖写进程 env。后续 pty.open / apps.launch 经 `std::env::vars()`
+///   取到的就是 server 持有值。
+///
+/// **探针模式**(按优先序取第一个匹配):
+///   1. `mutter-Xwaylandauth.*`(GNOME/Mutter 启动 Xwayland 时生成)
+///   2. `xauth_*`(Xorg 原生或老会话)
+///
+/// 取不到时仅 warn——非 GUI 容器(纯 headless)不应被这条路径阻碍启动。
+pub(crate) fn ensure_xauthority() -> Option<String> {
+    let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
+        tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
+        return None;
+    };
+    let Ok(read_dir) = std::fs::read_dir(&runtime) else {
+        tracing::debug!("XDG_RUNTIME_DIR ({runtime}) 不可读,跳过 XAUTHORITY 自动注入");
+        return None;
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let Some(n) = name.to_str() else { continue };
+        if n.starts_with("mutter-Xwaylandauth.") || n.starts_with("xauth_") {
+            let path = format!("{runtime}/{n}");
+            tracing::info!("server 自动注入 XAUTHORITY={path} (覆盖 podman create 时可能注入的旧值)");
+            // 覆盖进程 env——后续 pty.open 经 std::env::vars() 取到的就是这个值。
+            // std::env::set_var 在多线程下是 unsafe(race),server 此时仍单线程
+            // (未启动 listener / accept 循环),安全。
+            std::env::set_var("XAUTHORITY", &path);
+            return Some(path);
+        }
+    }
+    tracing::warn!(
+        "未在 {runtime} 找到 X11 auth 文件(mutter-Xwaylandauth.* 或 xauth_*);\
+         X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
+    );
+    None
+}
+
 /// POSIX shell 单引号转义：参数包在单引号内，内部 `'` 用 `'\''` 序列
 /// （闭合-转义-重开），保证 `su -c '<cmd>'` 内命令原样传给用户 shell 解析。
 pub(crate) fn shell_escape_single_quote(s: &str) -> String {
@@ -369,4 +417,119 @@ pub(crate) fn build_su_command(cmd: &str, argv: &[String]) -> String {
     parts.push(shell_escape_single_quote(cmd));
     parts.extend(argv.iter().skip(1).map(|a| shell_escape_single_quote(a)));
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// 测试串行化:`ensure_xauthority` 修改的是**进程全局 env**(XDG_RUNTIME_DIR +
+    /// XAUTHORITY),并行跑会让测试互相污染(一个测试设的目录会被另一个读到)。
+    /// 全局锁串行执行——env 测试套件本来就该跑得很快。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 临时把 XDG_RUNTIME_DIR 指向 tempfile,模拟用户登录会话的 runtime 目录。
+    /// 还原旧值:测后无论成功失败都恢复 XDG_RUNTIME_DIR 与 XAUTHORITY,
+    /// 避免污染后续测试(包括 cargo test 并行运行的其他 crate 测试)。
+    struct RuntimeDirGuard {
+        prev: Option<String>,
+        xauthority_prev: Option<String>,
+    }
+    impl RuntimeDirGuard {
+        fn new(dir: &std::path::Path) -> Self {
+            let prev = std::env::var("XDG_RUNTIME_DIR").ok();
+            std::env::set_var("XDG_RUNTIME_DIR", dir);
+            let xauthority_prev = std::env::var("XAUTHORITY").ok();
+            Self { prev, xauthority_prev }
+        }
+    }
+    impl Drop for RuntimeDirGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+                None => std::env::remove_var("XDG_RUNTIME_DIR"),
+            }
+            match &self.xauthority_prev {
+                Some(v) => std::env::set_var("XAUTHORITY", v),
+                None => std::env::remove_var("XAUTHORITY"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_ensure_xauthority_discovers_mutter() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+
+        // 模拟 Mutter 生成的 Xwayland auth 文件
+        let auth_path = tmp.path().join("mutter-Xwaylandauth.hzQT2z");
+        std::fs::write(&auth_path, b"mock-cookie").unwrap();
+
+        let result = ensure_xauthority();
+        assert_eq!(result.as_deref(), Some(auth_path.to_str().unwrap()));
+        assert_eq!(
+            std::env::var("XAUTHORITY").ok().as_deref(),
+            Some(auth_path.to_str().unwrap()),
+            "ensure_xauthority 应覆盖进程 env"
+        );
+    }
+
+    #[test]
+    fn test_ensure_xauthority_discovers_xauth_prefix() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+
+        let auth_path = tmp.path().join("xauth_abc123");
+        std::fs::write(&auth_path, b"mock-cookie").unwrap();
+
+        let result = ensure_xauthority();
+        assert_eq!(result.as_deref(), Some(auth_path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn test_ensure_xauthority_overrides_user_config() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+
+        // 用户在 YAML 里写的字面占位符(历史 bug 链)
+        std::env::set_var(
+            "XAUTHORITY",
+            "/run/user/1000/.mutter-Xwaylandauth.XXXXXX",
+        );
+
+        // server 启动后自动发现真实 auth 文件,覆盖用户配的占位符
+        let real_auth = tmp.path().join("mutter-Xwaylandauth.real");
+        std::fs::write(&real_auth, b"cookie").unwrap();
+
+        ensure_xauthority();
+        assert_eq!(
+            std::env::var("XAUTHORITY").ok().as_deref(),
+            Some(real_auth.to_str().unwrap()),
+            "server 必须覆盖用户配的字面值"
+        );
+    }
+
+    #[test]
+    fn test_ensure_xauthority_no_xdg_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = RuntimeDirGuard {
+            prev: std::env::var("XDG_RUNTIME_DIR").ok(),
+            xauthority_prev: std::env::var("XAUTHORITY").ok(),
+        };
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        assert_eq!(ensure_xauthority(), None);
+    }
+
+    #[test]
+    fn test_ensure_xauthority_no_auth_file_returns_none() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+        // 空目录:无 auth 文件,headless 容器场景
+        assert_eq!(ensure_xauthority(), None);
+    }
 }
