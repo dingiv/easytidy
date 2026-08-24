@@ -67,7 +67,7 @@ struct Args {
     log_file: Option<PathBuf>,
 }
 
-#[tokio::main]
+#[tokio::main(worker_threads = 2)]
 async fn main() -> Result<()> {
     // Parse arguments
     let args = Args::parse();

@@ -9,7 +9,6 @@ use anyhow::{Context, Result};
 use futures::stream::SplitSink;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::net::UnixStream;
@@ -29,20 +28,6 @@ pub enum AppMode {
 
 /// 单条 PTY 会话的写侧（该 PTY 专用连接的 sink）
 pub type PtySink = Arc<tokio::sync::Mutex<SplitSink<Framed<UnixStream, FrameCodec>, Frame>>>;
-
-/// 宿主侧 exec PTY 会话句柄（root 终端：不经容器 server，宿主 bollard
-/// exec API 直连 podman socket）。input drop = stdin EOF → shell 退出。
-#[derive(Clone)]
-pub struct ExecHandle {
-    /// exec ID（resize/退出码查询用）
-    pub exec_id: String,
-    /// stdin 写侧
-    pub input: Arc<tokio::sync::Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
-}
-
-/// exec 型 stream_id 发号基址（与 server 的 stream_id 空间隔离；
-/// server 从 1 递增，实践远达不到此值）
-pub const EXEC_STREAM_ID_BASE: u32 = 1 << 30;
 
 /// 与容器 server 的连接状态机（客户端侧）。
 ///
@@ -70,14 +55,8 @@ pub struct GuiSession {
     pub session_id: std::sync::Mutex<Option<String>>,
     /// 下一个消息 ID
     pub next_msg_id: AtomicU64,
-    /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）
+    /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧；node 与 root 会话共用）
     pub active_ptys: Arc<tokio::sync::Mutex<HashMap<u32, PtySink>>>,
-    /// 宿主 exec PTY（root 终端；id 从 EXEC_STREAM_ID_BASE 起原子递增，
-    /// 永不复用——曾用 max+1 扫描发号，计算与插入之间隔着 exec 创建的
-    /// await 窗口，并发双开撞号 → insert 静默覆盖 → close 误删幸存句柄）
-    pub active_execs: Arc<tokio::sync::Mutex<HashMap<u32, ExecHandle>>>,
-    /// 下一个 exec 型 stream_id（EXEC_STREAM_ID_BASE 起原子递增）
-    pub next_exec_id: std::sync::atomic::AtomicU32,
 }
 
 /// PTY 事件（通过 Channel 发送给前端）

@@ -202,11 +202,11 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
             // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换）
             asRoot: asRoot ?? false,
             persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
-            // node 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前
-            // 屏幕；死会话自动换新）。ref 为空（首次挂载）用面板传入的恢复 id
-            attachStreamId: asRoot
-              ? undefined
-              : streamIdRef.current ?? initialStreamId ?? undefined,
+            // 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前屏幕；
+            // 死会话自动换新）。node 与 root 同语义（root 也走 server 会话，
+            // 幂等：remount 只 attach 不复建）。ref 为空（首次挂载）用面板传入的
+            // 恢复 id
+            attachStreamId: streamIdRef.current ?? initialStreamId ?? undefined,
           }).then((s) => {
             streamIdRef.current = s; // 在 promise 链发布——任何 await 者都可见
             return s;
