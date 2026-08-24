@@ -308,14 +308,18 @@ pub async fn pty_open(
                     }
                 },
                 Some(Err(e)) => {
-                    error!("PTY 流读取错误：{}", e);
+                    error!("PTY 流 {} 读取错误：{}", stream_id, e);
                     break;
                 }
-                None => break,
+                None => {
+                    tracing::warn!("PTY 流 {} 服务端连接关闭(None)", stream_id);
+                    break;
+                }
             }
         }
 
         // 清理
+        tracing::warn!("PTY 流 {} reader 退出,清除 active_ptys 登记", stream_id);
         let mut active = active_ptys.lock().await;
         active.remove(&stream_id);
     });

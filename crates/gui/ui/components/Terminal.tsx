@@ -59,6 +59,12 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
   const terminalInstance = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const streamIdRef = useRef<number | null>(null);
+  // StrictMode dev 模式 mount/unmount/remount 共享同一 pty_open Promise:
+  // cleanup-then-setup 会双调 useEffect,若各调一次 pty_open 则建两个 bash
+  // (Mount 2 拿不到 Mount 1 的 sid,直接走新建路径)。共享 Promise 让
+  // Mount 2 await Mount 1 的 resolve → streamIdRef 已写 → Mount 2 用
+  // attachStreamId 二次 invoke(server fan-out 不创建新 bash)。
+  const inFlightInvokeRef = useRef<Promise<number> | null>(null);
   const [exited, setExited] = useState(false);
 
   useEffect(() => {
@@ -126,6 +132,7 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
       term.write(data);
     };
     const handlePtyEvent = (event: PtyEvent) => {
+      console.log('[DBG-Term] handlePtyEvent kind=', event.kind, 'len=', event.data?.length ?? 0, 'streamIdRef=', streamIdRef.current);
       if (event.kind === 'data' && event.data) {
         // 循环 push（不用 spread：帧超过 ~65535 元素会 RangeError）
         for (const b of event.data) pendingWrites.push(b);
@@ -171,30 +178,57 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
 
     /** 建立流（初始挂载 / 断线重连共用）。
      *  - node 面板：优先 attach 旧会话（server 死会话自动 fallback 新建）
-     *  - root 面板：宿主 exec 通道无 attach 语义，每次新开会话 */
+     *  - root 面板：宿主 exec 通道无 attach 语义，每次新开会话
+     *  - StrictMode dev 模式:共享 inFlightInvokeRef 让 Mount 2 等 Mount 1,
+     *    Mount 2 拿到 sid 后用 attachStreamId 二次 invoke 注册本 mount 的 ch
+     *    (server 不创建新 bash,只是 fan-out 给 ch_2) */
     const establishStream = async (hint: string | null) => {
       const gen = ++streamGen;
       const ch = new Channel<PtyEvent>();
       ch.onmessage = (ev) => {
         if (gen === streamGen) handlePtyEvent(ev); // 旧代事件丢弃
       };
+      console.log('[DBG-Term] establishStream START hint=', hint, 'gen=', gen, 'streamIdRef=', streamIdRef.current, 'initialStreamId=', initialStreamId, 'inFlight=', inFlightInvokeRef.current !== null);
       try {
-        const sid = await invoke<number>('pty_open', {
-          onEvent: ch,
-          cmd: null,
-          cols: term.cols,
-          rows: term.rows,
-          // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换）
-          asRoot: asRoot ?? false,
-          persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
-          // node 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前
-          // 屏幕；死会话自动换新）。ref 为空（首次挂载）用面板传入的恢复 id
-          // ——曾只读 ref，prop 丢失导致每次开窗口都新建会话、旧会话泄漏
-          attachStreamId: asRoot
-            ? undefined
-            : streamIdRef.current ?? initialStreamId ?? undefined,
-        });
+        let sid: number;
+        if (inFlightInvokeRef.current === null) {
+          // 首次挂载:建流
+          inFlightInvokeRef.current = invoke<number>('pty_open', {
+            onEvent: ch,
+            cmd: null,
+            cols: term.cols,
+            rows: term.rows,
+            // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换）
+            asRoot: asRoot ?? false,
+            persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
+            // node 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前
+            // 屏幕；死会话自动换新）。ref 为空（首次挂载）用面板传入的恢复 id
+            // ——曾只读 ref，prop 丢失导致每次开窗口都新建会话、旧会话泄漏
+            attachStreamId: asRoot
+              ? undefined
+              : streamIdRef.current ?? initialStreamId ?? undefined,
+          });
+          sid = await inFlightInvokeRef.current!;
+        } else {
+          // StrictMode remount:等首次 mount 完成,拿到 sid,attach 本 mount 的 ch
+          await inFlightInvokeRef.current;
+          if (streamIdRef.current === null) {
+            return; // 首次 mount cancelled 一路返回 → stream 也不存在
+          }
+          console.log('[DBG-Term] remount attaching ch to sid=', streamIdRef.current);
+          sid = await invoke<number>('pty_open', {
+            onEvent: ch,
+            cmd: null,
+            cols: term.cols,
+            rows: term.rows,
+            asRoot: asRoot ?? false,
+            persistent: true,
+            attachStreamId: streamIdRef.current, // attach 不 create
+          });
+        }
+        console.log('[DBG-Term] establishStream GOT sid=', sid, 'gen=', gen);
         if (streamCancelled) {
+          console.log('[DBG-Term] streamCancelled, closing sid=', sid);
           invoke('pty_close', { streamId: sid }).catch(() => {});
           return;
         }
@@ -209,7 +243,7 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
         }
         term.focus();
       } catch (err) {
-        console.error('pty_open failed:', err);
+        console.error('[DBG-Term] pty_open failed:', err);
         term.writeln(`\r\n\x1b[91m[${hint ?? '打开'} PTY 失败：${err}]\x1b[0m`);
       }
     };
@@ -265,6 +299,7 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
     // 大输入分 64KB 块，小输入（打字）直发保持低延迟。
     const INPUT_CHUNK = 64 * 1024;
     term.onData((data: string) => {
+      console.log('[DBG-Term] onData len=', data.length, 'preview=', JSON.stringify(data.slice(0, 30)), 'streamIdRef=', streamIdRef.current);
       if (streamIdRef.current === null) return;
       const bytes = new TextEncoder().encode(data);
       const streamId = streamIdRef.current;

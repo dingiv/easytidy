@@ -18,7 +18,11 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
+
+struct PtyCenter {
+
+}
 
 /// 把连接订阅到已有 PTY 会话：按请求尺寸同步 PTY + 清屏回放环形缓冲 + 登记订阅。
 /// 返回 None = 会话不存在（调用方回退新建路径）。
@@ -40,8 +44,15 @@ pub(crate) async fn attach_to_session(
 ) -> Result<Option<Frame>> {
     let sessions = state.sessions.read().await;
     let Some(session) = sessions.get(&stream_id) else {
+        eprintln!("[SRV-DBG] attach_to_session: sid={} conn_token={} → SESSION NOT FOUND", stream_id, conn_token);
         return Ok(None);
     };
+    eprintln!(
+        "[SRV-DBG] attach_to_session: sid={} conn_token={} subs_before={}",
+        stream_id,
+        conn_token,
+        session.subs.lock().unwrap().len()
+    );
 
     // 用请求尺寸立即同步 PTY：attach 客户端尺寸可能与旧会话不同，
     // 不 resize 则 shell 按旧行列换行 → 提示符截断错位（实测）
@@ -93,6 +104,9 @@ pub(crate) async fn handle_pty_open(
     event_tx: mpsc::UnboundedSender<Frame>,
     conn_token: u64,
 ) -> Result<Frame> {
+
+    info!("div: handle_pty_open enter {}", conn_token);
+
     let req: PtyOpen = serde_json::from_value(msg.payload)
         .context("Failed to parse PtyOpen")?;
 
@@ -311,6 +325,10 @@ pub(crate) async fn handle_pty_open(
     // Drop the slave after spawn (else master never sees EOF)
     drop(slave);
 
+    info!(
+        "[SRV-DBG] new PTY: sid={} persistent={} as_root={} cmd={:?}",
+        stream_id, persistent, req.as_root, req.cmd
+    );
     info!("PTY opened: stream_id={}, cmd={}", stream_id, req.cmd);
 
     // Spawn PTY reader thread (owns the child for reaping)
@@ -356,19 +374,37 @@ pub(crate) fn pty_reader_thread(
     sessions: Arc<RwLock<HashMap<u32, Arc<PtySession>>>>,
     default_terminal: Arc<std::sync::RwLock<HashMap<String, u32>>>,
 ) {
+    eprintln!(
+        "[SRV-DBG] reader thread START: sid={} subs={}",
+        stream_id,
+        session.subs.lock().unwrap().len()
+    );
     info!("PTY reader thread started: stream_id={}", stream_id);
 
     let mut reader = std::io::BufReader::new(reader);
     let mut buf = [0u8; 8192];
+    let mut total_bytes: u64 = 0;
+    let mut total_frames: u64 = 0;
 
     loop {
         match reader.read(&mut buf) {
             Ok(0) => {
+                eprintln!(
+                    "[SRV-DBG] reader EOF: sid={} total_bytes={} total_frames={}",
+                    stream_id, total_bytes, total_frames
+                );
                 info!("PTY EOF: stream_id={}", stream_id);
                 break;
             }
             Ok(n) => {
-                debug!("PTY read {} bytes: stream_id={}", n, stream_id);
+                total_bytes += n as u64;
+                total_frames += 1;
+                if total_frames % 32 == 1 {
+                    eprintln!(
+                        "[SRV-DBG] reader read: sid={} bytes={} cumulative_bytes={} frames={}",
+                        n, n, total_bytes, total_frames
+                    );
+                }
                 let data = buf[..n].to_vec();
 
                 // 环形缓冲（回放；上限裁剪）
@@ -386,7 +422,26 @@ pub(crate) fn pty_reader_thread(
                     data,
                 };
                 let mut subs = session.subs.lock().unwrap();
-                subs.retain(|(_, tx)| tx.send(frame.clone()).is_ok());
+                let subs_count = subs.len();
+                let mut sent_ok = 0usize;
+                let mut sent_fail = 0usize;
+                let mut fail_tokens: Vec<u64> = Vec::new();
+                for (tok, tx) in subs.iter() {
+                    if tx.send(frame.clone()).is_ok() {
+                        sent_ok += 1;
+                    } else {
+                        sent_fail += 1;
+                        fail_tokens.push(*tok);
+                    }
+                }
+                if sent_fail > 0 || total_frames % 32 == 1 {
+                    eprintln!(
+                        "[SRV-DBG] broadcast: sid={} subs={} sent_ok={} sent_fail={} fail_tokens={:?}",
+                        stream_id, subs_count, sent_ok, sent_fail, fail_tokens
+                    );
+                }
+                // 移除失败订阅（语义同 retain）
+                subs.retain(|(tok, _)| !fail_tokens.contains(tok));
             }
             Err(e) => {
                 error!("PTY read error: stream_id={}, {}", stream_id, e);

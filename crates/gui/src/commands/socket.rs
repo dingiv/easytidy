@@ -5,7 +5,7 @@ use futures::{SinkExt, StreamExt};
 use std::sync::atomic::Ordering;
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use easytidy_core::podman::Podman;
 use easytidy_protocol::{
@@ -108,8 +108,13 @@ pub async fn ensure_session_connected(session: &GuiSession) -> Result<()> {
 
     // 首次连接
     let container_name = session.container_name.clone();
+    tracing::warn!(
+        "ensure_session_connected: socket 为 None,重新连接到 {}",
+        container_name
+    );
     let framed = connect_to_container(&container_name).await?;
     *socket_guard = Some(framed);
+    tracing::info!("ensure_session_connected: socket 已建立");
 
     Ok(())
 }
@@ -119,6 +124,12 @@ pub async fn ensure_session_connected(session: &GuiSession) -> Result<()> {
 pub async fn try_send_json_request(session: &GuiSession, msg: &Message) -> Result<Message> {
     let mut socket_guard = session.socket.lock().await;
     let socket = socket_guard.as_mut().context("Socket 未初始化")?;
+
+    tracing::debug!(
+        "try_send_json_request: op={} id={}",
+        msg.op,
+        msg.id
+    );
 
     socket
         .send(Frame::Json(msg.clone()))
@@ -135,6 +146,12 @@ pub async fn try_send_json_request(session: &GuiSession, msg: &Message) -> Resul
     match response {
         Frame::Json(resp_msg) => {
             if let Some(ref err) = resp_msg.err {
+                tracing::warn!(
+                    "server op_failed: op={} code={} msg={}",
+                    msg.op,
+                    err.code,
+                    err.message
+                );
                 Err(anyhow::anyhow!(
                     "服务器错误：{} - {}",
                     err.code,
@@ -162,16 +179,36 @@ pub async fn send_json_request(
     let msg = Message {
         id: session.next_msg_id.fetch_add(1, Ordering::SeqCst),
         kind: MsgKind::Req,
-        op,
+        op: op.clone(),
         payload,
         err: None,
     };
 
+    tracing::debug!("send_json_request → op={} id={}", op, msg.id);
+
     match try_send_json_request(session, &msg).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
-            warn!("共享 socket 请求失败，重连重试：{}", e);
-            // 丢弃旧连接（可能已被 server 空闲超时断开）
+            let msg_str = e.to_string();
+            tracing::warn!(
+                "send_json_request: op={} id={} err={:?} msg_str_prefix={:?}",
+                op,
+                msg.id,
+                e,
+                &msg_str[..msg_str.len().min(40)]
+            );
+            // 区分"服务器 op_failed"与传输错:server 把 op_failed 用合法的 JSON
+            // 帧回包(err.code+err.message 非空),`try_send_json_request` 一律映射
+            // 成 Err → 老逻辑把数据错当 socket 错,触发 socket 拆接 + 重连循环,
+            // 期间所有后续请求(包括 terminal 的 pty.write)都拿不到 socket → 终端
+            // 静默断连。op_failed 是数据回包,不重连;只有真传输错(发送/接收
+            // 失败、连接中断)才需要重建 socket 重试。
+            if msg_str.starts_with("服务器错误") {
+                tracing::warn!("send_json_request: op_failed 不重连 op={}", op);
+                return Err(e);
+            }
+            tracing::warn!("send_json_request: 传输错,重连重试 op={}", op);
+            // 丢弃旧连接(可能已被 server 空闲超时断开)
             session.socket.lock().await.take();
             ensure_session_connected(session).await?;
             try_send_json_request(session, &msg).await

@@ -1536,3 +1536,51 @@ button:disabled {
   flex-direction: column;
   gap: 8px;
 }
+
+/* 镜像搜索下拉（ContainerPane — image Select） */
+.image-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+  line-height: 1.3;
+}
+
+.image-option-tag {
+  font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono CJK SC", monospace;
+  font-size: 0.85rem;
+  color: #cdd6f4;
+  word-break: break-all;
+}
+
+.image-option-meta {
+  font-size: 0.75rem;
+  color: #6c7086;
+}
+
+/* 宿主路径 AutoComplete 选项(MountsPane) */
+.host-path-option {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono CJK SC", monospace;
+  font-size: 0.85rem;
+  line-height: 1.3;
+}
+
+.host-path-name {
+  color: #cdd6f4;
+}
+
+.host-path-tail {
+  color: #6c7086;
+  font-size: 0.75rem;
+}
+
+.host-path-dir {
+  color: #89b4fa;
+}
+
+.host-path-file {
+  color: #a6adc8;
+}

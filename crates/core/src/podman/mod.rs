@@ -407,14 +407,31 @@ impl Podman {
         Ok(id)
     }
 
-    /// 环境快照：commit 当前容器层为快照镜像（`easytidy/snapshot/<name>-<tag>`）。
+    /// 环境快照:以 `commit --squash` 把运行中容器打成扁平镜像
+    /// `easytidy/snapshot/<name>-<tag>`。
     ///
-    /// 仅容器文件系统层（bind mount 不入快照）；快照是独立资产，
-    /// 删除环境不删快照（可被 fork 复用）。见 docs/13-mutable-env-paradigm.md。
+    /// 实现:走 libpod 直连(`libpod::commit_squash`),与项目既有的 keep-id
+    /// 创建路径走同一条 podman socket 直连栈。
+    ///
+    /// 选用 `--squash` 的语义:扁平文件系统镜像(单层),不保留容器原本的分层历史。
+    /// 与早期 `commit_container`(多层)相比,体积更小、fork 出新容器时不再
+    /// 叠加源容器的所有中间层,适合作为"环境快照"语义使用。
+    ///
+    /// 已知限制:
+    /// - **运行中容器不保证快照一致性**(`commit` 配合 `pause=true` 默认,
+    ///   与 `export` 不同——导出文件层时容器进程短暂暂停后继续运行,
+    ///   暂停期间应用通常感知不到)。若对一致性敏感可先 `env_stop` 再快照。
+    /// - **bind mount 不入快照**(podman 自身行为,与 commit 是否 squash 无关)。
+    ///
+    /// 快照是独立资产,删除环境不删快照(可被 fork 复用)。
+    /// 见 docs/13-mutable-env-paradigm.md。
     pub async fn snapshot(&self, name: &str, tag: &str) -> Result<String> {
         let image_ref = format!("easytidy/snapshot/{name}-{tag}");
-        self.commit_container(name, &image_ref).await?;
-        tracing::info!("环境 {} 快照完成：{}", name, image_ref);
+        let libpod = crate::libpod::Libpod::new().await?;
+        libpod
+            .commit_squash(name, &image_ref, "easytidy snapshot via commit --squash")
+            .await?;
+        tracing::info!("环境 {} 快照完成:{}", name, image_ref);
         Ok(image_ref)
     }
 

@@ -429,6 +429,137 @@ pub async fn conf_save_dialog(config: ContainerConfig) -> Result<String, String>
     Ok(dest)
 }
 
+/// 挂载宿主路径输入建议:用户输入路径前缀 → 列出该路径下匹配的文件/目录条目。
+///
+/// 解析策略:沿输入路径向上找到第一个存在的祖先目录作为 `base`,用最后一
+/// 段作为 `partial` 前缀过滤 `base` 下条目(目录优先,字母序)。
+/// - `/home/user/data` 存在 → 列 `/home/user/data` 全部条目
+/// - `/home/user/data/x` (`data` 不存在) → 列 `/home/user` 下 `data*` 条目
+/// - 输入完全无效 → fallback 到 `$HOME` 全列
+///
+/// 用于挂载行宿主路径 AutoComplete 实时建议——`AutoComplete.onSearch` 每键入
+/// 触发一次,内核 `read_dir` + 内存过滤,host 端操作,百级条目亚毫秒。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct HostEntry {
+    /// 条目名(仅最后一段,无父路径)
+    pub name: String,
+    /// 完整路径(直接可用作 MountConfig.host_path)
+    pub full_path: String,
+    /// 是否目录(true → 路径补 `/` 提示;false → 文件)
+    pub is_dir: bool,
+}
+
+#[tauri::command]
+pub async fn list_host_path_suggestions(prefix: String) -> Result<Vec<HostEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        let trimmed = prefix.trim();
+        if trimmed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let path = std::path::Path::new(trimmed);
+
+        // 找最长现存祖先目录 + 末段前缀
+        let (base_dir, partial): (std::path::PathBuf, String) = if path.is_dir() {
+            (path.to_path_buf(), String::new())
+        } else {
+            // 向上找第一个现存祖先
+            let mut cursor = path.to_path_buf();
+            let mut partial = String::new();
+            let mut found_dir: Option<std::path::PathBuf> = None;
+            loop {
+                if let Some(parent) = cursor.parent() {
+                    if parent.is_dir() {
+                        partial = cursor
+                            .file_name()
+                            .map(|s| s.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        found_dir = Some(parent.to_path_buf());
+                        break;
+                    }
+                    cursor = parent.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+            match found_dir {
+                Some(d) => (d, partial),
+                // 全部祖先都不存在:fallback 到 $HOME 全列(用户总能浏览自己 home)
+                None => (
+                    std::env::var("HOME")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|_| std::path::PathBuf::from("/")),
+                    String::new(),
+                ),
+            }
+        };
+
+        let mut entries = Vec::new();
+        let read = std::fs::read_dir(&base_dir).map_err(|e| {
+            format!("读取目录 {} 失败：{}", base_dir.display(), e)
+        })?;
+        for e in read.flatten() {
+            // 跳过隐藏文件(避免 . / .. / .git 等噪声)
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            if !partial.is_empty() && !name.to_lowercase().starts_with(&partial.to_lowercase()) {
+                continue;
+            }
+            let full = e.path();
+            entries.push(HostEntry {
+                name: name.clone(),
+                full_path: full.to_string_lossy().into_owned(),
+                is_dir: full.is_dir(),
+            });
+        }
+        // 排序:目录优先,然后字母序(大小写不敏感)
+        entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        // 截断到合理上限,避免前段渲染过万项(AutoComplete virtual 也会 cap)
+        entries.truncate(200);
+        Ok(entries)
+    })
+    .await
+    .map_err(|e| format!("列目录建议失败：{e}"))?
+}
+
+/// 「选择挂载宿主机目录」:rfd 目录选择对话框,默认起点 = `$HOME`
+/// (或调用方传入的 `initial`——若该路径存在且是目录则采用)。
+///
+/// 取消时返回 `Ok(String::new())`(前端据此识别"未选择")——错误(底层失败)
+/// 走 `Err`。返回值直接作为 MountConfig.host_path 字段。
+#[tauri::command]
+pub async fn mount_pick_host_dir(initial: Option<String>) -> Result<String, String> {
+    let initial_dir = initial
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".to_string());
+    let picked = tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new();
+        // rfd::FileDialog::set_directory 需要路径存在且是目录;否则报错
+        // (我们不希望脏 host_path 字段引发 host-side 错误,直接回退到 $HOME)。
+        let p = std::path::Path::new(&initial_dir);
+        if p.is_dir() {
+            dialog = dialog.set_directory(p);
+        } else if let Ok(home) = std::env::var("HOME") {
+            let h = std::path::Path::new(&home);
+            if h.is_dir() {
+                dialog = dialog.set_directory(h);
+            }
+        }
+        dialog
+            .pick_folder()
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("打开目录选择对话框失败：{e}"))?;
+    Ok(picked.unwrap_or_default())
+}
+
 /// 内置示例模板列表（「示例模板」下拉数据源）。
 ///
 /// 双目录语义：先播种内置示例到 `~/.easytidy/conf`（首跑），再列出该目录下

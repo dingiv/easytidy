@@ -18,11 +18,16 @@ use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 
+struct ConnectionState {
+
+}
+
 /// Handle a single connection
 pub(crate) async fn handle_connection(
     stream: UnixStream,
     state: Arc<ServerState>,
 ) -> Result<()> {
+    // FIXME: 将该函数中的状态都放在 ConnectionState 中
     let mut framed = Framed::new(stream, easytidy_protocol::frame::FrameCodec::new());
 
     // Create channel for outgoing frames (both JSON and Raw)
@@ -37,6 +42,7 @@ pub(crate) async fn handle_connection(
     let mut conn_ptys: std::collections::HashSet<u32> = std::collections::HashSet::new();
 
     // 连接唯一 token（PTY 订阅退订标识；UnboundedSender 无 PartialEq）
+    // FIXME: 这个数字为何要放到 ServerState 里面
     let conn_token = state.next_conn_id.fetch_add(1, Ordering::SeqCst);
 
     // 主循环包在内层函数：无论以何种方式退出（break / `?` 错误 / 超时），
@@ -55,6 +61,7 @@ pub(crate) async fn handle_connection(
     result
 }
 
+// FIXME: 该函数是无意义的拆分, 合并到 handle_conntion 中
 /// 单连接主循环（见 [`handle_connection`]：退出后统一清理 PTY 会话）。
 pub(crate) async fn connection_loop(
     framed: &mut Framed<UnixStream, easytidy_protocol::frame::FrameCodec>,

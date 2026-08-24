@@ -121,6 +121,8 @@ async fn main() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
+
+    // FIXME: 不需要使用循环来包住 select! 吗? loop {}
     tokio::select! {
         _ = sigterm.recv() => {
             info!("Received SIGTERM, initiating graceful shutdown");

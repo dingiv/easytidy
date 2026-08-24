@@ -163,6 +163,75 @@ impl Libpod {
             .map(|s| s.to_string())
             .ok_or_else(|| Error::Connect(format!("libpod create 响应缺少 Id：{text}")))
     }
+
+    /// POST `/v<version>/libpod/commit?container=<name>&repo=<image_ref>&squash=true`
+    ///
+    /// 把容器当前文件系统打成一个扁平镜像(单层)。
+    ///
+    /// - `<image_ref>` 形态 `repo:tag`(或 `repo`,缺省 tag=latest)。libpod 端点把
+    ///   `:` 当作 repo/tag 分隔。
+    /// - `squash=true` 等价 `podman commit --squash`:把多层合并为单层,镜像体积更小,
+    ///   不再叠加源容器原有历史层。适合作为"环境快照"语义(fork 后镜像层是干净的)。
+    /// - `message`(OCI 镜像 history 的注释字段)进 image history,便于以后
+    ///   `podman inspect` 看见来源备注。**注意:OCI 格式(/libpod/commit)用
+    ///   `message`;docker 格式(/commit,已废弃)用 `comment`**——本端点传
+    ///   `comment` 会触发 500 "messages are only compatible with the docker
+    ///   image format (-f docker)"。
+    ///
+    /// 返回 commit 响应里的 `Id`(镜像 ID,与 `image_ref` 解析到同一镜像)。
+    pub async fn commit_squash(
+        &self,
+        container_name: &str,
+        image_ref: &str,
+        message: &str,
+    ) -> Result<String> {
+        let query = format!(
+            "container={}&repo={}&squash=true&message={}",
+            urlencoding(container_name),
+            urlencoding(image_ref),
+            urlencoding(message),
+        );
+        let uri: hyper::Uri = format!(
+            "http://podman/v{}/libpod/commit?{query}",
+            self.api_version
+        )
+        .parse()
+        .map_err(|e| Error::Connect(format!("URI 解析失败：{e}")))?;
+
+        let req = hyper::Request::post(uri)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Full::new(Bytes::new()))
+            .map_err(|e| Error::Connect(format!("构造 commit 请求失败：{e}")))?;
+
+        let resp = self
+            .client
+            .request(req)
+            .await
+            .map_err(|e| Error::Connect(format!("libpod commit 请求失败：{e}")))?;
+
+        let status = resp.status();
+        let resp_bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .map_err(|e| Error::Connect(format!("读取 commit 响应失败：{e}")))?
+            .to_bytes();
+
+        let text = String::from_utf8_lossy(&resp_bytes).to_string();
+        if !status.is_success() {
+            return Err(Error::Connect(format!(
+                "libpod commit 失败（HTTP {status}）：{text}"
+            )));
+        }
+
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| Error::Connect(format!("解析 libpod commit 响应失败：{e}：{text}")))?;
+        v.get("Id")
+            .or_else(|| v.get("id"))
+            .and_then(|id| id.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| Error::Connect(format!("libpod commit 响应缺少 Id：{text}")))
+    }
 }
 
 /// URL 编码（仅容器名，实际多为 [a-z0-9_-]）。
