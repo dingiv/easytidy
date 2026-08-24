@@ -191,12 +191,10 @@ impl Podman {
             )));
         }
 
-        // 创建宿主 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>）
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .map_err(|_| Error::NoXdgRuntime)?;
-        let socket_host_dir = PathBuf::from(runtime_dir)
-            .join("easytidy")
-            .join(name);
+        // 创建宿主 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<config-hash>；
+        // bind-mount 源须先于容器存在，目录名由最终配置哈希派生——同一容器因
+        // 配置变化换代时目录名跟着变，各代互不混淆）
+        let socket_host_dir = crate::socket_dir_for(name, config)?;
 
         tokio::fs::create_dir_all(&socket_host_dir).await
             .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
@@ -462,6 +460,10 @@ impl Podman {
     ) -> Result<String> {
         let server_bin = server_bin_path;
 
+        // 先记下现有 socket 目录（重建会以新 hash 换代命名；成功后清理旧代孤儿。
+        // config 未变时新旧同名——按新目录做白名单，见第 6 步）
+        let legacy_socket_dirs = crate::resolve_socket_dirs(name);
+
         // 1. commit 当前容器层（bind mount 不入镜像）
         let tag = Self::rebuild_image_tag(name);
         let image_ref = format!("localhost/easytidy-rebuild:{tag}");
@@ -491,6 +493,16 @@ impl Podman {
             return Err(Error::Connect(format!(
                 "重建失败：新容器创建成功但启动失败（已尽力清理）：{e}"
             )));
+        }
+
+        // 6. 清理旧代 socket 目录（新代已由 create 以新 hash 命名；config 未变时
+        //    新旧同名 → 跳过当前代，避免误删正在使用的目录）
+        let new_socket_dir = crate::socket_dir_for(name, config)?;
+        for legacy in legacy_socket_dirs {
+            if legacy != new_socket_dir {
+                tracing::debug!("重建后清理旧代 socket 目录：{}", legacy.display());
+                let _ = std::fs::remove_dir_all(&legacy);
+            }
         }
 
         Ok(id)
@@ -639,16 +651,18 @@ impl Podman {
         format!("{safe}-{ts}")
     }
 
-    /// 确保宿主 socket 目录存在（$XDG_RUNTIME_DIR/easytidy/<name>）。
+    /// 确保宿主 socket 目录存在（`$XDG_RUNTIME_DIR/easytidy/<name>-<hash>`，兼容旧 `<name>`）。
     ///
-    /// 容器配置 bind-mount 了该目录（容器内 /run/easytidy），而 bind 挂载
-    /// 要求宿主源目录已存在——开机后 XDG_RUNTIME_DIR 被系统重建、目录消失，
-    /// 未先建目录直接 start 报 runc mount 错误（实测 2026-08-09 重启复现）。
+    /// 容器配置 bind-mount 了该目录（容器内 /run/easytidy），而 bind 挂载要求宿主源
+    /// 目录已存在——开机后 XDG_RUNTIME_DIR 被系统重建、目录消失，未先建目录直接 start
+    /// 报 runc mount 错误（实测 2026-08-09 重启复现）。解析走 `host_socket_path`
+    /// （现有目录优先，无则按 configfile 重算 hash），不依赖注册时序、兼容新旧命名。
     async fn ensure_socket_dir(&self, name: &str) -> Result<()> {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .map_err(|_| Error::NoXdgRuntime)?;
-        let dir = PathBuf::from(runtime_dir).join("easytidy").join(name);
-        tokio::fs::create_dir_all(&dir).await
+        let sock = crate::host_socket_path(name)?;
+        let Some(dir) = sock.parent() else {
+            return Err(Error::Connect("socket 路径无父目录".to_string()));
+        };
+        tokio::fs::create_dir_all(dir).await
             .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
         Ok(())
     }
@@ -711,7 +725,8 @@ impl Podman {
         Ok(())
     }
 
-    /// 删除容器（按名或 ID）。
+    /// 删除容器（按名或 ID）。**幂等**：容器本就不存在（被外部 Podman 客户端删过）
+    /// 时按成功处理——删除目标已达成，调用方因此能继续后续清理（配置注销/图标/socket）。
     ///
     /// force: 是否强制删除（运行中的容器需要 force=true）。
     pub async fn remove(&self, name_or_id: &str, force: bool) -> Result<()> {
@@ -723,8 +738,16 @@ impl Podman {
             ..Default::default()
         };
 
-        self.docker.remove_container(name_or_id, Some(opts)).await
-            .map_err(|e| Error::Connect(format!("删除容器失败：{e}")))?;
+        match self.docker.remove_container(name_or_id, Some(opts)).await {
+            Ok(_) => {}
+            // 容器本就不存在（被外部 Podman 客户端删过）——删除幂等，目标已达成，不报错
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => {
+                tracing::info!("容器 {name_or_id} 本就不存在，视为已删除（外部删除）");
+            }
+            Err(e) => return Err(Error::Connect(format!("删除容器失败：{e}"))),
+        }
 
         tracing::info!("容器 {} 删除成功", name_or_id);
         Ok(())

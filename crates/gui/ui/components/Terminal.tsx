@@ -192,7 +192,8 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
       try {
         let sid: number;
         if (inFlightInvokeRef.current === null) {
-          // 首次挂载:建流
+          // 首次挂载：建流。sid 发布放进 promise 链（.then 先于任何 await 结算，
+          // 幂等：一个面板一次 pty.open 建一个 bash，remount 只 attach 不复建）
           inFlightInvokeRef.current = invoke<number>('pty_open', {
             onEvent: ch,
             cmd: null,
@@ -203,17 +204,29 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
             persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
             // node 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前
             // 屏幕；死会话自动换新）。ref 为空（首次挂载）用面板传入的恢复 id
-            // ——曾只读 ref，prop 丢失导致每次开窗口都新建会话、旧会话泄漏
             attachStreamId: asRoot
               ? undefined
               : streamIdRef.current ?? initialStreamId ?? undefined,
+          }).then((s) => {
+            streamIdRef.current = s; // 在 promise 链发布——任何 await 者都可见
+            return s;
           });
           sid = await inFlightInvokeRef.current!;
+          if (streamCancelled) {
+            // StrictMode remount：ref 已在 promise 链发布，本 mount 已卸载、term
+            // 已 dispose——直接返回，由下一次 mount attach 到同一会话。
+            // ⚠️ 不在这里 pty_close：会杀掉 remount 要复用的会话（曾因此双终端）。
+            return;
+          }
         } else {
-          // StrictMode remount:等首次 mount 完成,拿到 sid,attach 本 mount 的 ch
-          await inFlightInvokeRef.current;
+          // StrictMode remount：等首次建流完成（ref 已由 promise 链发布），
+          // attach 本 mount 的 ch 到**同一**会话（server 不创建新 bash）
+          await inFlightInvokeRef.current!;
           if (streamIdRef.current === null) {
-            return; // 首次 mount cancelled 一路返回 → stream 也不存在
+            // 防御（理论上不可达：建流者必然发布 ref）。绝不在此新建流——
+            // 会与既有会话重复（双终端）。等下一次重连恢复。
+            console.warn('[DBG-Term] remount 但无 sid（异常），等待重连');
+            return;
           }
           console.log('[DBG-Term] remount attaching ch to sid=', streamIdRef.current);
           sid = await invoke<number>('pty_open', {
@@ -227,11 +240,6 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
           });
         }
         console.log('[DBG-Term] establishStream GOT sid=', sid, 'gen=', gen);
-        if (streamCancelled) {
-          console.log('[DBG-Term] streamCancelled, closing sid=', sid);
-          invoke('pty_close', { streamId: sid }).catch(() => {});
-          return;
-        }
         const prev = streamIdRef.current;
         streamIdRef.current = sid;
         writeFailed = false; // 新通道就绪：恢复自动重连能力

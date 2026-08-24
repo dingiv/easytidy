@@ -10,7 +10,6 @@
 //! - rm: 删除容器
 //! - inspect: 检查容器详情（含 mounts/网络）
 //! - run: 头less 容器内应用运行（M2 新增）
-//! - build-server: 构建并安装 musl server 二进制（M2 新增）
 
 use std::path::PathBuf;
 use clap::{Parser, Subcommand};
@@ -150,9 +149,6 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// 构建并安装 musl server 二进制（M2 新增）
-    BuildServer,
-
     /// 自启动入口（systemd user unit 登录时触发）
     Boot {
         /// 容器名
@@ -252,10 +248,6 @@ async fn main() -> Result<()> {
 
     // 执行子命令（不都需要 podman 连接）
     match cli.command {
-        Commands::BuildServer => {
-            cmd_build_server()?;
-            Ok(())
-        }
         Commands::Run { container, root, command } => {
             let code = cmd_run(container, command, root).await?;
             std::process::exit(code);
@@ -579,12 +571,8 @@ async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
     if let Err(e) = easytidy_core::desktop::uninstall_desktop_entry(&name) {
         debug!("清理桌面图标失败（忽略）：{e}");
     }
-    // 清理 socket 目录
-    if let Ok(sock) = easytidy_core::host_socket_path(&name) {
-        if let Some(dir) = sock.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
+    // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
+    let _ = easytidy_core::remove_socket_dirs(&name);
     println!("环境 {name} 已删除（无残留）");
     println!("  提示：该环境的快照（easytidy/snapshot/{name}-*）为独立资产，已保留，可用 env fork 复用");
     Ok(())
@@ -1173,89 +1161,4 @@ async fn cmd_run_exec_root(podman: &Podman, container: &str, command: Vec<String
     }
     println!();
     Ok(code)
-}
-
-/// 构建并安装 musl server 二进制。
-fn cmd_build_server() -> Result<()> {
-    use std::process::Command;
-
-    info!("开始构建 musl server 二进制...");
-
-    // 检查 musl target
-    let output = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output()
-        .context("执行 rustup 失败（请确保已安装 rustup）")?;
-
-    let installed = String::from_utf8_lossy(&output.stdout);
-    if !installed.contains("x86_64-unknown-linux-musl") {
-        info!("添加 musl target...");
-        Command::new("rustup")
-            .args(["target", "add", "x86_64-unknown-linux-musl"])
-            .status()
-            .context("添加 musl target 失败")?;
-    }
-
-    info!("构建 easytidy-server（musl static）...");
-    let status = Command::new("cargo")
-        .args([
-            "build",
-            "-p", "easytidy-server",
-            "--release",
-            "--target", "x86_64-unknown-linux-musl",
-        ])
-        .current_dir("/home/jiugui5209/Documents/codes/easy-tidy/easytidy")
-        .status()
-        .context("构建失败")?;
-
-    if !status.success() {
-        bail!("构建失败（退出码：{:?}）", status.code());
-    }
-
-    // 确定安装目录
-    let install_dir = if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
-        PathBuf::from(data_home).join("easytidy/bin")
-    } else {
-        let home = std::env::var("HOME")
-            .context("无法确定 HOME 目录")?;
-        PathBuf::from(home).join(".local/share/easytidy/bin")
-    };
-
-    // 创建目录
-    std::fs::create_dir_all(&install_dir)
-        .context(format!("创建安装目录失败：{}", install_dir.display()))?;
-
-    // 源文件路径
-    let source = PathBuf::from("/home/jiugui5209/Documents/codes/easy-tidy/easytidy")
-        .join("target/x86_64-unknown-linux-musl/release/easytidy-server");
-
-    // 目标文件路径
-    let target = install_dir.join("easytidy-server");
-
-    // 复制文件
-    std::fs::copy(&source, &target)
-        .context(format!("复制文件失败：{} → {}",
-            source.display(), target.display()))?;
-
-    // 设置可执行权限
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&target)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&target, perms)?;
-    }
-
-    println!("server 二进制安装成功：{}", target.display());
-    info!("验证：file {}", target.display());
-
-    // 验证静态链接
-    let output = Command::new("file")
-        .arg(&target)
-        .output()
-        .context("执行 file 命令失败")?;
-
-    println!("{}", String::from_utf8_lossy(&output.stdout));
-
-    Ok(())
 }

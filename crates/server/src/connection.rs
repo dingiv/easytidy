@@ -33,7 +33,9 @@ pub(crate) async fn handle_connection(
     // Create channel for outgoing frames (both JSON and Raw)
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Frame>();
 
-    info!("Client connected");
+    // 每连接一个会话 ID（握手 ack 返回给客户端；日志/排障标识）
+    let session_id = uuid::Uuid::new_v4().to_string();
+    info!("Client connected (session={session_id})");
 
     // Track handshake completion
     let handshake_done = Arc::new(AtomicBool::new(false));
@@ -55,6 +57,7 @@ pub(crate) async fn handle_connection(
         &handshake_done,
         &mut conn_ptys,
         conn_token,
+        &session_id,
     )
     .await;
     close_conn_ptys(&state, &conn_ptys, conn_token).await;
@@ -71,6 +74,7 @@ pub(crate) async fn connection_loop(
     handshake_done: &Arc<AtomicBool>,
     conn_ptys: &mut std::collections::HashSet<u32>,
     conn_token: u64,
+    session_id: &str,
 ) -> Result<()> {
     // Main connection loop
     loop {
@@ -104,6 +108,7 @@ pub(crate) async fn connection_loop(
                                     handshake_done,
                                     event_tx_clone,
                                     conn_token,
+                                    session_id,
                                 ).await?;
 
                                 if let Some(resp) = response {

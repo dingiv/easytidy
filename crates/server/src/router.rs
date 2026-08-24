@@ -29,10 +29,11 @@ pub(crate) async fn handle_message(
     handshake_done: &Arc<AtomicBool>,
     event_tx: mpsc::UnboundedSender<Frame>,
     conn_token: u64,
+    session_id: &str,
 ) -> Result<Option<Frame>> {
     let msg_id = msg.id;
     let msg_op = msg.op.clone();
-    match dispatch(msg, state, handshake_done, event_tx, conn_token).await {
+    match dispatch(msg, state, handshake_done, event_tx, conn_token, session_id).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             // {:#} = anyhow 全错误链（context + 根因），日志与响应一致
@@ -57,6 +58,7 @@ pub(crate) async fn dispatch(
     handshake_done: &Arc<AtomicBool>,
     event_tx: mpsc::UnboundedSender<Frame>,
     conn_token: u64,
+    session_id: &str,
 ) -> Result<Option<Frame>> {
     // Require handshake first
     if msg.op != "hello" && !handshake_done.load(Ordering::SeqCst) {
@@ -73,7 +75,7 @@ pub(crate) async fn dispatch(
     }
     match (msg.kind, msg.op.as_str()) {
         (MsgKind::Req, "hello") => {
-            Ok(Some(handle_handshake(msg, handshake_done).await?))
+            Ok(Some(handle_handshake(msg, handshake_done, session_id).await?))
         }
         (MsgKind::Req, "ping") => {
             Ok(Some(handle_ping(msg).await?))
@@ -168,11 +170,15 @@ pub(crate) async fn dispatch(
 pub(crate) async fn handle_handshake(
     msg: Message,
     handshake_done: &Arc<AtomicBool>,
+    session_id: &str,
 ) -> Result<Frame> {
     let hs: Handshake = serde_json::from_value(msg.payload)
         .context("Failed to parse Handshake")?;
 
-    info!("Handshake from client '{}' (v{}, wants: {:?})", hs.client, hs.v, hs.wants);
+    info!(
+        "Handshake from client '{}' (v{}, session={session_id}, wants: {:?})",
+        hs.client, hs.v, hs.wants
+    );
 
     if hs.v != PROTOCOL_VERSION {
         return Ok(Frame::Json(Message {
@@ -199,6 +205,7 @@ pub(crate) async fn handle_handshake(
             "config".to_string(),
             "lifecycle".to_string(),
         ],
+        session_id: session_id.to_string(),
     };
 
     Ok(Frame::Json(Message {

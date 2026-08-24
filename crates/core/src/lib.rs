@@ -8,7 +8,9 @@
 //! 铁律：不调用任何 podman CLI（见 docs/08-requirements.md L2）。
 
 use std::path::PathBuf;
+use crate::configfile::ConfigFile;
 use crate::error::{Error, Result};
+use crate::models::ContainerConfig;
 
 /// 宿主导出 .desktop 的 Exec 前缀（passthrough 机制）
 pub const EXEC_PREFIX: &str = "easytidy --container";
@@ -29,22 +31,108 @@ pub mod podman;
 pub mod systemd;
 pub mod userenv;
 
-/// 解析宿主侧 socket 路径（用于 bind-mount 到容器）。
+/// 宿主侧 socket 目录的哈希后缀：基于容器「最终配置文件字符串」（`ContainerConfig`
+/// 的 canonical JSON 序列化）计算的确定性短哈希（FNV-1a-64 → 8 位小写 hex）。
 ///
-/// 路径规则：`$XDG_RUNTIME_DIR/easytidy/<name>/server.sock`
-///
-/// 参数：
-/// - name: 容器名
-pub fn host_socket_path(name: &str) -> Result<PathBuf> {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-        .map_err(|_| Error::NoXdgRuntime)?;
+/// 目录命名的意义：目录名 = `<name>-<hash>`，不裸用容器名；同一容器因配置变化
+/// 重建时目录名跟着变，避免派生/重建目录混淆。各进程凭同一 config 可复算同一路径。
+fn socket_dir_hash(config: &ContainerConfig) -> Result<String> {
+    let serialized = serde_json::to_string(config)
+        .map_err(|e| Error::Config(format!("序列化容器配置失败：{e}")))?;
+    // 取 FNV-1a-64 高 32 位 → 恰好 8 位小写 hex（`{:08x}` 只保证≥8，需截断）
+    Ok(format!("{:016x}", fnv1a64(serialized.as_bytes()))[..8].to_string())
+}
 
-    let socket_dir = PathBuf::from(runtime_dir)
+/// FNV-1a 64-bit。确定性哈希（std `DefaultHasher` 带随机种子，不可用于跨进程路径派生）。
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// 由容器名 + 最终配置计算 **host socket 目录**（`$XDG_RUNTIME_DIR/easytidy/<name>-<hash>`）。
+///
+/// 供 `create_with_config`（bind-mount 源，须先于容器存在）与 rebuild 换代清理共用。
+pub(crate) fn socket_dir_for(name: &str, config: &ContainerConfig) -> Result<PathBuf> {
+    let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
+    let hash = socket_dir_hash(config)?;
+    Ok(PathBuf::from(runtime_dir)
         .join("easytidy")
-        .join(name);
+        .join(format!("{name}-{hash}")))
+}
 
-    // 确保父目录存在（调用方负责创建 server.sock 本身）
-    Ok(socket_dir.join("server.sock"))
+/// 列出某容器名下所有已存在的 socket 目录（`$XDG_RUNTIME_DIR/easytidy/` 下以
+/// `<name>-` 开头、或 == `<name>` 旧格式），按 mtime 降序（最新代在前）。
+///
+/// 目录不存在/读不到 → 空列表（不报错：开机 XDG_RUNTIME_DIR 重建后目录本就可能缺席）。
+fn resolve_socket_dirs(name: &str) -> Vec<PathBuf> {
+    let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") else {
+        return Vec::new();
+    };
+    let base = PathBuf::from(runtime_dir).join("easytidy");
+    let Ok(read) = std::fs::read_dir(&base) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = read
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter_map(|e| {
+            let file_name = e.file_name();
+            let file_name = file_name.to_string_lossy();
+            let matches = file_name == name || file_name.starts_with(&format!("{name}-"));
+            if !matches {
+                return None;
+            }
+            let modified = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            Some((modified, e.path()))
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.0.cmp(&a.0)); // 新 → 旧
+    dirs.into_iter().map(|(_, p)| p).collect()
+}
+
+/// 解析宿主侧 socket 路径（bind-mount 源 / GUI、CLI、worker、autostart 重连）。
+///
+/// 路径规则：`$XDG_RUNTIME_DIR/easytidy/<name>-<config-hash>/server.sock`
+/// （旧格式 `<name>/` 亦被识别）。
+///
+/// 解析策略（以「实际存在」为准，不依赖 config 注册时序，对漂移鲁棒）：
+/// 1. 现有目录优先（glob `<name>-*` 或旧 `<name>`，取最新代——首启/正常在册命中）；
+/// 2. 无现有目录（如开机 XDG_RUNTIME_DIR 重建后）→ 读 configfile 重算 hash 重建目录。
+pub fn host_socket_path(name: &str) -> Result<PathBuf> {
+    // 契约：XDG_RUNTIME_DIR 必须先存在（resolve 步骤依赖它，且旧语义要求
+    // 缺失时给出 NoXdgRuntime —— 不可落到 config 分支才报 Connect）
+    let _runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
+
+    // 1. 现有目录优先（首启时 autostart 在 config 注册前触发，只能走这里）
+    if let Some(dir) = resolve_socket_dirs(name).into_iter().next() {
+        return Ok(dir.join("server.sock"));
+    }
+
+    // 2. 无目录（开机目录被清、容器已注册）→ 按 configfile 重算 hash
+    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+    let config = config_file.get_container(name)?.ok_or_else(|| {
+        Error::Connect(format!("socket 目录不存在：容器 {name} 未注册且无现有目录"))
+    })?;
+    Ok(socket_dir_for(name, &config)?.join("server.sock"))
+}
+
+/// 清理某容器名**所有代**的 socket 目录（尽力而为：失败仅告警）。
+///
+/// env_rm 删容器、rebuild 换代后调用，避免旧代目录成孤儿。
+pub fn remove_socket_dirs(name: &str) -> Result<()> {
+    for dir in resolve_socket_dirs(name) {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            tracing::warn!("清理 socket 目录失败（忽略）：{}：{e}", dir.display());
+        }
+    }
+    Ok(())
 }
 
 /// 解析 server 二进制路径（宿主侧）。
@@ -53,12 +141,12 @@ pub fn host_socket_path(name: &str) -> Result<PathBuf> {
 /// 1. `SERVER_BIN` namespace **dev 根**（dev 构建树：cargo run / cargo test /
 ///    tauri dev 下 `beforeDevCommand` 已 `cargo build -p easytidy-server`
 ///    → workspace `target/debug`）
-/// 2. `SERVER_BIN` namespace **prod 根**（easytidy build-server 默认安装位
-///    `~/.local/share/easytidy/bin`）
-/// 3. `$XDG_DATA_HOME/easytidy/bin/easytidy-server`（scripts/build-server.sh
-///    尊重 XDG_DATA_HOME 的兼容回退）
+/// 2. `SERVER_BIN` namespace **prod 根**（发布**随包安装位**：server 随安装包一起
+///    发布，无 build-server。deb 打包装到 `/usr/bin`（或 per-user
+///    `~/.local/share/easytidy`）——打包阶段在 core Cargo.toml 配置该值）
+/// 3. `$XDG_DATA_HOME/easytidy/bin/easytidy-server`（历史兼容回退）
 ///
-/// 返回 helpful error 如果二进制不存在（提示运行 `easytidy build-server`）。
+/// 返回 helpful error 如果二进制不存在（提示随安装包安装）。
 pub fn server_binary_path() -> Result<PathBuf> {
     let loader = easytidy_shared::loader!();
     let mut candidates: Vec<PathBuf> = Vec::new();
@@ -73,7 +161,7 @@ pub fn server_binary_path() -> Result<PathBuf> {
             .collect::<Vec<_>>()
             .join("\n");
         Error::Connect(format!(
-            "server 二进制不存在（已尝试：\n{tried}）\n请先运行：easytidy build-server"
+            "server 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装 easytidy-server"
         ))
     })
 }
@@ -90,22 +178,12 @@ mod tests {
     /// 让环境相关的测试互斥执行。
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    #[test]
-    fn test_host_socket_path() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").unwrap();
-        let expected = PathBuf::from(runtime_dir)
-            .join("easytidy")
-            .join("test-container")
-            .join("server.sock");
-
-        let result = host_socket_path("test-container").unwrap();
-        assert_eq!(result, expected);
-    }
-
+    // （旧的 `test_host_socket_path` 测「纯路径推导」，契约已随 resolver 化作废：
+    //  host_socket_path 现按「现有目录 → configfile hash」解析，覆盖见
+    //  test_socket_dir_resolution_prefers_existing 与下方 no_xdg 用例。）
     #[test]
     fn test_host_socket_path_no_xdg() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // 临时 unset XDG_RUNTIME_DIR
         let original = std::env::var("XDG_RUNTIME_DIR").ok();
         std::env::remove_var("XDG_RUNTIME_DIR");
@@ -122,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_server_binary_path_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // HOME/XDG_DATA_HOME 都指到空临时目录：ns_prod、XDG 候选必然 miss
         // （ns_dev 指向 workspace target/debug，`cargo test -p easytidy-core`
         // 单独跑时不会预先 build server 二进制）。守卫:dev 二进制若已存在则跳过——
@@ -148,7 +226,7 @@ mod tests {
         let result = server_binary_path();
         assert!(result.is_err());
         let msg = format!("{}", result.unwrap_err());
-        assert!(msg.contains("build-server"), "错误应提示 build-server：{msg}");
+        assert!(msg.contains("安装"), "错误应提示随包安装：{msg}");
 
         if let Some(val) = original_home {
             std::env::set_var("HOME", val);
@@ -164,8 +242,8 @@ mod tests {
 
     #[test]
     fn test_server_binary_path_respects_xdg_data_home() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        // XDG 兼容回退：build-server.sh 装在 $XDG_DATA_HOME/easytidy/bin 时，
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // XDG 历史兼容回退：server 装在 $XDG_DATA_HOME/easytidy/bin 时，
         // helper 应命中该处（ns_dev/ns_prod 均 miss：dev 未 build + HOME 隔离）。
         let dev_binary_present = PathBuf::from(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -202,6 +280,75 @@ mod tests {
             std::env::set_var("XDG_DATA_HOME", val);
         } else {
             std::env::remove_var("XDG_DATA_HOME");
+        }
+    }
+
+    #[test]
+    fn test_socket_dir_hash_deterministic() {
+        let a = ContainerConfig { name: "chrome".into(), ..Default::default() };
+        let b = ContainerConfig { name: "chrome".into(), ..Default::default() };
+        let h_a = socket_dir_hash(&a).unwrap();
+        let h_b = socket_dir_hash(&b).unwrap();
+        assert_eq!(h_a, h_b, "相同配置应得相同 hash");
+        assert_eq!(h_a.len(), 8, "hash 应为 8 位 hex");
+
+        let mut diff = b;
+        diff.params.image = "example.com/other:latest".into();
+        let h_diff = socket_dir_hash(&diff).unwrap();
+        assert_ne!(h_a, h_diff, "不同配置应得不同 hash");
+    }
+
+    #[test]
+    fn test_socket_dir_resolution_prefers_existing() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var("XDG_RUNTIME_DIR").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path());
+
+        // 新格式 `<name>-<hash>` + 旧格式 `<name>` 各建一个（后者更新 → resolve 最新在前）
+        let base = tmp.path().join("easytidy");
+        let new_dir = base.join("chrome-a1b2c3d4");
+        let old_dir = base.join("chrome");
+        std::fs::create_dir_all(&new_dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(&old_dir).unwrap();
+
+        let dirs = resolve_socket_dirs("chrome");
+        assert_eq!(dirs.len(), 2, "新格式与旧格式目录都应被识别");
+        assert_eq!(dirs[0], old_dir, "最新 mtime 的目录应排在首位");
+
+        // host_socket_path 走现有目录（不依赖 config 注册）
+        let p = host_socket_path("chrome").unwrap();
+        assert_eq!(p, old_dir.join("server.sock"));
+
+        if let Some(val) = original {
+            std::env::set_var("XDG_RUNTIME_DIR", val);
+        } else {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
+    }
+
+    #[test]
+    fn test_remove_socket_dirs_removes_all_generations() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var("XDG_RUNTIME_DIR").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path());
+
+        let base = tmp.path().join("easytidy");
+        let dirs = vec![base.join("chrome-a1b2c3d4"), base.join("chrome"), base.join("chrome-ff001122")];
+        for d in &dirs {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        assert_eq!(resolve_socket_dirs("chrome").len(), 3);
+
+        remove_socket_dirs("chrome").unwrap();
+        assert!(dirs.iter().all(|d| !d.exists()), "所有代的 socket 目录都应被清理");
+
+        if let Some(val) = original {
+            std::env::set_var("XDG_RUNTIME_DIR", val);
+        } else {
+            std::env::remove_var("XDG_RUNTIME_DIR");
         }
     }
 }

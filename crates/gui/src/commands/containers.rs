@@ -298,6 +298,12 @@ pub async fn env_new(
 
     podman.return_podman(p).await;
     info!("新环境 {name} 已创建并运行");
+
+    // 便捷：新建容器后自动打开其 Worker GUI（进入即连；失败不阻断创建，落日志即可）
+    if let Err(e) = open_container_window(name) {
+        warn!("自动打开容器窗口失败（忽略）：{e}");
+    }
+
     Ok(())
 }
 
@@ -341,12 +347,8 @@ pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Resu
     if let Err(e) = desktop::uninstall_desktop_entry(&name) {
         debug!("清理环境 {} 桌面图标失败（忽略）：{}", name, e);
     }
-    // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>）
-    if let Ok(sock) = easytidy_core::host_socket_path(&name) {
-        if let Some(dir) = sock.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
+    // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
+    let _ = easytidy_core::remove_socket_dirs(&name);
 
     info!("环境 {} 已删除（快照镜像保留为独立资产）", name);
     Ok(())
@@ -455,25 +457,6 @@ pub async fn env_stop(podman: tauri::State<'_, PodmanState>, name: String) -> Re
         .map_err(|e| ferr(&format!("停止容器 {name}"), e))?;
     podman.return_podman(p).await;
     Ok(())
-}
-
-/// 构建 server 二进制
-#[tauri::command]
-pub async fn build_server() -> Result<String, String> {
-    use std::process::Command;
-
-    // 调用构建脚本
-    let output = Command::new("/bin/bash")
-        .arg("/home/jiugui5209/Documents/codes/easy-tidy/easytidy/scripts/build-server.sh")
-        .output()
-        .map_err(|e| format!("执行构建脚本失败：{}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("构建失败：{}", stderr));
-    }
-
-    Ok("构建成功".to_string())
 }
 
 /// 打开容器专属窗口（从 Master GUI 双击容器）

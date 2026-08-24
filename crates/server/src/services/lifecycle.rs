@@ -136,6 +136,7 @@ mod tests {
                                 v: PROTOCOL_VERSION,
                                 server: "easytidy-server".to_string(),
                                 capabilities: vec!["pty".to_string()],
+                                session_id: "test-session".to_string(),
                             }).unwrap(),
                             err: None,
                         });

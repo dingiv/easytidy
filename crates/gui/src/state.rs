@@ -44,12 +44,30 @@ pub struct ExecHandle {
 /// server 从 1 递增，实践远达不到此值）
 pub const EXEC_STREAM_ID_BASE: u32 = 1 << 30;
 
+/// 与容器 server 的连接状态机（客户端侧）。
+///
+/// 与 `GuiSession.socket`（Option<Framed>）同步维护：`None`=Unconnected、
+/// `Some`=Connected，`Connecting` 表示连接/握手进行中（tokio Mutex 持锁期间）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// 未连接（初始 / 连接失败后回到此态）
+    Unconnected,
+    /// 连接中（socket connect + 握手进行中）
+    Connecting,
+    /// 已连接（握手完成，可发请求）
+    Connected,
+}
+
 /// 单容器 GUI 会话（托管在 Tauri State 中）
 pub struct GuiSession {
     /// 容器名
     pub container_name: String,
     /// Socket 会话（使用 tokio Mutex 因为需要 async）
     pub socket: tokio::sync::Mutex<Option<Framed<UnixStream, FrameCodec>>>,
+    /// 连接状态机（与 socket Option 同步维护）
+    pub conn_state: std::sync::Mutex<ConnectionState>,
+    /// 握手返回的会话 ID（已连接后非空；server 每连接创建）
+    pub session_id: std::sync::Mutex<Option<String>>,
     /// 下一个消息 ID
     pub next_msg_id: AtomicU64,
     /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）

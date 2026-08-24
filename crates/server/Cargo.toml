@@ -24,6 +24,7 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 base64 = "0.21"
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

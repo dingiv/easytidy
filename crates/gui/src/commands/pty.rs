@@ -188,8 +188,9 @@ pub async fn pty_open(
         return open_exec_root_terminal(sess, on_event, cmd, cols, rows, next).await;
     }
 
-    // node 终端：专用连接 + 握手（与 cli cmd_run 同构）
-    let mut framed = connect_to_container(&container_name)
+    // node 终端：专用连接 + 握手（与 cli cmd_run 同构）。该连接是**双向信道**
+    // （server 经 Raw 帧/Evt 反向推送 PTY 输出），session_id 仅日志/排障用。
+    let (mut framed, _session_id) = connect_to_container(&container_name)
         .await
         .map_err(|e| e.to_string())?;
 

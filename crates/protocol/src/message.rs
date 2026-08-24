@@ -61,6 +61,10 @@ pub struct HandshakeAck {
     pub server: String,
     /// 服务端支持的能力列表
     pub capabilities: Vec<String>,
+    /// 本连接的会话 ID（server 创建并返回；客户端凭此标识该会话）。
+    /// `#[serde(default)]`：旧 server 无此字段 → 空串，保持前后端版本兼容。
+    #[serde(default)]
+    pub session_id: String,
 }
 
 #[cfg(test)]
@@ -136,12 +140,22 @@ mod tests {
                 "config".to_string(),
                 "lifecycle".to_string(),
             ],
+            session_id: "0fafb78e-9a2b-4c3d-8e1f-1234567890ab".to_string(),
         };
 
         let json = serde_json::to_string(&ack).expect("serialize failed");
         let decoded: HandshakeAck = serde_json::from_str(&json).expect("deserialize failed");
 
         assert_eq!(ack, decoded);
+    }
+
+    #[test]
+    fn test_handshake_ack_missing_session_id_defaults_empty() {
+        // 旧 server（无 session_id 字段）的 ack → 解析为 session_id=""，兼容不破
+        let old: HandshakeAck =
+            serde_json::from_str(r#"{"v":1,"server":"easytidy-server","capabilities":["pty"]}"#)
+                .unwrap();
+        assert_eq!(old.session_id, "");
     }
 
     #[test]

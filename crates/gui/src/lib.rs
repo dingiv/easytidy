@@ -51,6 +51,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
         AppMode::Worker { name } => Some(state::GuiSession {
             container_name: name.clone(),
             socket: tokio::sync::Mutex::new(None),
+            conn_state: std::sync::Mutex::new(state::ConnectionState::Unconnected),
+            session_id: std::sync::Mutex::new(None),
             next_msg_id: AtomicU64::new(2), // 握手已用 1
             active_ptys: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             active_execs: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -75,7 +77,6 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::restart_container,
             commands::containers::remove_container,
             commands::containers::inspect_container,
-            commands::containers::build_server,
             commands::containers::open_container_window,
             commands::containers::container_shutdown,
             // 镜像管理

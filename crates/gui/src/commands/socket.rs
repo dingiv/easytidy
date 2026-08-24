@@ -18,8 +18,13 @@ use crate::state::GuiSession;
 // 单容器模式命令（socket 通信）
 // ============================================================================
 
-/// 连接到容器 server socket（延迟连接，仅在首次单容器命令时调用）
-pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStream, FrameCodec>> {
+/// 连接到容器 server socket（延迟连接，仅在首次单容器命令时调用）。
+///
+/// 返回 `(Framed, session_id)`：握手成功即已进入「已连接」，session_id 由 server
+/// 每连接创建并返回（协议规范化：握手 → session ID → 可发请求）。
+pub async fn connect_to_container(
+    container_name: &str,
+) -> Result<(Framed<UnixStream, FrameCodec>, String)> {
     // 确保容器运行中
     let podman = Podman::connect().await.context("连接 podman 失败")?;
     let containers = podman.list_containers().await.context("获取容器列表失败")?;
@@ -86,7 +91,10 @@ pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStr
 
     let ack: HandshakeAck = serde_json::from_value(ack_msg.payload).context("解析握手确认失败")?;
 
-    debug!("握手成功：server={}, v={}", ack.server, ack.v);
+    debug!(
+        "握手成功：server={}, v={}, session={}",
+        ack.server, ack.v, ack.session_id
+    );
 
     if ack.v != PROTOCOL_VERSION {
         return Err(anyhow::anyhow!(
@@ -96,27 +104,40 @@ pub async fn connect_to_container(container_name: &str) -> Result<Framed<UnixStr
         ));
     }
 
-    Ok(framed)
+    Ok((framed, ack.session_id))
 }
 
-/// 确保会话已连接（延迟连接）
+/// 确保会话已连接（延迟连接）。状态机：Unconnected → Connecting → Connected；
+/// 失败回 Unconnected。
 pub async fn ensure_session_connected(session: &GuiSession) -> Result<()> {
     let mut socket_guard = session.socket.lock().await;
     if socket_guard.is_some() {
+        *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Connected;
         return Ok(()); // 已连接
     }
 
-    // 首次连接
+    // 置「连接中」→ 连接 + 握手 → 已连接；失败回「未连接」
+    *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Connecting;
     let container_name = session.container_name.clone();
     tracing::warn!(
         "ensure_session_connected: socket 为 None,重新连接到 {}",
         container_name
     );
-    let framed = connect_to_container(&container_name).await?;
-    *socket_guard = Some(framed);
-    tracing::info!("ensure_session_connected: socket 已建立");
 
-    Ok(())
+    let result = connect_to_container(&container_name).await;
+    match result {
+        Ok((framed, session_id)) => {
+            *socket_guard = Some(framed);
+            *session.session_id.lock().unwrap() = Some(session_id);
+            *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Connected;
+            tracing::info!("ensure_session_connected: socket 已建立");
+            Ok(())
+        }
+        Err(e) => {
+            *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Unconnected;
+            Err(e)
+        }
+    }
 }
 
 /// 发送 JSON 请求并接收响应
