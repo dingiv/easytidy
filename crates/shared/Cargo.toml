@@ -1,0 +1,14 @@
+[package]
+name = "easytidy-shared"
+version.workspace = true
+edition.workspace = true
+description = "FileLoader — dev/prod path resolution (server binary / assets / etc) for cargo crates."
+
+[dependencies]
+anyhow.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+
+[features]
+# Process-wide tracing subscriber init for BINARIES. Lib crates must
+# NOT enable this — they depend on the `tracing` facade only.
+log = ["dep:tracing-subscriber"]

@@ -336,6 +336,7 @@ pub async fn sync_from_flavor(
     podman: &crate::podman::Podman,
     config_file: &crate::configfile::ConfigFile,
     name: &str,
+    server_bin_path: &Path,
 ) -> Result<ContainerConfig> {
     let current = config_file
         .get_container(name)?
@@ -347,7 +348,7 @@ pub async fn sync_from_flavor(
     let mut next = flavor.build_config(name)?;
     next.silent_boot = current.silent_boot;
     next.persistent = current.persistent;
-    podman.rebuild(name, &next).await?;
+    podman.rebuild(name, &next, server_bin_path).await?;
     config_file.register_container(next.clone())?;
     Ok(next)
 }

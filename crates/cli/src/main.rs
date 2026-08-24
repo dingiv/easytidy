@@ -356,9 +356,8 @@ async fn cmd_create(
 ) -> Result<()> {
     info!("创建容器：{} from {}", name, image);
 
-    // M2: 使用真实的 server 二进制路径
-    let server_bin = easytidy_core::server_binary_path()
-        .context("无法解析 server 二进制路径（请先运行 `easytidy build-server`）")?;
+    // M2: 使用真实的 server 二进制路径（dev→target/debug，prod→安装位，统一走 core helper）
+    let server_bin = easytidy_core::server_binary_path()?;
 
     info!("使用 server 二进制：{}", server_bin.display());
 
@@ -410,7 +409,9 @@ async fn cmd_rebuild(podman: Podman, container: String) -> Result<()> {
         bail!("容器配置不存在：{container}（请先 create，或在 config.toml 中编辑 mounts/network 配置）");
     };
 
-    let new_id = podman.rebuild(&container, &config).await?;
+    // server 二进制需 bind-mount 进重建后的容器（与 create 同源，统一走 core helper）
+    let server_bin = easytidy_core::server_binary_path()?;
+    let new_id = podman.rebuild(&container, &config, &server_bin).await?;
     println!("容器 {} 重建成功（新 ID: {}）", container, new_id);
 
     // 回写配置（保持 configfile 与容器一致）

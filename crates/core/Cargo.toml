@@ -19,6 +19,7 @@ futures = { workspace = true }
 tokio-util = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 easytidy-protocol = { path = "../protocol" }
+easytidy-shared = { path = "../shared" }
 uuid = { workspace = true }
 tempfile = { workspace = true }
 dirs = { workspace = true }
@@ -26,3 +27,15 @@ fs2 = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
 libc = { workspace = true }
+
+[build-dependencies]
+easytidy-shared = { path = "../shared" }
+
+# dev/prod 路径 namespace —— 唯一事实源，仅 core 保留（GUI/CLI 统一走
+# core::server_binary_path()）。语义：**根 = bin 目录**，helper 拼 `easytidy-server`。
+# dev 根相对 core 的 manifest（crates/core），向上两级到 workspace root 后接
+# target/debug（dev 构建树，cargo run / cargo test / tauri dev 的 live server）。
+# prod 根是 easytidy build-server 安装后的位置（~/.local/share/easytidy/bin）。
+# （$XDG_DATA_HOME/easytidy/bin 作为兼容回退由 server_binary_path() 内部处理。）
+[package.metadata.shared]
+SERVER_BIN = { dev = "../../target/debug", prod = "~/.local/share/easytidy/bin" }

@@ -5,12 +5,12 @@
   "identifier": "io.github.dingiv.easytidy",
   "build": {
     "beforeDevCommand": {
-      "script": "pnpm dev",
+      "script": "sh -c 'cargo build -p easytidy-server && pnpm dev'",
       "cwd": "."
     },
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": {
-      "script": "pnpm build",
+      "script": "sh -c 'cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl && pnpm build'",
       "cwd": "."
     },
     "frontendDist": "dist"

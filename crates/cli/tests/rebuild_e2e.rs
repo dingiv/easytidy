@@ -61,15 +61,12 @@ async fn rebuild_applies_mounts_and_ports() {
     fs::write(src_dir.join("hello.txt"), "hello from host").unwrap();
 
     // 假 server 二进制（带 shebang，容器内可执行；sleep 让容器保持运行）
-    let data_home = tmp_path.join("data");
-    let bin_dir = data_home.join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
-    let fake_server = bin_dir.join("easytidy-server");
+    // rebuild() 与 create_with_config() 均显式接收 server 二进制路径——测试直接传假路径，
+    // 不依赖任何环境变量解析（比旧的 XDG_DATA_HOME hack 更隔离）。
+    let fake_server = tmp_path.join("easytidy-server");
     fs::write(&fake_server, "#!/bin/sh\nsleep 300\n").unwrap();
     fs::set_permissions(&fake_server, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .unwrap();
-    // rebuild() 内部经 server_binary_path() 解析 → 指向假二进制（测试环境隔离）
-    std::env::set_var("XDG_DATA_HOME", &data_home);
 
     // 配置：一条 bind mount + 一个 mapped 端口（8080 类随机空闲端口 → 80/tcp）
     let host_port = free_host_port();
@@ -126,7 +123,7 @@ async fn rebuild_applies_mounts_and_ports() {
 
         // rebuild：commit → stop → rm → create（同名，新配置）→ start
         let new_id = podman
-            .rebuild(&name, &config2)
+            .rebuild(&name, &config2, &fake_server)
             .await
             .map_err(|e| format!("rebuild 失败：{e}"))?;
         println!("[rebuild] new id = {new_id}");

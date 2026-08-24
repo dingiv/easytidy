@@ -14,6 +14,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+easytidy-shared = { path = "../shared" }
 
 [dependencies]
 tauri = { version = "2", features = ["devtools"] }
@@ -34,5 +35,14 @@ tokio-util = { workspace = true }
 base64 = "0.22"
 tracing-appender = "0.2.5"
 
+# （dev 期 server binary 路径解析走 core::server_binary_path() → shared::loader!
+#   读 core 的 [package.metadata.shared] SERVER_BIN namespace，
+#   GUI 自己不声明 namespace。）
+
 [dev-dependencies]
 tempfile = { workspace = true }
+# 让 Cargo 把 crates/server 纳入 GUI 的指纹图（没有这段 build.rs
+# 的 rerun-if-changed=../server/src 会警告"指向包外"）。dev-dep 不
+# 编进 cargo build，只编进 cargo test —— 零二进制膨胀，纯 file-watch
+# 触发（build.rs 自动 rebuild server）。详见 build.rs。
+easytidy-server = { path = "../server" }

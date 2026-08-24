@@ -25,6 +25,9 @@ signal-hook = "0.3"
 libc = "0.2"
 bytes = "1"
 
+[build-dependencies]
+easytidy-shared = { path = "../shared" }
+
 [dev-dependencies]
 bollard = { workspace = true }
 tempfile = { workspace = true }

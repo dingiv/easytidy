@@ -1098,6 +1098,7 @@ dependencies = [
  "crossterm",
  "easytidy-core",
  "easytidy-protocol",
+ "easytidy-shared",
  "futures",
  "libc",
  "serde",
@@ -1118,6 +1119,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "easytidy-protocol",
+ "easytidy-shared",
  "fs2",
  "futures",
  "http-body-util",
@@ -1146,6 +1148,8 @@ dependencies = [
  "dirs 5.0.1",
  "easytidy-core",
  "easytidy-protocol",
+ "easytidy-server",
+ "easytidy-shared",
  "futures",
  "rfd",
  "serde",
@@ -1192,6 +1196,14 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "easytidy-shared"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "tracing-subscriber",
 ]
 

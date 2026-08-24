@@ -454,8 +454,13 @@ impl Podman {
     /// 错误处理：任一步失败给出中文可读错误；create 成功但 start 失败时
     /// 尽力删除新容器，不留下孤儿容器。调用方负责在成功后把 `config`
     /// 回写 configfile（GUI apply / CLI rebuild 均执行）。
-    pub async fn rebuild(&self, name: &str, config: &ContainerConfig) -> Result<String> {
-        let server_bin = crate::server_binary_path()?;
+    pub async fn rebuild(
+        &self,
+        name: &str,
+        config: &ContainerConfig,
+        server_bin_path: &Path,
+    ) -> Result<String> {
+        let server_bin = server_bin_path;
 
         // 1. commit 当前容器层（bind mount 不入镜像）
         let tag = Self::rebuild_image_tag(name);

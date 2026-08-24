@@ -437,7 +437,10 @@ pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) ->
         .ok_or_else(|| format!("环境 {name} 不在注册表（先创建）"))?;
 
     let p = podman.get().await.map_err(|e| e.to_string())?;
-    p.rebuild(&name, &config).await.map_err(|e| format!("重建失败：{e}"))?;
+    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
+    p.rebuild(&name, &config, &server_bin)
+        .await
+        .map_err(|e| format!("重建失败：{e}"))?;
     podman.return_podman(p).await;
     info!("环境 {name} 已按注册配置重建并启动");
     Ok(())

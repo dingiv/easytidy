@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/core", "crates/server", "crates/cli", "crates/gui"]
+members = ["crates/protocol", "crates/core", "crates/server", "crates/cli", "crates/gui", "crates/shared"]
 exclude = ["spikes/cjk-spike/src-tauri"]
 
 [workspace.package]
