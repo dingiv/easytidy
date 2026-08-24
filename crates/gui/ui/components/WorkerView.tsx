@@ -470,7 +470,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                 style={{
                   display: activeId === p.id ? undefined : 'none',
                   height: '100%',
-                  padding: p.kind === 'terminal' ? 0 : undefined,
+                  padding: p.kind === 'terminal' ? '1ch' : undefined,
                   overflow: p.kind === 'terminal' ? 'hidden' : undefined,
                 }}
               >

@@ -55,6 +55,20 @@ pub(crate) struct PtySession {
     pub(crate) as_root: bool,
 }
 
+impl PtySession {
+    /// 显式终结：把 PTY 写侧换成 sink 并 drop 原 writer → 写侧关闭 → bash stdin
+    /// 得 EOF → 退出 → reader 线程收到 EOF 回收子进程。
+    ///
+    /// 为什么必须主动关：session 被 reader 线程以 `Arc<PtySession>` 持有，
+    /// `pty.close` 仅从 sessions map 移除**不会**释放 writer（Arc 计数未归零），
+    /// bash 收不到 EOF 永不退出（实测 pty.close 后进程残留、reader 永不到 EOF）。
+    pub(crate) fn shutdown_writer(&self) {
+        if let Ok(mut w) = self.writer.lock() {
+            *w = Box::new(std::io::sink());
+        }
+    }
+}
+
 pub(crate) type Subscribers = std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<easytidy_protocol::Frame>)>>;
 
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）

@@ -685,9 +685,11 @@ pub(crate) async fn handle_pty_close(
     }
 
     let mut sessions = state.sessions.write().await;
-    if let Some(_session) = sessions.remove(&req.stream_id) {
-        // Dropping the session will close the writer, causing PTY to see EOF
-        // The reader thread will naturally exit after reaping the child
+    if let Some(session) = sessions.remove(&req.stream_id) {
+        // ⚠️ 仅 remove 不够：reader 线程持有 Arc<PtySession>，session/writer 不会
+        // drop → bash stdin 收不到 EOF → 进程残留。必须主动关写侧（换 sink），
+        // bash 退出后 reader 收 EOF 再回收子进程。
+        session.shutdown_writer();
 
         Ok(Frame::Json(Message {
             id: msg.id,

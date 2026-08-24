@@ -244,6 +244,9 @@ async fn run_server(
         }
     }
 
+    // 容器内 auto-start 应用：server 自读配置并拉起（容器自包含，不依赖宿主推送）
+    services::passthrough::launch_auto_start(&state).await;
+
     // Accept loop
     loop {
         if state.shutting_down.load(Ordering::SeqCst) {

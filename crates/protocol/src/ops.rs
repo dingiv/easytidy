@@ -463,6 +463,42 @@ pub struct PtRevokeResp {
     pub removed_path: String,
 }
 
+/// 配置中的应用条目（容器内 passthrough 配置：应用列表 + auto_start）。
+///
+/// 存在**容器内** `/home/easytidy/.config/easytidy/passthrough.toml`（随容器层/快照
+/// 持久，容器自包含）；server 启动自读并拉起 auto_start 应用。宿主只留收藏(pinned)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PtConfiguredApp {
+    pub id: String,
+    pub name: String,
+    pub cmd: String,
+    /// 容器内 .desktop 路径（custom 应用为 None）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_file: Option<String>,
+    #[serde(default)]
+    pub auto_start: bool,
+    /// 图标：扫描应用 = 容器内路径；custom = 宿主 ~/.easytidy/icons 路径（仅宿主
+    /// 展示/导出用，server 忽略）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+}
+
+/// 读容器内 passthrough 配置（passthrough.list；不存在返回空列表）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassthroughList;
+
+/// PassthroughList 响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassthroughListResp {
+    pub apps: Vec<PtConfiguredApp>,
+}
+
+/// 写容器内 passthrough 配置（passthrough.set；整份覆盖 + 建目录）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassthroughSet {
+    pub apps: Vec<PtConfiguredApp>,
+}
+
 // ============================================================================
 // config: 配置管理族
 // ============================================================================
@@ -643,6 +679,28 @@ mod tests {
         let decoded: PtExport = serde_json::from_str(&json).expect("deserialize failed");
 
         assert_eq!(op, decoded);
+    }
+
+    #[test]
+    fn test_pt_configured_app_serde() {
+        let app = PtConfiguredApp {
+            id: "desktop:/usr/share/applications/google-chrome.desktop".to_string(),
+            name: "Google Chrome".to_string(),
+            cmd: "google-chrome-stable".to_string(),
+            desktop_file: Some("/usr/share/applications/google-chrome.desktop".to_string()),
+            auto_start: true,
+            icon: Some("/usr/share/icons/64x64/apps/google-chrome.png".to_string()),
+        };
+        let json = serde_json::to_string(&app).unwrap();
+        let decoded: PtConfiguredApp = serde_json::from_str(&json).unwrap();
+        assert_eq!(app, decoded);
+
+        // 旧/精简格式缺省字段兼容
+        let minimal: PtConfiguredApp =
+            serde_json::from_str(r#"{"id":"custom:x","name":"X","cmd":"x"}"#).unwrap();
+        assert_eq!(minimal.desktop_file, None);
+        assert!(!minimal.auto_start);
+        assert_eq!(minimal.icon, None);
     }
 
     #[test]

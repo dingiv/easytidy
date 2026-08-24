@@ -669,9 +669,8 @@ impl Podman {
 
     /// 启动容器（按名或 ID）。
     ///
-    /// 启动成功后触发 passthrough auto-start 拉起（await——不能 spawn：
-    /// CLI/GUI 进程短命，spawn 任务会在 runtime 关闭时被丢弃，实测不拉起；
-    /// autostart_apps 内部 2s 连接重试兜底 server 就绪延迟，失败仅日志）。
+    /// auto-start 应用由**容器内 server 启动自读拉起**（配置在容器内，容器自包含），
+    /// 宿主侧不再推送。
     pub async fn start(&self, name_or_id: &str) -> Result<()> {
         use bollard::container::StartContainerOptions;
 
@@ -682,7 +681,6 @@ impl Podman {
             .map_err(|e| Error::Connect(format!("启动容器失败：{e}")))?;
 
         tracing::info!("容器 {} 启动成功", name_or_id);
-        crate::passthrough::autostart_apps(name_or_id).await;
         Ok(())
     }
 
@@ -721,7 +719,6 @@ impl Podman {
             .map_err(|e| Error::Connect(format!("重启容器失败：{e}")))?;
 
         tracing::info!("容器 {} 重启成功", name_or_id);
-        crate::passthrough::autostart_apps(name_or_id).await;
         Ok(())
     }
 

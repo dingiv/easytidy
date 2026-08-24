@@ -2,12 +2,53 @@
 
 use tracing::{info, warn};
 
-use easytidy_protocol::ops::{CfgGet, CfgGetResp, CfgSet};
+use easytidy_protocol::ops::{
+    CfgGet, CfgGetResp, CfgSet, PassthroughList, PassthroughListResp, PassthroughSet,
+    PtConfiguredApp,
+};
 
 use crate::commands::apps::AppInfoFrontend;
 use crate::commands::fs::fetch_container_file;
 use crate::commands::socket::send_json_request;
 use crate::state::GuiSession;
+
+// ============================================================================
+// 容器内 passthrough 配置（每容器应用列表 + auto-start）读写 —— 经 server
+// `passthrough.list` / `passthrough.set`（配置在容器内，容器自包含；server 启动
+// 自读拉起 auto-start 应用）。宿主侧只留收藏(pinned)与导出元数据。
+// ============================================================================
+
+/// 读容器内配置的应用列表
+async fn read_container_apps(sess: &GuiSession) -> Result<Vec<PtConfiguredApp>, String> {
+    let resp = send_json_request(
+        sess,
+        "passthrough.list".to_string(),
+        serde_json::to_value(PassthroughList).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    let list: PassthroughListResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 passthrough.list 失败：{e}"))?;
+    Ok(list.apps)
+}
+
+/// 写容器内配置的应用列表（整份覆盖）
+async fn save_container_apps(sess: &GuiSession, apps: Vec<PtConfiguredApp>) -> Result<(), String> {
+    let resp = send_json_request(
+        sess,
+        "passthrough.set".to_string(),
+        serde_json::to_value(PassthroughSet { apps }).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    Ok(())
+}
 
 /// easytidy 品牌图标（导出图标水印；内嵌 PNG）
 const EASYTIDY_BRAND_ICON: &[u8] = include_bytes!("../../icons/easytidy256x256.png");
@@ -56,7 +97,7 @@ fn cli_path() -> String {
 ///   "configured_apps": [{"id","name","cmd","desktop_file"?,"auto_start","icon"?}],
 ///   "pinned": [{"id","name","cmd","icon"?}] }
 /// ```
-/// `configured_apps` 是 passthrough.toml 中有状态条目（auto_start=true 或
+/// `configured_apps` 是**容器内** passthrough 配置中有状态条目（auto_start=true 或
 /// custom 应用）；扫描应用若未配置则不在此（前端按 id 匹配查 auto-start）。
 #[tauri::command]
 pub async fn passthrough_state(
@@ -75,8 +116,8 @@ pub async fn passthrough_state(
         .map(|e| serde_json::json!({ "desktop_file": e.desktop_file, "content": e.content }))
         .collect();
 
-    let config_file = passthrough_config_file()?;
-    let apps = config_file.apps(container).map_err(|e| e.to_string())?;
+    // 容器内配置（经 server 读）
+    let apps = read_container_apps(sess).await?;
     let apps_json: Vec<_> = apps
         .into_iter()
         .map(|a| {
@@ -91,7 +132,8 @@ pub async fn passthrough_state(
         })
         .collect();
 
-    // 收藏（pin 到工具栏）：顺序 = pin 顺序
+    // 收藏（pin 到工具栏，宿主侧）：顺序 = pin 顺序
+    let config_file = passthrough_config_file()?;
     let pinned = config_file.pinned(container).map_err(|e| e.to_string())?;
     let pinned_json: Vec<_> = pinned
         .into_iter()
@@ -317,7 +359,7 @@ fn clean_exec(exec: &str) -> String {
         .join(" ")
 }
 
-/// 设置应用 auto-start（容器启动时自动拉起；随容器启动链路触发）
+/// 设置应用 auto-start（写入**容器内**配置；server 启动自读拉起）
 #[tauri::command]
 pub async fn passthrough_set_auto_start(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -332,15 +374,13 @@ pub async fn passthrough_set_auto_start(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
+    let mut apps = read_container_apps(sess).await?;
     // 保留已存应用的图标（upsert 会整体覆盖，不能丢）
-    let config_file = passthrough_config_file()?;
-    let existing_icon = config_file
-        .apps(container)
-        .map_err(|e| e.to_string())?
-        .into_iter()
+    let existing_icon = apps
+        .iter()
         .find(|a| a.id == id)
-        .and_then(|a| a.icon);
-    let app = easytidy_core::passthrough::PassthroughApp {
+        .and_then(|a| a.icon.clone());
+    let app = PtConfiguredApp {
         id: id.clone(),
         name,
         cmd: clean_exec(&cmd),
@@ -348,15 +388,28 @@ pub async fn passthrough_set_auto_start(
         auto_start: false,
         icon: existing_icon,
     };
-    config_file
-        .set_auto_start(container, app, enabled)
-        .map_err(|e| e.to_string())?;
-    info!("passthrough auto-start 已设置：{container} enabled={enabled}");
+    if enabled {
+        let mut app = app;
+        app.auto_start = true;
+        if let Some(existing) = apps.iter_mut().find(|a| a.id == id) {
+            *existing = app;
+        } else {
+            apps.push(app);
+        }
+    } else if let Some(existing) = apps.iter_mut().find(|a| a.id == id) {
+        if id.starts_with("custom:") {
+            existing.auto_start = false; // custom 保留（是资产，仅关 auto-start）
+        } else {
+            apps.retain(|a| a.id != id); // 扫描应用 absence = false
+        }
+    }
+    save_container_apps(sess, apps).await?;
+    info!("passthrough auto-start 已设置（容器内）：{container} enabled={enabled}");
     Ok(())
 }
 
-/// 添加自定义应用（固定目录扫描之外，如 `google-chrome-stable --disable-dev-shm-usage`）。
-/// 返回 AppInfoFrontend（desktop_file=`custom:<name>`），前端直接进现有导出流。
+/// 添加自定义应用（固定目录扫描之外，如 `google-chrome-stable --disable-dev-shm-usage`），
+/// 写入**容器内**配置。返回 AppInfoFrontend（desktop_file=`custom:<name>`），前端直接进现有导出流。
 #[tauri::command]
 pub async fn passthrough_add_custom(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -367,23 +420,40 @@ pub async fn passthrough_add_custom(
         .inner()
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-    let config_file = passthrough_config_file()?;
-    let app = config_file
-        .add_custom(&sess.container_name, &name, &cmd)
-        .map_err(|e| e.to_string())?;
+    let container = &sess.container_name;
+
+    if name.trim().is_empty() || cmd.trim().is_empty() {
+        return Err("自定义应用名称与命令不能为空".to_string());
+    }
+    let id = format!("custom:{name}");
+    let mut apps = read_container_apps(sess).await?;
+    if apps.iter().any(|a| a.id == id) {
+        return Err(format!("自定义应用 {name} 已存在"));
+    }
+    let app = PtConfiguredApp {
+        id: id.clone(),
+        name: name.clone(),
+        cmd: cmd.trim().to_string(),
+        desktop_file: None,
+        auto_start: false,
+        icon: None,
+    };
+    apps.push(app);
+    save_container_apps(sess, apps).await?;
+    info!("自定义应用已添加（容器内）：{container} {name}");
     Ok(AppInfoFrontend {
-        name: app.name,
-        icon_path: app.icon,
-        exec: app.cmd,
+        name,
+        icon_path: None,
+        exec: cmd,
         comment: None,
-        desktop_file: app.id,
+        desktop_file: id,
         categories: None,
         startup_notify: false,
         startup_wm_class: None,
     })
 }
 
-/// 移除应用（配置条目 + 清理可能存在的导出，防孤儿）
+/// 移除应用（容器内配置条目 + 清理可能存在的导出，防孤儿）
 #[tauri::command]
 pub async fn passthrough_remove_app(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -395,16 +465,15 @@ pub async fn passthrough_remove_app(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let config_file = passthrough_config_file()?;
-    config_file
-        .remove_app(container, &id)
-        .map_err(|e| e.to_string())?;
+    let mut apps = read_container_apps(sess).await?;
+    apps.retain(|a| a.id != id);
+    save_container_apps(sess, apps).await?;
 
     // 非 custom 且已导出 → 清理导出（防孤儿）
     if !id.starts_with("custom:") {
         let _ = easytidy_core::desktop::remove_passthrough(container, &id);
     }
-    info!("passthrough 应用已移除：{container} {id}");
+    info!("passthrough 应用已移除（容器内）：{container} {id}");
     Ok(())
 }
 
@@ -471,7 +540,7 @@ pub async fn passthrough_import_container_icon(
 }
 
 /// 设置自定义应用图标（icon = 宿主 ~/.easytidy/icons 路径；None = 清除）。
-/// 持久化到 passthrough.toml；导出时 Icon= 直接用该路径。
+/// 写入**容器内**配置；导出时 Icon= 直接用该路径。
 #[tauri::command]
 pub async fn passthrough_set_custom_icon(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -484,16 +553,13 @@ pub async fn passthrough_set_custom_icon(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let config_file = passthrough_config_file()?;
-    let mut apps = config_file.apps(container).map_err(|e| e.to_string())?;
+    let mut apps = read_container_apps(sess).await?;
     let Some(app) = apps.iter_mut().find(|a| a.id == id) else {
         return Err(format!("应用不存在：{id}"));
     };
     app.icon = icon.clone();
-    config_file
-        .upsert_app(container, app.clone())
-        .map_err(|e| e.to_string())?;
-    info!("自定义应用图标已设置：{container} {id} → {icon:?}");
+    save_container_apps(sess, apps).await?;
+    info!("自定义应用图标已设置（容器内）：{container} {id} → {icon:?}");
     Ok(())
 }
 

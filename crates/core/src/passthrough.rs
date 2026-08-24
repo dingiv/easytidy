@@ -53,12 +53,12 @@ impl PassthroughApp {
     }
 }
 
-/// 全局 passthrough 配置（按容器分组）
+/// 宿主侧 passthrough 配置（只留**收藏** pinned；每容器应用列表 + auto-start
+/// 已随「配置入容器」迁到容器内 `/home/easytidy/.config/easytidy/passthrough.toml`，
+/// 由 server 自读拉起）。
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PassthroughConfig {
     pub schema_version: u32,
-    #[serde(default)]
-    pub containers: HashMap<String, Vec<PassthroughApp>>,
     /// 收藏（pin 到 GUI 工具栏）：按容器分组的应用列表，顺序 = 显示顺序
     #[serde(default)]
     pub pinned: HashMap<String, Vec<PassthroughApp>>,
@@ -68,7 +68,6 @@ impl PassthroughConfig {
     pub fn new() -> Self {
         Self {
             schema_version: 1,
-            containers: HashMap::new(),
             pinned: HashMap::new(),
         }
     }
@@ -143,24 +142,6 @@ impl PassthroughConfigFile {
         Ok(())
     }
 
-    /// 读取某容器的应用列表（无条目返回空）
-    pub fn apps(&self, container: &str) -> Result<Vec<PassthroughApp>> {
-        let config = self.load()?;
-        Ok(config.containers.get(container).cloned().unwrap_or_default())
-    }
-
-    /// 写入/更新单个应用
-    pub fn upsert_app(&self, container: &str, app: PassthroughApp) -> Result<()> {
-        let mut config = self.load()?;
-        let apps = config.containers.entry(container.to_string()).or_default();
-        if let Some(existing) = apps.iter_mut().find(|a| a.id == app.id) {
-            *existing = app;
-        } else {
-            apps.push(app);
-        }
-        self.save(&config)
-    }
-
     /// 读取某容器的收藏（pin）列表（无条目返回空；顺序 = pin 顺序）
     pub fn pinned(&self, container: &str) -> Result<Vec<PassthroughApp>> {
         let config = self.load()?;
@@ -190,131 +171,6 @@ impl PassthroughConfigFile {
             config.pinned.remove(container);
         }
         self.save(&config)
-    }
-
-    /// 删除应用（存在则删除容器条目;容器条目空则移除键）
-    pub fn remove_app(&self, container: &str, id: &str) -> Result<()> {
-        let mut config = self.load()?;
-        let Some(apps) = config.containers.get_mut(container) else {
-            return Ok(());
-        };
-        apps.retain(|a| a.id != id);
-        if apps.is_empty() {
-            config.containers.remove(container);
-        }
-        self.save(&config)
-    }
-
-    /// 设置 auto-start。
-    ///
-    /// 语义：enabled=true → upsert（cmd 一并更新，保证拉起命令最新）；
-    /// enabled=false → **custom 条目保留并置 false，扫描应用删条目**
-    /// （配置文件只存"有状态"条目，absence = auto_start false）
-    pub fn set_auto_start(
-        &self,
-        container: &str,
-        app: PassthroughApp,
-        enabled: bool,
-    ) -> Result<()> {
-        if enabled {
-            let mut app = app;
-            app.auto_start = true;
-            self.upsert_app(container, app)
-        } else {
-            let mut config = self.load()?;
-            let Some(apps) = config.containers.get_mut(container) else {
-                return Ok(());
-            };
-            if let Some(existing) = apps.iter_mut().find(|a| a.id == app.id) {
-                if existing.is_custom() {
-                    existing.auto_start = false; // custom 保留（是资产，仅关 auto-start）
-                } else {
-                    apps.retain(|a| a.id != app.id); // 扫描应用 absence = false
-                }
-                if apps.is_empty() {
-                    config.containers.remove(container);
-                }
-                self.save(&config)?;
-            }
-            Ok(())
-        }
-    }
-
-    /// 添加自定义应用（重名报错；返回构造好的应用条目）
-    pub fn add_custom(&self, container: &str, name: &str, cmd: &str) -> Result<PassthroughApp> {
-        if name.trim().is_empty() || cmd.trim().is_empty() {
-            return Err(Error::Config("自定义应用名称与命令不能为空".to_string()));
-        }
-        let id = format!("custom:{name}");
-        let mut config = self.load()?;
-        let apps = config.containers.entry(container.to_string()).or_default();
-        if apps.iter().any(|a| a.id == id) {
-            return Err(Error::Config(format!("自定义应用 {name} 已存在")));
-        }
-        let app = PassthroughApp {
-            id,
-            name: name.to_string(),
-            cmd: cmd.trim().to_string(),
-            desktop_file: None,
-            auto_start: false,
-            icon: None,
-        };
-        apps.push(app.clone());
-        self.save(&config)?;
-        Ok(app)
-    }
-}
-
-// ============================================================================
-// auto-start 拉起（宿主侧触发，server 保活）
-// ============================================================================
-
-/// 容器启动后拉起 auto-start 应用（fire-and-forget，错误仅日志）。
-///
-/// 流程：读 passthrough 配置 → 无 auto_start 条目零成本返回 →
-/// 连接容器 server socket（0.25s 间隔重试 ~6s，容忍 server 启动延迟）→
-/// hello 握手 → apps.launch → 读响应记录结果。
-pub async fn autostart_apps(container: &str) {
-    let config_path = match PassthroughConfigFile::default_path() {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("解析 passthrough 配置路径失败：{e}");
-            return;
-        }
-    };
-    let config_file = PassthroughConfigFile::with_path(config_path);
-    let apps = match config_file.apps(container) {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!("读取 passthrough 配置失败：{e}");
-            return;
-        }
-    };
-    let to_launch: Vec<PassthroughApp> = apps.into_iter().filter(|a| a.auto_start).collect();
-    if to_launch.is_empty() {
-        return; // 零成本：无 auto-start 配置
-    }
-
-    tracing::info!(
-        "auto-start：{} 个应用待拉起（container={container}）",
-        to_launch.len()
-    );
-
-    // 经 server socket 拉起（连接重试 + 握手 + apps.launch；成功/失败逐条返回）
-    match launch_apps(container, &to_launch).await {
-        Ok(results) => {
-            for r in results {
-                match r.pid {
-                    Some(pid) => tracing::info!("auto-start 拉起成功：{} (pid={pid})", r.name),
-                    None => tracing::warn!(
-                        "auto-start 拉起失败：{}：{}",
-                        r.name,
-                        r.error.as_deref().unwrap_or("unknown")
-                    ),
-                }
-            }
-        }
-        Err(e) => tracing::warn!("auto-start：拉起失败（container={container}）：{e}"),
     }
 }
 
@@ -483,7 +339,8 @@ mod tests {
     }
 
     #[test]
-    fn test_roundtrip() {
+    fn test_pinned_roundtrip() {
+        // 宿主配置只存收藏(pinned)；每容器应用列表+auto-start 已迁容器内
         let dir = TempDir::new().unwrap();
         let f = test_file(&dir);
         let scanned = PassthroughApp {
@@ -494,33 +351,10 @@ mod tests {
             auto_start: true,
             icon: None,
         };
-        f.upsert_app("chrome", scanned.clone()).unwrap();
-        let apps = f.apps("chrome").unwrap();
-        assert_eq!(apps.len(), 1);
-        assert_eq!(apps[0], scanned);
-        assert!(apps[0].auto_start);
-    }
-
-    #[test]
-    fn test_set_auto_start_off_scan_app_removed() {
-        let dir = TempDir::new().unwrap();
-        let f = test_file(&dir);
-        let a = app("/usr/share/applications/x.desktop", "X", true);
-        f.set_auto_start("c", a.clone(), true).unwrap();
-        f.set_auto_start("c", a.clone(), false).unwrap();
-        assert!(f.apps("c").unwrap().is_empty()); // 扫描应用 absence = false
-    }
-
-    #[test]
-    fn test_set_auto_start_off_custom_kept() {
-        let dir = TempDir::new().unwrap();
-        let f = test_file(&dir);
-        let a = app("custom:MyApp", "MyApp", true);
-        f.set_auto_start("c", a.clone(), true).unwrap();
-        f.set_auto_start("c", a.clone(), false).unwrap();
-        let apps = f.apps("c").unwrap();
-        assert_eq!(apps.len(), 1);
-        assert!(!apps[0].auto_start); // custom 保留但关掉
+        f.pin_app("chrome", scanned.clone()).unwrap();
+        let pinned = f.pinned("chrome").unwrap();
+        assert_eq!(pinned.len(), 1);
+        assert_eq!(pinned[0], scanned);
     }
 
     #[test]
@@ -545,20 +379,4 @@ mod tests {
         assert!(f.pinned("c").unwrap().is_empty());
     }
 
-    #[test]
-    fn test_add_custom_dup_rejected() {
-        let dir = TempDir::new().unwrap();
-        let f = test_file(&dir);
-        f.add_custom("c", "MyApp", "myapp").unwrap();
-        assert!(f.add_custom("c", "MyApp", "myapp").is_err());
-    }
-
-    #[test]
-    fn test_remove_app() {
-        let dir = TempDir::new().unwrap();
-        let f = test_file(&dir);
-        f.add_custom("c", "MyApp", "myapp").unwrap();
-        f.remove_app("c", "custom:MyApp").unwrap();
-        assert!(f.apps("c").unwrap().is_empty());
-    }
 }

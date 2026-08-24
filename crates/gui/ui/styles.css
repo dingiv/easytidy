@@ -213,12 +213,12 @@ button:disabled {
 
 .tab-pane {
   height: 100%;
-  padding: 1rem;
+  padding: 1ch;
   overflow: auto;
 }
 
 .terminal-pane {
-  padding: 0;
+  padding: 1ch;
   overflow: hidden;
 }
 

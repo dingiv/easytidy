@@ -19,6 +19,7 @@ use crate::services::config::{handle_config_get, handle_config_set};
 use crate::services::fs::{handle_fs_copy, handle_fs_list, handle_fs_mkdir, handle_fs_read, handle_fs_stat, handle_fs_write};
 use crate::services::lifecycle::{handle_lifecycle_entry_launch, handle_lifecycle_shutdown};
 use crate::services::pty::{handle_pty_close, handle_pty_cwd, handle_pty_list, handle_pty_open, handle_pty_resize};
+use crate::services::passthrough::{handle_passthrough_list, handle_passthrough_set};
 /// Handle a JSON message
 /// 消息入口：handler 失败转为显式 error 响应（带 anyhow 全链 {:#}），
 /// 不再断连——客户端原本就解析 err 字段，此前 Err 直接冒泡到连接层断开，
@@ -139,6 +140,12 @@ pub(crate) async fn dispatch(
         }
         (MsgKind::Req, "config.set") => {
             Ok(Some(handle_config_set(msg).await?))
+        }
+        (MsgKind::Req, "passthrough.list") => {
+            Ok(Some(handle_passthrough_list(msg, state).await?))
+        }
+        (MsgKind::Req, "passthrough.set") => {
+            Ok(Some(handle_passthrough_set(msg, state).await?))
         }
         (MsgKind::Req, "lifecycle.entryLaunch") => {
             Ok(Some(handle_lifecycle_entry_launch(msg, state, event_tx).await?))
