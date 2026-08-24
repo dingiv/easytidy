@@ -22,6 +22,8 @@ mod storage;
 
 use std::collections::HashMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -34,7 +36,7 @@ use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
-use tracing_subscriber::{EnvFilter, fmt};
+use tracing_subscriber::{fmt, EnvFilter};
 
 use connection::handle_connection;
 use http::start_http_server;
@@ -53,12 +55,35 @@ struct Args {
     /// Optional entry command to launch on startup (for silent-boot entry chaining)
     #[arg(long)]
     entry: Option<String>,
+
+    /// Optional log file path. When set, all tracing output AND stderr
+    /// (含 eprintln!) 都重定向到该文件;stdout 不动。
+    ///
+    /// 设计目的:开发期把 server 日志固定到 bind-mount 的宿主机文件,
+    /// 不依赖 `podman logs`(后者依赖容器 stdout/stderr 被 podman 收集,
+    /// 且容器重启即丢)。GUI/GUI host 侧可以直接 `tail` 该文件查看
+    /// server 端实际报错。
+    #[arg(long)]
+    log_file: Option<PathBuf>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse arguments
     let args = Args::parse();
+
+    // 日志文件:如指定,先把 stderr dup2 到 file,再 init tracing writer 到 file。
+    // 这样 tracing 的 ANSI/INFO/DEBUG 行与所有 eprintln!(诊断行)都进同一份
+    // bind-mount 上的宿主文件,容器重启后历史仍在(`podman logs` 容器
+    // 退出即丢)。stdout 不动——entry 应用的输出走 stdout,文件会拿走。
+    //
+    // 必须在 Args::parse() 后立即做:fixup_xdg/ensure_xauthority/tracing 都可能
+    // 写错误行,这些行必须进 log_file,否则开发期定位反而看不到。
+    if let Some(ref log_path) = args.log_file {
+        if let Err(e) = redirect_stderr_to(log_path) {
+            eprintln!("failed to open log file {}: {e}", log_path.display());
+        }
+    }
 
     // XDG_DATA_DIRS 防御性修正：旧版 flavor 注入纯覆盖值 /usr/share/easytidy-host，
     // 容器内 gdk-pixbuf 找不到系统 loaders.cache → PNG 图标解码失败 → GTK 断言
@@ -75,9 +100,12 @@ async fn main() -> Result<()> {
     let env_filter = EnvFilter::from_default_env()
         .add_directive(tracing::Level::INFO.into())
         .add_directive("easytidy_server=debug".parse()?);
+    // 指定 log_file 时:writer 走 stderr(已被 dup2 到 file);
+    // 否则 writer 走 stderr 默认。
     fmt()
         .with_env_filter(env_filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .init();
 
     info!("easytidy-server starting (protocol v{})", PROTOCOL_VERSION);
@@ -142,6 +170,38 @@ async fn main() -> Result<()> {
     perform_graceful_shutdown(state).await?;
 
     info!("easytidy-server exiting");
+    Ok(())
+}
+
+/// 把 stderr fd 重定向到给定日志文件（追加模式）。
+///
+/// 目的:让所有 `eprintln!`(诊断)+ tracing 默认 writer(也写 stderr)都进
+/// 同一份文件,且能在文件里看完整时间序。stdout 不动 —— entry 应用或
+/// 后续 pipe 仍走 stdout。
+///
+/// 实现:`open(O_APPEND|O_CREAT|O_WRONLY, 0o644)` + `dup2(fd, STDERR_FILENO)`
+/// —— dup2 之后,任何写到 fd=2 的 syscall/fwrite 都重定向到 file。
+///
+/// 父目录:不存在则创建(容器内通常是 `/run/easytidy`,podman-init 已建)。
+fn redirect_stderr_to(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create log dir {}", parent.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o644)
+        .custom_flags(libc::O_APPEND | libc::O_CREAT | libc::O_WRONLY)
+        .open(path)
+        .with_context(|| format!("open log file {}", path.display()))?;
+    let fd = file.as_raw_fd();
+    // dup2 之后 file fd 可关闭(已 dup 到 fd=2)
+    let r = unsafe { libc::dup2(fd, libc::STDERR_FILENO) };
+    if r == -1 {
+        return Err(anyhow!("dup2 to STDERR failed: {}", std::io::Error::last_os_error()));
+    }
     Ok(())
 }
 
