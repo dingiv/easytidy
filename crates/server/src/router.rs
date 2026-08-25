@@ -10,7 +10,7 @@ use easytidy_protocol::{
 };
 use serde_json::json;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::http::HTTP_PORT;
 use crate::state::ServerState;
@@ -37,8 +37,20 @@ pub(crate) async fn handle_message(
     match dispatch(msg, state, handshake_done, event_tx, conn_token, session_id).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
-            // {:#} = anyhow 全错误链（context + 根因），日志与响应一致
-            error!("{msg_op} 处理失败：{e:#}");
+            // 文件/路径不存在（如 GUI 探测未安装应用的图标）是预期场景，客户端
+            // 已优雅降级（AppIcon 占位）——降级为 debug，避免 ERROR 噪声；
+            // 其余失败 {:#} = anyhow 全错误链（context + 根因），日志与响应一致。
+            let is_not_found = e.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .map(|ie| ie.kind() == std::io::ErrorKind::NotFound)
+                    .unwrap_or(false)
+            });
+            if is_not_found {
+                debug!("{msg_op}（文件/路径不存在，客户端可忽略）：{e:#}");
+            } else {
+                error!("{msg_op} 处理失败：{e:#}");
+            }
             Ok(Some(Frame::Json(Message {
                 id: msg_id,
                 kind: MsgKind::Resp,

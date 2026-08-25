@@ -65,6 +65,8 @@ export interface ContainerConfigEditorProps {
   onChange(next: ContainerConfig): void;
   /** create = 名称/镜像可编辑；edit = 身份只读 + 对照视图 */
   mode: 'create' | 'edit';
+  /** create 模式下锁死名称（模板编辑既有模板用；模板名 = 文件名） */
+  nameLocked?: boolean;
   /** podman inspect 当前生效投影（edit 模式对照；创建时 null） */
   effective?: ContainerConfigView | null;
   /** 宿主用户（用户页 uid 映射语义对照） */
@@ -85,7 +87,7 @@ interface ExampleConf {
 
 /** 单页容器配置编辑器：自上而下 section（容器 / 挂载 / 网络 / 环境变量 / 用户） */
 export function ContainerConfigEditor({
-  value, onChange, mode, effective = null, hostUser = null,
+  value, onChange, mode, nameLocked = false, effective = null, hostUser = null,
 }: ContainerConfigEditorProps) {
   const { message } = AntApp.useApp();
   const [examples, setExamples] = useState<ExampleConf[]>([]);
@@ -212,10 +214,9 @@ export function ContainerConfigEditor({
         <ContainerPane
           edit={value}
           mode={mode}
+          nameLocked={nameLocked}
           onNameChange={(name) => update({ name })}
           onImageChange={(image) => update({ image })}
-          onEntryChange={(entry) => update({ entry: entry.trim() || null })}
-          onEntryArgsChange={(entry_args) => update({ entry_args })}
           onSilentBootChange={(silent_boot) => update({ silent_boot })}
           onPersistentChange={(persistent) => update({ persistent })}
         />

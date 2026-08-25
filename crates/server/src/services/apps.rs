@@ -334,14 +334,6 @@ async fn read_stream_into_buffer(
     }
 }
 
-/// Launch entry command on startup
-pub(crate) async fn launch_entry_command(state: &Arc<ServerState>, entry_cmd: String) -> Result<()> {
-    info!("Launching entry command: {}", entry_cmd);
-    let pid = spawn_managed_process(state, &entry_cmd, "entry", "default".to_string(), None).await?;
-    info!("Entry command launched: pid={pid}");
-    Ok(())
-}
-
 /// Handle apps.launch（passthrough auto-start：批量拉起，逐条独立成败）
 pub(crate) async fn handle_apps_launch(
     msg: Message,

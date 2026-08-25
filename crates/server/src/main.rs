@@ -35,12 +35,56 @@ use easytidy_protocol::PROTOCOL_VERSION;
 use tokio::net::UnixListener;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info, Event, Subscriber};
+use tracing_subscriber::fmt::{format::Writer, FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{fmt, EnvFilter};
+
+/// 统一日志前缀：`easytidy-server` 或 `easytidy-server(容器名)`。
+fn log_prefix(container: &str) -> String {
+    if container.is_empty() {
+        "easytidy-server".to_string()
+    } else {
+        format!("easytidy-server({container})")
+    }
+}
+
+/// 统一日志格式：`[LEVEL] easytidy-server(容器名): message`（无时间戳、无 target）。
+///
+/// 容器名取 `HOSTNAME`（podman 默认 hostname = 容器名）；非容器内运行回落 `easytidy-server`。
+#[derive(Clone)]
+struct EasyTidyFormat {
+    container: String,
+}
+
+impl<S, N> FormatEvent<S, N> for EasyTidyFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> std::fmt::Result {
+        let level = match *event.metadata().level() {
+            tracing::Level::TRACE => "TRACE",
+            tracing::Level::DEBUG => "DEBUG",
+            tracing::Level::INFO => "INFO",
+            tracing::Level::WARN => "WARN",
+            tracing::Level::ERROR => "ERROR",
+        };
+        write!(writer, "[{level}] {}: ", log_prefix(&self.container))?;
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
 
 use connection::handle_connection;
 use http::start_http_server;
-use services::apps::{child_prune_task, launch_entry_command};
+use services::apps::child_prune_task;
 use services::lifecycle::perform_graceful_shutdown;
 use setup::{ensure_xauthority, fixup_xdg_data_dirs, setup_fontconfig, setup_user_mapping};
 use state::ServerState;
@@ -52,7 +96,9 @@ struct Args {
     #[arg(long)]
     socket: PathBuf,
 
-    /// Optional entry command to launch on startup (for silent-boot entry chaining)
+    /// Legacy entry command (host 侧已不再需要；此处保留仅为 CLI 兼容——
+    /// 旧容器创建时仍传 `--entry`，直接拒绝会启动失败。server 现在忽略它，
+    /// 启动应用改由容器内 passthrough auto-start 配置驱动)
     #[arg(long)]
     entry: Option<String>,
 
@@ -96,16 +142,20 @@ async fn main() -> Result<()> {
     // (忽略 podman create 时可能注入的旧值)。
     ensure_xauthority();
 
-    // Initialize tracing
+    // Initialize tracing — 双份日志，统一格式 `[LEVEL] easytidy-server(容器名): message`：
+    // 1) stderr（已被 dup2 到 server.log，保留原文件）
+    // 2) stdout → 容器 stdout → podman journald 驱动 → 宿主 systemd journal
+    //    （用户环境 podman 默认 log driver 即 journald，实测；无需改容器配置）
     let env_filter = EnvFilter::from_default_env()
         .add_directive(tracing::Level::INFO.into())
         .add_directive("easytidy_server=debug".parse()?);
-    // 指定 log_file 时:writer 走 stderr(已被 dup2 到 file);
-    // 否则 writer 走 stderr 默认。
-    fmt()
-        .with_env_filter(env_filter)
-        .with_target(false)
-        .with_writer(std::io::stderr)
+    let format = EasyTidyFormat {
+        container: std::env::var("HOSTNAME").unwrap_or_default(),
+    };
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt::layer().event_format(format.clone()).with_writer(std::io::stderr))
+        .with(fmt::layer().event_format(format).with_writer(std::io::stdout))
         .init();
 
     info!("easytidy-server starting (protocol v{})", PROTOCOL_VERSION);
@@ -160,7 +210,7 @@ async fn main() -> Result<()> {
             info!("Received SIGINT, initiating graceful shutdown");
             shutdown_flag.store(true, Ordering::SeqCst);
         }
-        result = run_server(args.socket.clone(), state.clone(), args.entry) => {
+        result = run_server(args.socket.clone(), state.clone()) => {
             result?;
         }
     }
@@ -209,7 +259,6 @@ fn redirect_stderr_to(path: &std::path::Path) -> Result<()> {
 async fn run_server(
     socket_path: PathBuf,
     state: Arc<ServerState>,
-    entry_cmd: Option<String>,
 ) -> Result<()> {
     // Remove socket if it exists
     if let Err(e) = fs::remove_file(&socket_path) {
@@ -237,14 +286,8 @@ async fn run_server(
     // HTTP 静态文件服务（图片预览/大文件下载;动态端口经 server.info 查询）
     start_http_server().await;
 
-    // Launch entry command if provided
-    if let Some(entry_cmd) = entry_cmd {
-        if let Err(e) = launch_entry_command(&state, entry_cmd).await {
-            warn!("Failed to launch entry command: {}", e);
-        }
-    }
-
-    // 容器内 auto-start 应用：server 自读配置并拉起（容器自包含，不依赖宿主推送）
+    // 容器内 auto-start 应用：server 自读配置并拉起（容器自包含，不依赖宿主推送）。
+    // entry/entry_args（旧 --entry）已弃用：启动应用改由 passthrough auto-start 驱动。
     services::passthrough::launch_auto_start(&state).await;
 
     // Accept loop
@@ -273,4 +316,14 @@ async fn run_server(
     }
 
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::log_prefix;
+
+    #[test]
+    fn test_log_prefix() {
+        assert_eq!(log_prefix("chrome"), "easytidy-server(chrome)");
+        assert_eq!(log_prefix(""), "easytidy-server");
+    }
 }

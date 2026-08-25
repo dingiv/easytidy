@@ -18,12 +18,8 @@ import {
   Alert,
   Button,
   Checkbox,
-  Input,
-  Modal,
-  Select,
   Space,
   Spin,
-  Switch,
   Tag,
   Tooltip,
   Typography,
@@ -37,18 +33,8 @@ import {
   RocketOutlined,
   SyncOutlined,
 } from '@ant-design/icons';
-import type { ConfTemplate, MountConfig } from '../types';
-import { BLANK_CONTAINER_CONFIG } from './config/ContainerConfigEditor';
+import type { ConfTemplate } from '../types';
 import './FlavorsPanel.css';
-
-/** 空白 conf 模板（新建表单初始值；user_home 默认 true 与 Rust 共享基座对齐） */
-function emptyConfTemplate(): ConfTemplate {
-  return {
-    ...BLANK_CONTAINER_CONFIG,
-    gui: false,
-    setup: [],
-  } as ConfTemplate;
-}
 
 /** 生成不冲突的复制名：`base-copy`，冲突则 `base-copy2`、`base-copy3`… */
 function nextCopyName(base: string, existing: string[]): string {
@@ -59,27 +45,16 @@ function nextCopyName(base: string, existing: string[]): string {
   return `${base}-copy${i}`;
 }
 
-/** mounts 行文本（"host:container[:ro]"）→ MountConfig */
-function parseMountLine(line: string): MountConfig | null {
-  const parts = line.split(':').map((p) => p.trim());
-  if (parts.length < 2 || !parts[0] || !parts[1]) return null;
-  // 末段 "ro" = 只读（其余段合并为容器路径）
-  const ro = parts.length >= 3 && parts[parts.length - 1] === 'ro';
-  const container = ro ? parts.slice(1, -1).join(':') : parts.slice(1).join(':');
-  return { host_path: parts[0], container_path: container, read_only: ro };
-}
-
-/** MountConfig → 行文本 */
-function mountToLine(m: MountConfig): string {
-  return `${m.host_path}:${m.container_path}${m.read_only ? ':ro' : ''}`;
-}
-
 interface FlavorsPanelProps {
   /** 模板卡「使用」：打开配置编辑器并预填该模板（创建新容器） */
   onLaunch(templateName: string): void;
+  /** 模板卡「编辑」/「新建模板」：交给 MasterView 打开模板配置管理器 tab */
+  onEditTemplate(template: ConfTemplate | null): void;
+  /** 模板保存成功后 +1 → 本面板重新加载列表 */
+  refreshTick: number;
 }
 
-function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
+function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPanelProps) {
   const { message, modal } = AntApp.useApp();
 
   const [templates, setTemplates] = useState<ConfTemplate[]>([]);
@@ -87,13 +62,6 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [syncingTemplate, setSyncingTemplate] = useState<string | null>(null);
-
-  // conf 模板编辑器（模板表单）
-  const [editing, setEditing] = useState<ConfTemplate | null>(null);
-  const [isNew, setIsNew] = useState(false);
-  const [setupText, setSetupText] = useState('');
-  const [mountsText, setMountsText] = useState('');
-  const [saving, setSaving] = useState(false);
 
   // 多选（批量删除）
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -116,53 +84,10 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
     }
   };
 
+  // 挂载 + 模板 tab 保存成功后（refreshTick 变化）都重新加载
   useEffect(() => {
     load();
-  }, []);
-
-  /** 模板编辑器打开（t=null → 新建） */
-  const openEditor = (t: ConfTemplate | null) => {
-    const f = t ?? emptyConfTemplate();
-    setEditing(f);
-    setIsNew(t === null);
-    setSetupText(f.setup.join('\n'));
-    setMountsText(f.mounts.map(mountToLine).join('\n'));
-  };
-
-  const handleSave = async () => {
-    const t = editing;
-    if (!t) return;
-    if (!t.name.trim() || !t.image.trim()) {
-      message.warning('名称与镜像不能为空');
-      return;
-    }
-    setSaving(true);
-    try {
-      const toSave: ConfTemplate = {
-        ...t,
-        name: t.name.trim(),
-        image: t.image.trim(),
-        setup: setupText.split('\n').map((s) => s.trim()).filter(Boolean),
-      };
-      // mountsText → mounts（mountsText 是局部分离编辑态）
-      const parsedMounts = mountsText
-        .split('\n')
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .map(parseMountLine)
-        .filter((m): m is MountConfig => m !== null);
-      toSave.mounts = parsedMounts;
-      await invoke('conf_save_template', { template: toSave });
-      message.success(`模板已保存：${toSave.name}`);
-      setEditing(null);
-      await load();
-    } catch (err: any) {
-      message.error(errMsg(err, '保存失败'));
-      console.error('conf_save_template failed:', err);
-    } finally {
-      setSaving(false);
-    }
-  };
+  }, [refreshTick]);
 
   const handleDelete = (t: ConfTemplate) => {
     modal.confirm({
@@ -305,7 +230,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
           <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
             刷新
           </Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => openEditor(null)}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => onEditTemplate(null)}>
             新建模板
           </Button>
         </Space>
@@ -380,7 +305,6 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
                 <div className="flavor-main">
                   <div className="flavor-title">
                     <span className="flavor-name">{t.name}</span>
-                    {t.entry && <Tag color="green">entry: {t.entry}</Tag>}
                     {t.gui && <Tag color="blue">GUI 透传</Tag>}
                     {t.setup.length > 0 && <Tag color="purple">setup ×{t.setup.length}</Tag>}
                     {t.mounts.length > 0 && (
@@ -407,7 +331,7 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
                   </Tooltip>
                   <Button
                     icon={<EditOutlined />}
-                    onClick={() => openEditor(t)}
+                    onClick={() => onEditTemplate(t)}
                     title="编辑"
                   />
                   <Button
@@ -445,113 +369,6 @@ function FlavorsPanelInner({ onLaunch }: FlavorsPanelProps) {
           </div>
         </div>
       )}
-
-      {/* conf 模板编辑器（模板表单） */}
-      <Modal
-        title={isNew ? '新建模板' : `编辑 ${editing?.name}`}
-        open={editing !== null}
-        onCancel={() => setEditing(null)}
-        onOk={handleSave}
-        okText="保存"
-        cancelText="取消"
-        confirmLoading={saving}
-        width={640}
-      >
-        {editing && (
-          <div className="flavor-form">
-            <div className="form-row">
-              <label>名称</label>
-              <Input
-                value={editing.name}
-                onChange={(e) => setEditing({ ...editing, name: e.target.value })}
-                placeholder="如 chrome、dev-gui"
-                disabled={!isNew}
-              />
-            </div>
-            <div className="form-row">
-              <label>镜像</label>
-              <Input
-                value={editing.image}
-                onChange={(e) =>
-                  setEditing({ ...editing, image: e.target.value })
-                }
-                placeholder="docker.io/library/ubuntu:24.04"
-              />
-            </div>
-            <div className="form-row">
-              <label>GUI 透传</label>
-              <Switch
-                checked={editing.gui}
-                onChange={(v) => setEditing({ ...editing, gui: v })}
-              />
-              <span className="form-hint">
-                展开时按宿主实时 env 注入 DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR + 字体图标挂载
-              </span>
-            </div>
-            <div className="form-row">
-              <label>entry 应用</label>
-              <Input
-                value={editing.entry ?? ''}
-                onChange={(e) =>
-                  setEditing({ ...editing, entry: e.target.value || null })
-                }
-                placeholder="容器内可执行名（可留空）"
-              />
-            </div>
-            <div className="form-row">
-              <label>entry 参数</label>
-              <Input
-                value={editing.entry_args.join(' ')}
-                onChange={(e) =>
-                  setEditing({
-                    ...editing,
-                    entry_args: e.target.value.split(/\s+/).filter(Boolean),
-                  })
-                }
-                placeholder="空格分隔"
-              />
-            </div>
-            <div className="form-row">
-              <label>安装命令（setup）</label>
-              <Input.TextArea
-                rows={3}
-                value={setupText}
-                onChange={(e) => setSetupText(e.target.value)}
-                placeholder={'每行一条，按序执行\n如：apt-get update -qq && apt-get install -y -qq sudo'}
-              />
-            </div>
-            <div className="form-row">
-              <label>额外挂载</label>
-              <Input.TextArea
-                rows={2}
-                value={mountsText}
-                onChange={(e) => setMountsText(e.target.value)}
-                placeholder={'每行一条：宿主路径:容器路径[:ro]'}
-              />
-            </div>
-            <div className="form-row">
-              <label>网络模式</label>
-              <Select
-                value={editing.network.mode}
-                onChange={(v) =>
-                  setEditing({
-                    ...editing,
-                    network: { ...editing.network, mode: v },
-                  })
-                }
-                style={{ width: 160 }}
-                options={[
-                  { value: 'host', label: 'host（宿主网络）' },
-                  { value: 'mapped', label: 'bridge（默认）' },
-                ]}
-              />
-            </div>
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              setup 安装命令本轮只存不执行（执行链路与 data 启动脚本一起留待下一步）。
-            </Typography.Text>
-          </div>
-        )}
-      </Modal>
     </div>
   );
 }

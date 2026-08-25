@@ -25,8 +25,8 @@ pub(crate) async fn handle_lifecycle_entry_launch(
         .context("Failed to parse LifecycleEntryLaunch")?;
 
     // TODO: Look up entry config and spawn the entry process。
-    // 现阶段：登录 shell 占位；真正的 entry 经 launch_entry_command →
-    // spawn_managed_process 全权管理（stdio 捕获 + 生命周期监控）
+    // 现阶段：登录 shell 占位；entry 已移入容器内由 server 管理
+    // （宿主 --entry 被忽略，应用经 passthrough auto-start 拉起）
     info!("Entry launch requested: {}", req.entry_id);
     let pid =
         spawn_managed_process(state, "/bin/sh -l", "entry", req.entry_id.clone(), Some(event_tx.clone()))

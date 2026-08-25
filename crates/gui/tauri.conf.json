@@ -5,7 +5,7 @@
   "identifier": "io.github.dingiv.easytidy",
   "build": {
     "beforeDevCommand": {
-      "script": "sh -c 'cargo build -p easytidy-server && pnpm dev'",
+      "script": "sh -c 'cargo build -p easytidy-server --target x86_64-unknown-linux-musl && pnpm dev'",
       "cwd": "."
     },
     "devUrl": "http://localhost:1420",

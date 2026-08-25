@@ -27,9 +27,11 @@ import { ContainerCreateForm } from './ContainerCreateForm';
 import { ContainersPanel, ContainerRef } from './ContainersPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { ImagesPanel } from './ImagesPanel';
+import { TemplateEditorPane } from './TemplateEditorPane';
+import type { ConfTemplate } from '../types';
 import logo from '../assets/logo.png';
 
-type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images';
+type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor';
 
 interface Pane {
   id: string;
@@ -37,6 +39,8 @@ interface Pane {
   title: string;
   /** 仅 new-container:预选 conf 模板 */
   initialTemplate?: string;
+  /** 仅 template-editor:待编辑模板快照（null = 新建） */
+  templateData?: ConfTemplate | null;
 }
 
 const PANE_TITLE: Record<PaneKind, string> = {
@@ -44,6 +48,7 @@ const PANE_TITLE: Record<PaneKind, string> = {
   'new-container': '新建容器',
   flavors: '模板',
   images: '镜像',
+  'template-editor': '模板配置',
 };
 
 /** 长 flavor 名截断(避免 tab 标题撑开) */
@@ -54,6 +59,8 @@ function truncateFlavor(name: string, max = 16): string {
 function MasterViewInner() {
   // 容器列表刷新触发器：new-container 提交成功 / 模板同步派生成功后 +1
   const [refreshTick, setRefreshTick] = useState(0);
+  // 模板列表刷新触发器：模板 tab 保存成功后 +1（FlavorsPanel 重新加载）
+  const [templateTick, setTemplateTick] = useState(0);
 
   // 容器列表 ref：直接调 reload() 拉新数据
   const containersRef = useRef<ContainerRef>(null);
@@ -69,31 +76,39 @@ function MasterViewInner() {
   // 初始激活第一个 pane（惰性：panes 始终包含初始项,这里主要是类型兼容）
   const activeId = activePaneId ?? panes[0]?.id ?? null;
 
-  /** 打开 pane：'new-container' 始终新建,其他 kind 同类已开则聚焦 */
-  const openPane = useCallback((kind: PaneKind, opts?: { initialTemplate?: string }) => {
-    setPanes((prev) => {
-      if (kind !== 'new-container') {
-        const existing = prev.find((p) => p.kind === kind);
-        if (existing) {
-          setActivePaneId(existing.id);
-          return prev;
+  /** 打开 pane：'new-container' / 'template-editor' 始终新建,其他 kind 同类已开则聚焦 */
+  const openPane = useCallback(
+    (kind: PaneKind, opts?: { initialTemplate?: string; template?: ConfTemplate | null }) => {
+      setPanes((prev) => {
+        if (kind !== 'new-container' && kind !== 'template-editor') {
+          const existing = prev.find((p) => p.kind === kind);
+          if (existing) {
+            setActivePaneId(existing.id);
+            return prev;
+          }
         }
-      }
-      const id = useUiStore.getState().nextPaneId();
-      const title =
-        kind === 'new-container' && opts?.initialTemplate
-          ? `新建容器 · ${truncateFlavor(opts.initialTemplate)}`
-          : PANE_TITLE[kind];
-      const pane: Pane = {
-        id,
-        kind,
-        title,
-        initialTemplate: opts?.initialTemplate,
-      };
-      setActivePaneId(id);
-      return [...prev, pane];
-    });
-  }, []);
+        const id = useUiStore.getState().nextPaneId();
+        const title =
+          kind === 'new-container' && opts?.initialTemplate
+            ? `新建容器 · ${truncateFlavor(opts.initialTemplate)}`
+            : kind === 'template-editor'
+              ? opts?.template
+                ? `编辑模板 · ${opts.template.name}`
+                : '新建模板'
+              : PANE_TITLE[kind];
+        const pane: Pane = {
+          id,
+          kind,
+          title,
+          initialTemplate: opts?.initialTemplate,
+          templateData: kind === 'template-editor' ? (opts?.template ?? null) : undefined,
+        };
+        setActivePaneId(id);
+        return [...prev, pane];
+      });
+    },
+    [],
+  );
 
   /** 关闭 pane：激活相邻项；终端/PTY 清理钩子在 Worker,Master 用不到 */
   const closePane = useCallback((id: string) => {
@@ -115,6 +130,23 @@ function MasterViewInner() {
       openPane('new-container', { initialTemplate: flavor });
     },
     [openPane],
+  );
+
+  /** 模板「编辑」/「新建」：打开模板配置管理器 tab（t=null → 新建） */
+  const handleEditTemplate = useCallback(
+    (t: ConfTemplate | null) => {
+      openPane('template-editor', { template: t });
+    },
+    [openPane],
+  );
+
+  /** 模板保存成功：关 tab + 触发模板列表刷新 */
+  const handleTemplateSaved = useCallback(
+    (paneId: string) => {
+      closePane(paneId);
+      setTemplateTick((t) => t + 1);
+    },
+    [closePane],
   );
 
   /** 新建容器表单提交成功：关 pane + 触发刷新 + 切回列表 */
@@ -222,11 +254,24 @@ function MasterViewInner() {
                   <ContainersPanel ref={containersRef} refreshTick={refreshTick} />
                 )}
                 {p.kind === 'images' && <ImagesPanel />}
-                {p.kind === 'flavors' && <FlavorsPanel onLaunch={handleLaunchFlavor} />}
+                {p.kind === 'flavors' && (
+                  <FlavorsPanel
+                    onLaunch={handleLaunchFlavor}
+                    onEditTemplate={handleEditTemplate}
+                    refreshTick={templateTick}
+                  />
+                )}
                 {p.kind === 'new-container' && (
                   <ContainerCreateForm
                     initialTemplate={p.initialTemplate}
                     onCreated={() => handleNewContainerCreated(p.id)}
+                  />
+                )}
+                {p.kind === 'template-editor' && (
+                  <TemplateEditorPane
+                    initial={p.templateData ?? null}
+                    onSaved={() => handleTemplateSaved(p.id)}
+                    onCancel={() => closePane(p.id)}
                   />
                 )}
               </div>

@@ -1,5 +1,8 @@
-// 容器面板：基本信息（名称/镜像，按模式可编辑）+ entry/参数 + 静默启动 +
-// 持久化 + 血缘。统一编辑器（ContainerConfigEditor）的「容器」页。
+// 容器面板：基本信息（名称/镜像，按模式可编辑）+ 静默启动 + 持久化 + 血缘。
+// 统一编辑器（ContainerConfigEditor）的「容器」页。
+//
+// 入口应用（entry/entry_args）已移入容器内由 server 管理（见 docs），
+// 不再作为宿主侧容器配置暴露，故此处不再渲染 entry 字段。
 
 import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -10,16 +13,16 @@ interface ContainerPaneProps {
   edit: ContainerConfig;
   /** create = 名称/镜像可编辑；edit = 身份只读（改名/换镜像 = 另一个容器） */
   mode: 'create' | 'edit';
+  /** create 模式下锁死名称（如模板编辑既有模板：模板名 = 文件名，改名应复制/新建） */
+  nameLocked?: boolean;
   onNameChange(v: string): void;
   onImageChange(v: string): void;
-  onEntryChange(v: string): void;
-  onEntryArgsChange(v: string[]): void;
   onSilentBootChange(v: boolean): void;
   onPersistentChange(v: boolean): void;
 }
 
 export function ContainerPane({
-  edit, mode, onNameChange, onImageChange, onEntryChange, onEntryArgsChange,
+  edit, mode, nameLocked = false, onNameChange, onImageChange,
   onSilentBootChange, onPersistentChange,
 }: ContainerPaneProps) {
   // 镜像下拉数据：仅 create 模式需要拉（edit 模式镜像只读，渲染 Typography.Text）。
@@ -59,6 +62,7 @@ export function ContainerPane({
             placeholder="如：my-env（模板按名称展开，请先输入）"
             value={edit.name}
             onChange={(e) => onNameChange(e.target.value)}
+            disabled={nameLocked}
           />
         </div>
       )}
@@ -97,23 +101,6 @@ export function ContainerPane({
         )}
       </div>
       <div className="config-field">
-        <label>入口应用（entry）</label>
-        <Input
-          placeholder="容器启动时运行的命令，留空则不启动应用"
-          value={edit.entry ?? ''}
-          onChange={(e) => onEntryChange(e.target.value)}
-        />
-        <span className="section-hint">随「保存并重启」一起生效：容器重建后由 server 链式拉起。</span>
-      </div>
-      <div className="config-field">
-        <label>入口应用参数</label>
-        <Input
-          placeholder="空格分隔，拼接在 entry 后执行（含空格参数需引号）"
-          value={edit.entry_args.join(' ')}
-          onChange={(e) => onEntryArgsChange(e.target.value.split(/\s+/).filter(Boolean))}
-        />
-      </div>
-      <div className="config-field">
         <label>静默启动</label>
         <Space>
           <Switch
@@ -123,7 +110,7 @@ export function ContainerPane({
             unCheckedChildren="关"
           />
           <Typography.Text type="secondary">
-            宿主开机时无头启动容器并拉起 entry 应用（不弹 GUI）
+            宿主开机时无头启动容器（不弹 GUI）
           </Typography.Text>
         </Space>
       </div>
