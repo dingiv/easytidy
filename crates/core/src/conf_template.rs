@@ -2,30 +2,20 @@
 //!
 //! 数据域拆分后,模板的管理由 flavor(TOML) 收敛到 conf(YAML):
 //! - **conf 模板** = 容器关键参数(意图)+ 可选 `setup` 安装命令(本轮只存不执行)
-//! - 存放:`~/.easytidy/conf/<name>.yaml`(运行时权威,源码 `crates/gui/conf/*.yaml`
-//!   经 include_str! 编译期打进、首跑播种,同 flavor 预设语义)
+//! - 存放:双轨制目录(dev = `crates/gui/conf` 源码目录,prod = `~/.easytidy/conf`,
+//!   经 GUI crate 的 `CONF_DIR` namespace 解析)——目录解析 + 文件 IO 的
+//!   `ConfTemplateStore` 迁到 GUI 命令层(conf 域 GUI 独占:种子在 gui/conf、
+//!   命令在 gui,core 不持有该路径)
 //!
 //! 与 [`Flavor`](crate::flavor::Flavor) 的关系:
 //! - flavor 偏 CLI(创建时执行 setup 安装、带 gui 展开逻辑),GUI 模板 tab 不再使用
-//! - 本模块是 GUI 模板体系的数据源:读 conf YAML → 预填创建表单 / 展示模板卡片
-//!
-//! core 只定义类型与**目录 IO 边界**;真正的 YAML ⇄ 类型转换(serde_yaml)在
-//! GUI 命令层完成(core 不引入函数式 YAML 依赖,与 conf 桥接一致)。
-
-use std::path::PathBuf;
+//! - 本模块只定义 [`ConfTemplate`] 类型与 `build_config`(展开语义,注入宿主
+//!   GUI 透传);YAML ⇄ 类型转换与目录 IO 都在 GUI 命令层完成。
 
 use serde::{Deserialize, Serialize};
 
-use crate::appdata;
-use crate::error::{Error, Result};
 use crate::flavor::inject_gui_passthrough;
 use crate::models::ContainerConfig;
-
-/// conf 模板目录（`~/.easytidy/conf` 下的模板文件句柄目录；实际 IO 在
-/// [`ConfTemplateStore`]）。
-pub fn templates_dir() -> Result<PathBuf> {
-    appdata::conf_dir()
-}
 
 /// conf YAML 模板：容器关键参数 + 可选安装命令(setup) + GUI 透传开关。
 ///
@@ -74,84 +64,6 @@ impl ConfTemplate {
             // 按 conf YAML 重展开重建)
         }
         config
-    }
-}
-
-/// 简易 IO 句柄：读写 conf 模板文件（YAML 文本存取，解析在 GUI 层）。
-pub struct ConfTemplateStore;
-
-impl ConfTemplateStore {
-    /// 列出全部模板文件名（file stem，如 chrome / dev / full）。
-    pub fn list_names() -> Result<Vec<String>> {
-        let dir = templates_dir()?;
-        let mut names = Vec::new();
-        for entry in std::fs::read_dir(&dir).map_err(|e| {
-            Error::Config(format!("读取模板目录失败：{e}"))
-        })? {
-            let entry = entry.map_err(|e| Error::Config(format!("读取目录项失败：{e}")))?;
-            let path = entry.path();
-            let is_yaml = path
-                .extension()
-                .map(|e| e == "yaml" || e == "yml")
-                .unwrap_or(false);
-            if !is_yaml {
-                continue;
-            }
-            if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) {
-                names.push(stem);
-            }
-        }
-        names.sort();
-        Ok(names)
-    }
-
-    /// 读模板文件原文（YAML 字符串）。模板不存在 → Err。
-    pub fn read_yaml(name: &str) -> Result<String> {
-        let path = templates_dir()?.join(format!("{name}.yaml"));
-        if !path.exists() {
-            return Err(Error::Config(format!("模板不存在：{name}")));
-        }
-        std::fs::read_to_string(&path)
-            .map_err(|e| Error::Config(format!("读取模板 {name} 失败：{e}")))
-    }
-
-    /// 写回模板（原子写；目录由 templates_dir 确保存在）。
-    pub fn write_yaml(name: &str, yaml: &str) -> Result<()> {
-        let dir = templates_dir()?;
-        let target = dir.join(format!("{name}.yaml"));
-        let tmp = target.with_extension("yaml.tmp");
-        std::fs::write(&tmp, yaml).map_err(|e| {
-            Error::Config(format!("写入模板 {name} 临时文件失败：{e}"))
-        })?;
-        std::fs::rename(&tmp, &target).map_err(|e| {
-            Error::Config(format!("保存模板 {name} 失败：{e}"))
-        })
-    }
-
-    /// 删除模板文件。
-    pub fn delete(name: &str) -> Result<()> {
-        let path = templates_dir()?.join(format!("{name}.yaml"));
-        if !path.exists() {
-            return Err(Error::Config(format!("模板不存在：{name}")));
-        }
-        std::fs::remove_file(&path)
-            .map_err(|e| Error::Config(format!("删除模板 {name} 失败：{e}")))
-    }
-
-    /// 复制模板为新的名字（`to` 已存在时报错防覆盖，同 flavor::duplicate）。
-    pub fn duplicate(from: &str, to: &str) -> Result<()> {
-        if to.trim().is_empty() || to == from {
-            return Err(Error::Config("复制目标名无效".to_string()));
-        }
-        let dir = templates_dir()?;
-        let dst = dir.join(format!("{to}.yaml"));
-        if dst.exists() {
-            return Err(Error::Config(format!("模板 {to} 已存在，不能覆盖")));
-        }
-        std::fs::copy(dir.join(format!("{from}.yaml")), &dst).map_err(|e| {
-            Error::Config(format!("复制模板 {from} → {to} 失败：{e}"))
-        })?;
-        Ok(())
     }
 }
 
@@ -222,9 +134,9 @@ mod tests {
             "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"user_home":true,
             "env":[],"silent_boot":false,"persistent":true,
-            "gui":true,"setup":[]
+            "gui":true
         }"#;
         let t_new: ConfTemplate = serde_json::from_str(json_new).unwrap();
-        assert!(t_new.gui, "新文件 gui: true 应正确读取");
+        assert!(t_new.gui, "新文件含 gui:true 应生效");
     }
 }

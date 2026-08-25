@@ -19,7 +19,9 @@ export interface ContainerSummary {
 }
 
 /// Env view from env_list（环境语义面板，docs/13-mutable-env-paradigm.md）
-/// status: 'running'（运行中）/ 'exited' | 'created'（已停止）/ 'missing'（仅配置保留）
+/// managed=true（easytidy 接管）status: 'running'（运行中）/ 'exited' | 'created'（已停止）
+///   / 'missing'（仅配置保留，podman 容器已不存在 → 前端显示「容器丢失」）；
+/// managed=false：他人创建的未接管容器，status 为 podman 真实状态（前端显示「未接管」）
 export interface EnvView {
   name: string;
   image: string;

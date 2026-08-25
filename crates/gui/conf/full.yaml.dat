@@ -1,0 +1,67 @@
+# 容器配置全量 YAML —— 配置编辑器「导出 YAML」示例
+#
+# 字段对齐 crates/gui/ui/types/index.ts 的 ContainerConfig 接口；
+# 所有可编辑字段均在此示例中出现，作为「代码生成器」的模板样例。
+#
+# 加载路径：MasterView 「配置编辑器」→ ContainerConfigEditor 顶部 "加载
+# YAML" → 选此文件 → 表单预填 → 提交 env_new(config) 或 apply_container_config。
+#
+# 导出路径：填好表单 → "导出 YAML" → rfd 保存对话框 → 一份可分享、可复用的 YAML。
+#
+# 字段命名严格与 ContainerConfig 一致（snake_case）—— 序列化/反序列化直接走
+# serde(rename_all = "snake_case")。
+
+name: full-example                       # 必填：容器名（registry 唯一）
+image: docker.io/library/ubuntu:24.04    # 必填：镜像（需已拉取，未拉取请到「镜像」面板）
+
+# 容器入口应用（容器创建后由 server 链式拉起；留空 = 不拉起应用）
+entry: /usr/bin/code
+entry_args:                             # entry 参数（空格拼接到 entry 后）
+  - --no-sandbox
+  - --user-data-dir=/home/node/.config
+
+# 静默启动（宿主开机时无头启动容器并拉起 entry 应用）
+silent_boot: false
+
+# 常驻：catatonit + server 托管生命周期（停止容器 = podman stop）
+persistent: true
+
+# 用户一致性映射（keep-id：容器内 uid 与宿主对齐，应用默认以 node 用户运行）
+# 关闭后容器以 root 运行 + 移除 $HOME 挂载（GUI 应用将无法访问宿主显示 socket）
+user_home: true
+
+# 路径映射（bind mount，每条 = 宿主路径 → 容器路径 → 是否只读）
+mounts:
+  - host_path: /home/user/workspace
+    container_path: /workspace
+    read_only: false
+  - host_path: /home/user/.config
+    container_path: /home/node/.config
+    read_only: false
+  - host_path: /usr/share/fonts
+    container_path: /usr/share/fonts
+    read_only: true
+
+# 网络配置：mode = "host"（端口映射无效）或 "mapped"（bridge + 端口转发）
+network:
+  mode: mapped
+  ports:
+    - host_port: 8080
+      container_port: 80
+      protocol: tcp
+    - host_port: 9090
+      container_port: 9090
+      protocol: udp
+
+# 容器环境变量（"KEY=VALUE" 列表；EASYTIDY_USER_* 由引擎保留注入，手动
+# 写入会被覆盖）
+env:
+  - LANG=en_US.UTF-8
+  - DISPLAY=:0
+  - WAYLAND_DISPLAY=wayland-0
+  - XDG_RUNTIME_DIR=/run/user/1000
+  - HTTP_PROXY=http://127.0.0.1:7890
+
+# 血缘标记：此配置由 flavor 模板展开而来（null 或省略 = 自由创建，不参与
+# 模板同步）
+# flavor: chrome

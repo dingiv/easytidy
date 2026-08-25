@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 easytidy-core = { path = "../core" }
 easytidy-protocol = { path = "../protocol" }
+easytidy-shared = { path = "../shared" }
 dirs = { workspace = true }
 rfd = "0.15"
 tokio = { workspace = true, features = ["full"] }
@@ -35,9 +36,13 @@ tokio-util = { workspace = true }
 base64 = "0.22"
 tracing-appender = "0.2.5"
 
-# （dev 期 server binary 路径解析走 core::server_binary_path() → shared::loader!
-#   读 core 的 [package.metadata.shared] SERVER_BIN namespace，
-#   GUI 自己不声明 namespace。）
+# conf 模板目录双轨制 namespace（conf 域 GUI 独占：种子在 crates/gui/conf、
+# 命令在 gui；core 已不含 conf 路径解析）。dev 根相对 GUI manifest（crates/gui）
+# → conf（即 crates/gui/conf，GUI 改动即改源文件、提交即发布）；prod 根为用户
+# 配置目录 ~/.easytidy/conf。供 commands::config::conf_dir()/ConfTemplateStore
+# 经 shared::loader!().resolve("CONF_DIR::") 统一解析（is_dev() 自动切换）。
+[package.metadata.shared]
+CONF_DIR = { dev = "conf", prod = "~/.easytidy/conf" }
 
 [dev-dependencies]
 tempfile = { workspace = true }

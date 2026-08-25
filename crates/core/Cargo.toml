@@ -40,4 +40,4 @@ easytidy-shared = { path = "../shared" }
 # 若改走该位只改这一行即可）。打包阶段（如 deb）按实际布局在此配置。
 # （$XDG_DATA_HOME/easytidy/bin 作为历史兼容回退由 server_binary_path() 内部处理。）
 [package.metadata.shared]
-SERVER_BIN = { dev = "../../target/debug", prod = "/usr/bin" }
+SERVER_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }

@@ -4,7 +4,7 @@
 use serde::Serialize;
 use tracing::warn;
 
-use easytidy_core::conf_template::{ConfTemplate, ConfTemplateStore};
+use easytidy_core::conf_template::ConfTemplate;
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::models::ContainerConfig;
 use easytidy_core::podman::Podman;
@@ -179,14 +179,78 @@ fn conf_template_lineage_status(config: &ContainerConfig) -> Option<serde_json::
 // conf 模板管理（GUI 全面切 YAML 后取代 flavor TOML 模板）
 // ============================================================================
 
+/// conf 模板目录（双轨制读写）：dev = `crates/gui/conf`（本 crate manifest + `conf`，
+/// 即源码种子目录——GUI 改动即改源文件、提交即发布）；prod = `~/.easytidy/conf`
+/// （用户配置目录，首跑播种不覆盖）。解析走本 crate 声明的 `CONF_DIR` namespace
+/// （gui/Cargo.toml `[package.metadata.shared]`），`is_dev()` = 运行期 env 含
+/// `CARGO_MANIFEST_DIR`（cargo run / cargo test / tauri dev 成立；安装二进制不含 → prod）。
+fn conf_dir() -> Result<std::path::PathBuf, String> {
+    let dir = easytidy_shared::loader!()
+        .resolve("CONF_DIR::")
+        .ok_or_else(|| "未配置 CONF_DIR namespace".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置模板目录失败：{e}"))?;
+    Ok(dir)
+}
+
+/// 简易 IO 句柄：读写 conf 模板文件（YAML 文本存取，解析在本命令层）。
+///
+/// 目录走 [`conf_dir`]（双轨制）。从 core 迁入（2026-08-26）：conf 域 GUI 独占
+/// ——种子在 `crates/gui/conf`、命令在 GUI，core 不再持有该路径。
+struct ConfTemplateStore;
+
+impl ConfTemplateStore {
+    /// 读模板文件原文（YAML 字符串）。模板不存在 → Err。
+    fn read_yaml(name: &str) -> Result<String, String> {
+        let path = conf_dir()?.join(format!("{name}.yaml"));
+        if !path.exists() {
+            return Err(format!("模板不存在：{name}"));
+        }
+        std::fs::read_to_string(&path).map_err(|e| format!("读取模板 {name} 失败：{e}"))
+    }
+
+    /// 写回模板（原子写；目录由 conf_dir 确保存在）。
+    fn write_yaml(name: &str, yaml: &str) -> Result<(), String> {
+        let dir = conf_dir()?;
+        let target = dir.join(format!("{name}.yaml"));
+        let tmp = target.with_extension("yaml.tmp");
+        std::fs::write(&tmp, yaml).map_err(|e| format!("写入模板 {name} 临时文件失败：{e}"))?;
+        std::fs::rename(&tmp, &target).map_err(|e| format!("保存模板 {name} 失败：{e}"))
+    }
+
+    /// 删除模板文件。
+    fn delete(name: &str) -> Result<(), String> {
+        let path = conf_dir()?.join(format!("{name}.yaml"));
+        if !path.exists() {
+            return Err(format!("模板不存在：{name}"));
+        }
+        std::fs::remove_file(&path).map_err(|e| format!("删除模板 {name} 失败：{e}"))
+    }
+
+    /// 复制模板为新的名字（`to` 已存在时报错防覆盖，同 flavor::duplicate）。
+    fn duplicate(from: &str, to: &str) -> Result<(), String> {
+        if to.trim().is_empty() || to == from {
+            return Err("复制目标名无效".to_string());
+        }
+        let dir = conf_dir()?;
+        let dst = dir.join(format!("{to}.yaml"));
+        if dst.exists() {
+            return Err(format!("模板 {to} 已存在，不能覆盖"));
+        }
+        std::fs::copy(dir.join(format!("{from}.yaml")), &dst)
+            .map_err(|e| format!("复制模板 {from} → {to} 失败：{e}"))?;
+        Ok(())
+    }
+}
+
 /// 列出全部 conf 模板（解析为 ConfTemplate）。
 ///
 /// 双目录语义：先 ensure_conf_examples()（首跑播种内置示例），再读
-/// `~/.easytidy/conf/*.yaml` —— 用户新增/修改的模板一并出现（播种不覆盖）。
+/// 「conf 目录」（双轨制：dev = `crates/gui/conf`，prod = `~/.easytidy/conf`）下的
+/// `*.yaml` —— 用户新增/修改的模板一并出现（播种不覆盖用户改动）。
 #[tauri::command]
 pub fn conf_templates() -> Result<Vec<ConfTemplate>, String> {
     ensure_conf_examples();
-    let dir = easytidy_core::appdata::conf_dir().map_err(|e| e.to_string())?;
+    let dir = conf_dir().map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| format!("读取模板目录失败：{e}"))?;
@@ -293,20 +357,20 @@ struct ConfSeed {
 const CONF_SEEDS: [ConfSeed; 4] = [
     ConfSeed {
         name: "dev",
-        yaml: include_str!("../../conf/container.dev.yaml"),
+        yaml: include_str!("../../conf/dev.yaml"),
     },
     ConfSeed {
         name: "full",
-        yaml: include_str!("../../conf/container.full.yaml"),
+        yaml: include_str!("../../conf/full.yaml"),
     },
     ConfSeed {
         name: "media",
-        yaml: include_str!("../../conf/container.media.yaml"),
+        yaml: include_str!("../../conf/media.yaml"),
     },
     // 经典 Chrome 容器模板（展开自内置 flavor chrome）
     ConfSeed {
         name: "chrome",
-        yaml: include_str!("../../conf/container.chrome.yaml"),
+        yaml: include_str!("../../conf/chrome.yaml"),
     },
 ];
 
@@ -327,7 +391,7 @@ fn seed_conf_examples_to(dir: &std::path::Path) {
 /// 播种到运行时目录（`~/.easytidy/conf`）——读列表命令惰性调用
 /// （同 `flavor_list` 调 `ensure_presets` 的模式）。
 fn ensure_conf_examples() {
-    let Ok(dir) = easytidy_core::appdata::conf_dir() else {
+    let Ok(dir) = conf_dir() else {
         return;
     };
     seed_conf_examples_to(&dir);
@@ -380,7 +444,7 @@ pub async fn conf_load_dialog() -> Result<LoadConfResp, String> {
     // 打开对话框（阻塞；spawn_blocking 避免卡 async runtime）
     let picked = tokio::task::spawn_blocking(|| {
         let mut dialog = rfd::FileDialog::new().add_filter("YAML 配置", &["yaml", "yml"]);
-        if let Ok(dir) = easytidy_core::appdata::conf_dir() {
+        if let Ok(dir) = conf_dir() {
             dialog = dialog.set_directory(dir);
         }
         dialog
@@ -564,12 +628,13 @@ pub async fn mount_pick_host_dir(initial: Option<String>) -> Result<String, Stri
 
 /// 内置示例模板列表（「示例模板」下拉数据源）。
 ///
-/// 双目录语义：先播种内置示例到 `~/.easytidy/conf`（首跑），再列出该目录下
-/// 所有 *.yaml——用户新增/修改的模板一并出现（播种不覆盖用户改动）。
+/// 双目录语义：先播种内置示例到「conf 目录」（双轨制：dev = `crates/gui/conf`，
+/// prod = `~/.easytidy/conf`），再列出该目录下所有 *.yaml——用户新增/修改的
+/// 模板一并出现（播种不覆盖用户改动）。
 #[tauri::command]
 pub fn conf_examples() -> Result<Vec<ExampleConf>, String> {
     ensure_conf_examples();
-    let dir = easytidy_core::appdata::conf_dir().map_err(|e| e.to_string())?;
+    let dir = conf_dir().map_err(|e| e.to_string())?;
     Ok(conf_examples_from_dir(&dir))
 }
 
@@ -582,6 +647,19 @@ mod tests {
     fn parse_seed(seed: &ConfSeed) -> ContainerConfig {
         serde_yaml::from_str(seed.yaml)
             .unwrap_or_else(|e| panic!("内置示例 {} 应可解析为 ContainerConfig：{e}", seed.name))
+    }
+
+    #[test]
+    fn test_conf_dir_dual_track_dev() {
+        // 测试运行期 CARGO_MANIFEST_DIR 在 env → is_dev() true → dev 根：
+        // conf 目录 = 本 crate manifest/conf = crates/gui/conf（工作区源码目录）。
+        // 编译期（实测 tauri dev）也成立；安装二进制无该 env → prod ~/.easytidy/conf。
+        let dir = conf_dir().unwrap();
+        assert!(
+            dir.ends_with("crates/gui/conf"),
+            "dev 下 conf 目录应指向工作区 crates/gui/conf，得到 {}",
+            dir.display()
+        );
     }
 
     #[test]

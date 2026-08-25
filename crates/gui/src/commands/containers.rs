@@ -191,7 +191,8 @@ pub async fn image_remove(
 // 环境（env）语义 + conf 模板扩展（doc 镜像管理命令之后、env_list 之前）
 // ============================================================================
 
-/// 列出所有环境（managed 容器 + configfile 注册表合并）。
+/// 列出所有容器：easytidy 管理的（带 manager=easytidy 标签）+ 其他人创建的
+/// （未接管，managed=false）+ configfile 注册表中 podman 已不存在的配置（missing）。
 #[tauri::command]
 pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvView>, String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
@@ -207,18 +208,18 @@ pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvVi
 
     let mut views: Vec<EnvView> = Vec::new();
     let mut covered: HashSet<String> = HashSet::new();
+    // podman 里实际存在的容器全部展示：managed 按 manager=easytidy 标签区分；
+    // 未接管容器保留其真实 status，前端标记「未接管」。
     for c in containers {
-        if !c.managed {
-            continue; // 仅展示 easytidy 管理的环境
-        }
         covered.insert(c.name.clone());
         views.push(EnvView {
             name: c.name,
             image: c.image,
             status: c.status,
-            managed: true,
+            managed: c.managed,
         });
     }
+    // 注册表里 podman 已不存在的配置 → "missing"（仅配置保留）
     for cfg in registered {
         if covered.contains(&cfg.name) {
             continue;

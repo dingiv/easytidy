@@ -58,7 +58,8 @@ function statusMeta(status: string): { label: string; color: string } {
     case 'paused':
       return { label: '已停止', color: 'default' };
     case 'missing':
-      return { label: '未创建', color: 'red' };
+      // 仅注册表配置存在、podman 容器已不存在（未经 easytidy 创建 / 被外部删除）
+      return { label: '容器丢失', color: 'red' };
     default:
       return { label: status, color: 'default' };
   }
@@ -254,6 +255,7 @@ function ContainersPanelInner(
             const st = statusMeta(env.status);
             const running = env.status === 'running';
             const missing = env.status === 'missing';
+            const managed = env.managed;
             return (
               <Card key={env.name} size="small" className="env-card">
                 <div className="env-card-body">
@@ -262,7 +264,9 @@ function ContainersPanelInner(
                       <Typography.Text strong className="env-name">
                         {env.name}
                       </Typography.Text>
-                      <Tag color={st.color}>{st.label}</Tag>
+                      <Tag color={managed ? st.color : 'orange'}>
+                        {managed ? st.label : '未接管'}
+                      </Tag>
                     </div>
                     <Typography.Text code className="env-image">
                       {env.image}
@@ -284,62 +288,75 @@ function ContainersPanelInner(
                         运行
                       </Button>
                     ) : null}
-                    <Button
-                      size="small"
-                      icon={<ExportOutlined />}
-                      onClick={() => handleOpen(env)}
-                      title="打开容器窗口(Worker GUI)"
-                    >
-                      打开
-                    </Button>
-                    <Popconfirm
-                      title="重建容器"
-                      description="按注册表(config.toml)当前配置 commit → 删除 → 同名重建 → 启动。用于应用外部修改的配置文件。"
-                      okText="重建"
-                      cancelText="取消"
-                      okButtonProps={{ danger: true }}
-                      disabled={missing}
-                      onConfirm={() => handleRebuild(env)}
-                    >
+                    {/* 打开/重建/快照/fork 依赖 easytidy server 或注册配置，未接管容器不适用 */}
+                    {managed && (
                       <Button
                         size="small"
-                        icon={<ToolOutlined />}
-                        loading={rebuilding === env.name}
-                        disabled={missing}
-                        title="按注册配置重建"
+                        icon={<ExportOutlined />}
+                        onClick={() => handleOpen(env)}
+                        title="打开容器窗口(Worker GUI)"
                       >
-                        重建
+                        打开
                       </Button>
-                    </Popconfirm>
-                    <Popconfirm
-                      title="创建快照"
-                      description={
-                        <Input
-                          placeholder="快照标签(可选,默认时间戳)"
-                          value={snapshotTag[env.name] ?? ''}
-                          onChange={(e) =>
-                            setSnapshotTag((prev) => ({ ...prev, [env.name]: e.target.value }))
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleSnapshot(env);
-                          }}
-                        />
-                      }
-                      okText="创建"
-                      cancelText="取消"
-                      disabled={missing}
-                      onConfirm={() => handleSnapshot(env)}
-                    >
-                      <Button size="small" icon={<CameraOutlined />} disabled={missing}>
-                        快照
+                    )}
+                    {managed && (
+                      <Popconfirm
+                        title="重建容器"
+                        description="按注册表(config.toml)当前配置 commit → 删除 → 同名重建 → 启动。用于应用外部修改的配置文件。"
+                        okText="重建"
+                        cancelText="取消"
+                        okButtonProps={{ danger: true }}
+                        disabled={missing}
+                        onConfirm={() => handleRebuild(env)}
+                      >
+                        <Button
+                          size="small"
+                          icon={<ToolOutlined />}
+                          loading={rebuilding === env.name}
+                          disabled={missing}
+                          title="按注册配置重建"
+                        >
+                          重建
+                        </Button>
+                      </Popconfirm>
+                    )}
+                    {managed && (
+                      <Popconfirm
+                        title="创建快照"
+                        description={
+                          <Input
+                            placeholder="快照标签(可选,默认时间戳)"
+                            value={snapshotTag[env.name] ?? ''}
+                            onChange={(e) =>
+                              setSnapshotTag((prev) => ({ ...prev, [env.name]: e.target.value }))
+                            }
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') handleSnapshot(env);
+                            }}
+                          />
+                        }
+                        okText="创建"
+                        cancelText="取消"
+                        disabled={missing}
+                        onConfirm={() => handleSnapshot(env)}
+                      >
+                        <Button size="small" icon={<CameraOutlined />} disabled={missing}>
+                          快照
+                        </Button>
+                      </Popconfirm>
+                    )}
+                    {managed && (
+                      <Button size="small" icon={<ForkOutlined />} onClick={() => openForkModal(env)}>
+                        fork
                       </Button>
-                    </Popconfirm>
-                    <Button size="small" icon={<ForkOutlined />} onClick={() => openForkModal(env)}>
-                      fork
-                    </Button>
+                    )}
                     <Popconfirm
                       title={`删除容器「${env.name}」?`}
-                      description="将清理该容器的容器、注册配置、桌面图标与 socket 目录;其快照为独立资产将保留(可被 fork 复用)。"
+                      description={
+                        managed
+                          ? '将清理该容器的容器、注册配置、桌面图标与 socket 目录;其快照为独立资产将保留(可被 fork 复用)。'
+                          : '将删除该容器（未接管，无 easytidy 注册配置与图标，仅移除容器本身）。'
+                      }
                       okText="删除"
                       cancelText="取消"
                       okButtonProps={{ danger: true }}

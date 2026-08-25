@@ -27,18 +27,6 @@ pub fn icons_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// 配置模板目录（`~/.easytidy/conf`，不存在则创建）。
-///
-/// 与 `crates/gui/conf/*.yaml`（源码侧模板）构成双目录语义：源码模板是
-/// 内置预设（编译期打进二进制），首跑播种到本目录；本目录为运行时权威
-/// ——用户可新增/修改自己的模板（播种已存在不覆盖，同 flavor 约定）。
-pub fn conf_dir() -> Result<PathBuf> {
-    let dir = app_data_dir()?.join("conf");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| Error::Config(format!("创建配置模板目录失败：{e}")))?;
-    Ok(dir)
-}
-
 /// 运行时数据目录（`~/.easytidy/data`，不存在则创建）。
 ///
 /// 与 conf（容器关键参数/意图）平行：data 存**运行时数据**——与宿主机/
