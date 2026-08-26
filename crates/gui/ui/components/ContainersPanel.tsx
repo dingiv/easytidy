@@ -18,7 +18,6 @@ import {
   Card,
   Empty,
   Input,
-  Modal,
   Popconfirm,
   Space,
   Spin,
@@ -28,7 +27,6 @@ import {
 import {
   CameraOutlined,
   DeleteOutlined,
-  ForkOutlined,
   PlayCircleOutlined,
   ReloadOutlined,
   StopOutlined,
@@ -76,12 +74,6 @@ function ContainersPanelInner(
 
   // 快照(按容器记录可选标签)
   const [snapshotTag, setSnapshotTag] = useState<Record<string, string>>({});
-
-  // fork(从快照派生新容器)
-  const [forkTarget, setForkTarget] = useState<EnvView | null>(null);
-  const [forkSnapshot, setForkSnapshot] = useState('');
-  const [forkNewName, setForkNewName] = useState('');
-  const [forking, setForking] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -156,7 +148,7 @@ function ContainersPanelInner(
     }
   };
 
-  /** 快照(commit 当前文件系统层;fork 的源,独立资产) */
+  /** 快照(commit 当前文件系统层为独立备份资产；标签可用于后续手动恢复/重建) */
   const handleSnapshot = async (env: EnvView) => {
     const tag = (snapshotTag[env.name] ?? '').trim();
     try {
@@ -170,37 +162,6 @@ function ContainersPanelInner(
     } catch (err: any) {
       setError(errMsg(err, `创建容器「${env.name}」快照失败`));
       console.error('env_snapshot failed:', err);
-    }
-  };
-
-  const openForkModal = (env: EnvView) => {
-    setForkTarget(env);
-    setForkSnapshot('');
-    setForkNewName('');
-  };
-
-  const handleFork = async () => {
-    if (!forkTarget) return;
-    const snapshot = forkSnapshot.trim();
-    const newName = forkNewName.trim();
-    if (!snapshot) {
-      setError('请输入快照标签(请先对源容器执行「快照」)');
-      return;
-    }
-    if (!newName) {
-      setError('请输入新容器名称');
-      return;
-    }
-    setForking(true);
-    try {
-      await invoke('env_fork', { name: forkTarget.name, snapshot, newName });
-      setForkTarget(null);
-      await load();
-    } catch (err: any) {
-      setError(errMsg(err, '派生(fork)失败'));
-      console.error('env_fork failed:', err);
-    } finally {
-      setForking(false);
     }
   };
 
@@ -345,16 +306,11 @@ function ContainersPanelInner(
                         </Button>
                       </Popconfirm>
                     )}
-                    {managed && (
-                      <Button size="small" icon={<ForkOutlined />} onClick={() => openForkModal(env)}>
-                        fork
-                      </Button>
-                    )}
                     <Popconfirm
                       title={`删除容器「${env.name}」?`}
                       description={
                         managed
-                          ? '将清理该容器的容器、注册配置、桌面图标与 socket 目录;其快照为独立资产将保留(可被 fork 复用)。'
+                          ? '将清理该容器的容器、注册配置、桌面图标与 socket 目录;其快照为独立镜像资产将保留。'
                           : '将删除该容器（未接管，无 easytidy 注册配置与图标，仅移除容器本身）。'
                       }
                       okText="删除"
@@ -373,43 +329,6 @@ function ContainersPanelInner(
           })}
         </div>
       )}
-
-      {/* fork:从快照派生新容器 */}
-      <Modal
-        title={forkTarget ? `从快照派生新容器(源:${forkTarget.name})` : '从快照派生新容器'}
-        open={!!forkTarget}
-        onCancel={() => setForkTarget(null)}
-        onOk={handleFork}
-        okText="派生"
-        cancelText="取消"
-        confirmLoading={forking}
-      >
-        <div className="env-modal-form">
-          <Alert
-            type="info"
-            showIcon
-            className="env-hint"
-            message="提示"
-            description="请先对源容器执行「快照」创建快照,再在此输入其标签派生新容器;新容器将继承源容器的全部配置,仅镜像换成快照。"
-          />
-          <div className="form-field">
-            <label>快照标签</label>
-            <Input
-              placeholder="如:1723000000(快照完成提示中显示的标签)"
-              value={forkSnapshot}
-              onChange={(e) => setForkSnapshot(e.target.value)}
-            />
-          </div>
-          <div className="form-field">
-            <label>新容器名称</label>
-            <Input
-              placeholder="如:my-env-v2"
-              value={forkNewName}
-              onChange={(e) => setForkNewName(e.target.value)}
-            />
-          </div>
-        </div>
-      </Modal>
     </div>
   );
 }

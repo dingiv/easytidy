@@ -200,17 +200,6 @@ enum EnvCmd {
         #[arg(long)]
         tag: Option<String>,
     },
-    /// fork：从快照派生新环境（继承配置）
-    Fork {
-        /// 源环境名
-        name: String,
-        /// 快照标签（env snapshot 产生的）
-        #[arg(long)]
-        snapshot: String,
-        /// 新环境名
-        #[arg(long)]
-        new_name: String,
-    },
     /// 运行环境（细粒度控制，与创建/销毁分离）
     Start { name: String },
     /// 关闭环境（保留，可随时恢复）
@@ -288,9 +277,6 @@ async fn main() -> Result<()> {
                     EnvCmd::New { name, flavor, image } => cmd_env_new(podman, name, flavor, image).await,
                     EnvCmd::Rm { name } => cmd_env_rm(podman, name).await,
                     EnvCmd::Snapshot { name, tag } => cmd_env_snapshot(podman, name, tag).await,
-                    EnvCmd::Fork { name, snapshot, new_name } => {
-                        cmd_env_fork(podman, name, snapshot, new_name).await
-                    }
                     EnvCmd::Start { name } => cmd_env_start(podman, name).await,
                     EnvCmd::Stop { name } => cmd_env_stop(podman, name).await,
                     EnvCmd::List => cmd_env_list(podman).await,
@@ -574,7 +560,7 @@ async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
     // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
     let _ = easytidy_core::remove_socket_dirs(&name);
     println!("环境 {name} 已删除（无残留）");
-    println!("  提示：该环境的快照（easytidy/snapshot/{name}-*）为独立资产，已保留，可用 env fork 复用");
+    println!("  提示：该环境的快照（easytidy/snapshot/{name}-*）为独立镜像资产，已保留");
     Ok(())
 }
 
@@ -588,33 +574,6 @@ async fn cmd_env_snapshot(podman: Podman, name: String, tag: Option<String>) -> 
     });
     let image_ref = podman.snapshot(&name, &tag).await?;
     println!("环境 {name} 快照完成：{image_ref}");
-    println!("  回滚/复用：easytidy env fork {name} --snapshot {tag} --name <新名>");
-    Ok(())
-}
-
-/// fork：从快照镜像派生新环境，继承源环境配置（mounts/网络/用户映射/GUI 透传）。
-async fn cmd_env_fork(
-    podman: Podman,
-    name: String,
-    snapshot: String,
-    new_name: String,
-) -> Result<()> {
-    // 读源环境配置
-    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
-    let mut config = config_file
-        .get_container(&name)?
-        .ok_or_else(|| anyhow::anyhow!("源环境 {name} 不在注册表（先 create/flavor apply）"))?;
-
-    // 快照镜像：easytidy/snapshot/<name>-<snapshot>
-    let image_ref = format!("easytidy/snapshot/{name}-{snapshot}");
-    config.name = new_name.clone();
-    config.params.image = image_ref.clone();
-
-    let server_bin = easytidy_core::server_binary_path()?;
-    let id = podman.create_with_config(&new_name, &image_ref, &server_bin, &config).await?;
-    podman.start(&new_name).await?;
-    config_file.register_container(config)?;
-    println!("新环境 {new_name} 已从快照 {snapshot} fork 并运行（ID: {}）", &id[..12.min(id.len())]);
     Ok(())
 }
 

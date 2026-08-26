@@ -331,7 +331,7 @@ pub fn template_lineage() -> Result<std::collections::HashMap<String, Vec<String
 
 /// 删除环境：容器 + 注册配置 + 桌面图标 + socket 目录全清理。
 ///
-/// 快照镜像为独立资产，删除时保留（可被 fork 复用）。
+/// 快照镜像为独立资产，删除时保留（可手动基于该镜像恢复/重建）。
 #[tauri::command]
 pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
@@ -377,43 +377,6 @@ pub async fn env_snapshot(
 
     info!("环境 {} 快照完成：{}", name, image_ref);
     Ok(image_ref)
-}
-
-/// fork：从快照镜像派生新环境，继承源环境的全部配置（仅镜像换成快照）。
-#[tauri::command]
-pub async fn env_fork(
-    podman: tauri::State<'_, PodmanState>,
-    name: String,
-    snapshot: String,
-    new_name: String,
-) -> Result<(), String> {
-    // 读源环境配置
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
-    let config_file = ConfigFile::with_path(config_path);
-    let mut config = config_file
-        .get_container(&name)
-        .map_err(|e| format!("读取源环境配置失败：{}", e))?
-        .ok_or_else(|| format!("源环境 {} 不在注册表中（请先创建该环境）", name))?;
-
-    // 快照镜像：easytidy/snapshot/<name>-<snapshot>
-    let image_ref = format!("easytidy/snapshot/{name}-{snapshot}");
-    config.name = new_name.clone();
-    config.params.image = image_ref.clone();
-
-    let p = podman.get().await.map_err(|e| e.to_string())?;
-    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
-    p.create_with_config(&new_name, &image_ref, &server_bin, &config)
-        .await
-        .map_err(|e| e.to_string())?;
-    p.start(&new_name).await.map_err(|e| e.to_string())?;
-    podman.return_podman(p).await;
-
-    config_file
-        .register_container(config)
-        .map_err(|e| format!("注册新环境配置失败：{}", e))?;
-
-    info!("新环境 {} 已从快照 {} 派生并运行", new_name, snapshot);
-    Ok(())
 }
 
 /// 运行环境（start）。
