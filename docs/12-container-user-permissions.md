@@ -2,6 +2,17 @@
 
 > 2026-08-06 ~ 08-07 实测沉淀。涉及：为什么默认用户非 root、rootless userns 现实、
 > keep-id 的真实映射语义（实证）、最终方案与实现踩坑。
+>
+> **勘误（2026-08-27 身份模型重构）**：本文 §5「最终方案」（server 以 uid 0 运行
+> + useradd/sudoers + su 降权）、§7 的 sudo 提升通道、§8 的 `--root` 语义描述的是
+> **已废弃的旧模型**。现行模型：容器直接以配置 `<uid>:<gid>` 运行（默认 = 宿主登录
+> 用户，可自定义 uid/gid/用户名），server 与默认用户**同身份**运行（无 root、无
+> su 降权、无 sudoers）；`user_name` 建号 = 创建后宿主侧 root exec 幂等 useradd
+> （**init 镜像烘焙方案作废**）；root 终端走宿主 `easytidy-root-channel` 进程
+> （每容器共享 root shell，`exec --user 0`，父 = conmon，detach/close 语义见
+> docs/08）。**§2（rootless userns 现实）与 §4（keep-id 真实映射实证）仍然有效**——
+> keep-id 下容器 uid = 宿主登录 uid（文件属主实证），容器 root（uid 0）= 宿主
+> subuid 100000 的结论不变。
 
 ## 1. 为什么默认用户必须是普通用户（非 root）
 

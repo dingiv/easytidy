@@ -55,6 +55,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             session_id: std::sync::Mutex::new(None),
             next_msg_id: AtomicU64::new(2), // 握手已用 1
             active_ptys: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            root_sink: Arc::new(tokio::sync::Mutex::new(None)),
         }),
         AppMode::Master => None,
     };
@@ -116,6 +117,13 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::pty::pty_close,
             commands::pty::pty_ping,
             commands::pty::pty_cwd,
+            // root 终端（宿主 root 通道：共享 root shell）
+            commands::root::root_channel_ensure,
+            commands::root::root_terminal_status,
+            commands::root::root_terminal_attach,
+            commands::root::root_terminal_write,
+            commands::root::root_terminal_resize,
+            commands::root::root_terminal_close,
             // 文件系统 + 传输
             commands::fs::fs_list,
             commands::fs::fs_read,

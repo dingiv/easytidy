@@ -196,7 +196,7 @@ async fn handle_client(
     let mut framed = Framed::new(stream, FrameCodec::new());
 
     // 握手（不硬校验版本，仅记录——宿主侧工具不引入握手拒绝）
-    let handshake = next_frame(&mut framed).await.context("握手超时/连接中断")?;
+    let handshake = next_frame_timed(&mut framed).await.context("握手超时/连接中断")?;
     if let Frame::Json(msg) = &handshake {
         if msg.op == "hello" {
             let hs: Handshake = serde_json::from_value(msg.payload.clone())
@@ -216,15 +216,23 @@ async fn handle_client(
         anyhow::bail!("首帧必须是 JSON 帧");
     }
 
-    // attach：订阅 + 2026 包裹回放 + ack
-    let attach = next_frame(&mut framed).await.context("attach 超时/连接中断")?;
-    let (attach_id, req) = match attach {
-        Frame::Json(msg) if msg.op == "rc.attach" => {
-            let r: RcAttach = serde_json::from_value(msg.payload).context("解析 RcAttach 失败")?;
-            (msg.id, r)
+    // attach：订阅 + 2026 包裹回放 + ack。attach 前允许 rc.ping 探测
+    // （状态探测连接：hello + rc.ping 即断，不订阅）
+    let (attach_id, req) = loop {
+        let frame = next_frame_timed(&mut framed).await.context("attach 超时/连接中断")?;
+        match frame {
+            Frame::Json(msg) if msg.op == "rc.ping" => {
+                framed
+                    .send(resp(msg.id, "rc.ping", &RcPingResp { alive: session.alive() }, None))
+                    .await?;
+            }
+            Frame::Json(msg) if msg.op == "rc.attach" => {
+                let r: RcAttach = serde_json::from_value(msg.payload).context("解析 RcAttach 失败")?;
+                break (msg.id, r);
+            }
+            Frame::Json(msg) => anyhow::bail!("attach 前收到未预期消息（op={}）", msg.op),
+            _ => anyhow::bail!("attach 必须是 JSON 帧"),
         }
-        Frame::Json(msg) => anyhow::bail!("attach 前收到未预期消息（op={}）", msg.op),
-        _ => anyhow::bail!("attach 必须是 JSON 帧"),
     };
     // 共享会话按新 attach 尺寸同步 TTY（同 server pty attach 语义）
     if let Err(e) = podman.resize_exec_pty(&session.exec_id(), req.cols, req.rows).await {
@@ -249,7 +257,8 @@ async fn handle_client(
         .await?;
     info!("客户端 attach（token={token}，alive={}）", session.alive());
 
-    // 双向 I/O 循环
+    // 双向 I/O 循环（无超时：交互 shell 读屏可长时间静默；对端死亡
+    // 由 unix socket EOF 自然终结，不靠超时判定）
     loop {
         tokio::select! {
             incoming = next_frame(&mut framed) => {
@@ -301,8 +310,20 @@ async fn handle_client(
     Ok(())
 }
 
-/// 读下一帧（5s 超时，连接中断/解码失败 → Err）。
+/// 读下一帧（双向 I/O 循环用；无超时——对端死亡由 socket EOF 终结）。
 async fn next_frame(
+    framed: &mut Framed<UnixStream, FrameCodec>,
+) -> anyhow::Result<Frame> {
+    framed
+        .next()
+        .await
+        .context("连接中断")?
+        .context("帧解码失败")
+}
+
+/// 读下一帧（5s 超时；握手/attach 阶段用——客户端必须按时序发帧，
+/// 超时 = 客户端异常，尽早断连）。
+async fn next_frame_timed(
     framed: &mut Framed<UnixStream, FrameCodec>,
 ) -> anyhow::Result<Frame> {
     tokio::time::timeout(std::time::Duration::from_secs(5), framed.next())

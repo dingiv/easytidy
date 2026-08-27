@@ -1,10 +1,12 @@
 // Worker GUI 窗口：单容器浏览器式多面板（open + close + multi-panel）。
 //
-// - 头部工具栏：方形图标按钮打开面板——Terminal（下拉选身份 node/root）、
+// - 头部工具栏：方形图标按钮打开面板——Terminal（下拉选身份 用户/root）、
 //   Passthrough、Config；Close Container（圆角方形图标，唯一保留的容器操作）
 // - 标签栏：每个打开的面板一个标签（标题 + 小叉关闭）；重复打开同类面板聚焦已有
 // - 内容区：所有打开的面板常驻渲染（display 切换）——终端会话不因切换丢失；
-//   关闭面板才卸载（终端流经模块级缓存 + server attach 保持，重开回放）
+//   关闭面板才卸载（用户终端：server attach 保持，重开回放；root 终端：
+//   宿主 root 通道共享会话，重开回放——关面板 = detach 不杀会话，
+//   root_terminal_close 才真正关闭 root shell）
 
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -27,6 +29,7 @@ import type { PassthroughState, PinnedApp, TerminalInfo } from '../types';
 import logo from '../assets/logo.png';
 import { AppIcon } from './AppIcon';
 import { Terminal } from './Terminal';
+import { RootTerminal } from './RootTerminal';
 import { FileBrowser } from './FileBrowser';
 import { FileEditor } from './FileEditor';
 import { ImageViewer } from './ImageViewer';
@@ -40,11 +43,10 @@ interface WorkerViewProps {
 /** 打开的面板 */
 interface Pane {
   id: string;
-  kind: 'terminal' | 'passthrough' | 'config' | 'editor' | 'image';
+  kind: 'terminal' | 'root' | 'passthrough' | 'config' | 'editor' | 'image';
   title: string;
-  /** 终端身份（root 终端独立会话） */
-  asRoot?: boolean;
-  /** 终端会话 stream_id（null = 尚未建立/新开；attach 重连用） */
+  /** 用户终端会话 stream_id（null = 尚未建立/新开；attach 重连用）。
+   *  root 终端单例共享会话，无 stream_id（流 ID 恒 ROOT_STREAM_ID） */
   streamId?: number | null;
   /** 编辑器/图片面板：文件路径 */
   path?: string;
@@ -52,11 +54,14 @@ interface Pane {
 
 const AUTO_COLLOPSE_WIDTH = 150
 
-/** 终端标签：显示命令（默认登录 shell 按身份命名） */
+/** 用户终端标签：显示命令（默认登录 shell 显示「终端」） */
 function terminalTitle(t: TerminalInfo): string {
-  const cmd = t.cmd || (t.as_root ? 'root' : 'node');
+  const cmd = t.cmd || '终端';
   return cmd.length > 24 ? `${cmd.slice(0, 24)}…` : cmd;
 }
+
+/** root 面板 id（单例：每容器一个共享 root 会话） */
+const ROOT_PANE_ID = 'root-terminal';
 
 function WorkerViewInner({ containerName }: WorkerViewProps) {
   const { message } = AntApp.useApp();
@@ -72,68 +77,66 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
   const activeId = activePaneId ?? panes[0]?.id ?? null;
 
   // 打开容器的会话初始化（握手 + 数据同步）：
-  // 1. get_terminals 触发共享 socket 连接（hello 握手）→ 活跃终端列表，
-  //    node 会话各恢复一个面板（附接重连，回放当前屏幕）；root 遗留
-  //    会话不恢复（exec 通道无附接语义）并顺带关闭清理
+  // 1. get_terminals 触发共享 socket 连接（hello 握手）→ 活跃用户终端
+  //    列表，各恢复一个面板（附接重连，回放当前屏幕）
   // 2. passthrough_state 同步收藏（工具栏不依赖面板打开）
-  // 3. 无活跃 node 终端 → 默认单个 node 终端（新建持久会话）
-  // 任一步失败（server 未就绪等）→ 回退默认终端，不阻塞打开
+  // 3. root_terminal_status 探测共享 root 会话——存活则恢复 root 面板
+  //    （attach 即回放；root 通道与 server socket 相互独立，探测失败
+  //    仅表示未运行，不阻塞打开）
+  // 4. 无活跃用户终端 → 默认单个用户终端（新建持久会话）
   useEffect(() => {
     (async () => {
-      const [terminalsRes, stateRes] = await Promise.allSettled([
+      const [terminalsRes, stateRes, rootRes] = await Promise.allSettled([
         invoke<TerminalInfo[]>('get_terminals'),
         invoke<PassthroughState>('passthrough_state'),
+        invoke<boolean>('root_terminal_status'),
       ]);
+      const restored: Pane[] = [];
       if (terminalsRes.status === 'fulfilled') {
-        // root 会话（server su 通道时代的遗留）不恢复：root 终端已走宿主
-        // exec 通道，无 attach 语义——恢复只会静默新建 exec，旧 root bash
-        // 永久泄漏在 server 里。顺带关闭这些不可达的僵尸会话（pty_close
-        // 经共享 socket 兜底）
-        const rootLegacies = terminalsRes.value.filter((t) => t.as_root);
-        rootLegacies.forEach((t) => {
-          invoke('pty_close', { streamId: t.stream_id }).catch((err) =>
-            console.error('清理遗留 root 会话失败:', err),
-          );
-        });
-        const restorable = terminalsRes.value.filter((t) => !t.as_root);
-        const restored: Pane[] = restorable.map((t) => ({
-          id: useUiStore.getState().nextPaneId(),
-          kind: 'terminal',
-          title: terminalTitle(t),
-          asRoot: t.as_root,
-          streamId: t.stream_id,
-        }));
-        setPanes(restored);
-        setActivePaneId(null); // 激活第一个
+        restored.push(
+          ...terminalsRes.value.map((t) => ({
+            id: useUiStore.getState().nextPaneId(),
+            kind: 'terminal' as const,
+            title: terminalTitle(t),
+            streamId: t.stream_id,
+          })),
+        );
       } else {
         console.error('get_terminals failed（回退默认终端）:', terminalsRes.reason);
+      }
+      if (rootRes.status === 'fulfilled' && rootRes.value) {
+        restored.push({
+          id: ROOT_PANE_ID,
+          kind: 'root',
+          title: '终端 (root)',
+        });
+      }
+      if (restored.length > 0) {
+        setPanes(restored);
       }
       if (stateRes.status === 'fulfilled') {
         useFavoritesStore.getState().setPinned(stateRes.value.pinned ?? []);
       } else {
         console.error('passthrough_state 同步失败:', stateRes.reason);
       }
-      // 无活跃 node 终端 / server 不可达：默认打开一个 node 终端
-      //（按过滤 root 后的列表判断——只剩遗留 root 时也开默认终端）
-      const restorableCount =
-        terminalsRes.status === 'fulfilled'
-          ? terminalsRes.value.filter((t) => !t.as_root).length
-          : 0;
-      if (restorableCount === 0) {
+      // 无活跃用户终端：默认打开一个用户终端（root 面板恢复与否不影响）
+      const userTerminalCount = terminalsRes.status === 'fulfilled' ? terminalsRes.value.length : 0;
+      if (userTerminalCount === 0) {
         setPanes((prev) =>
-          prev.length > 0
+          prev.some((p) => p.kind === 'terminal')
             ? prev
             : [
+                ...prev,
                 {
                   id: useUiStore.getState().nextPaneId(),
-                  kind: 'terminal',
+                  kind: 'terminal' as const,
                   title: '终端',
-                  asRoot: false,
                   streamId: null,
                 },
               ],
         );
       }
+      setActivePaneId(null); // 激活第一个
       setSessionReady(true);
     })();
   }, []);
@@ -239,17 +242,30 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
     }
   };
 
-  /** 打开新终端（多实例：每次点击新建一个独立持久会话面板，可同时多开） */
-  const openTerminal = (asRoot: boolean) => {
+  /** 打开新用户终端（多实例：每次点击新建一个独立持久会话面板，可同时多开） */
+  const openTerminal = () => {
     const pane: Pane = {
       id: useUiStore.getState().nextPaneId(),
       kind: 'terminal',
-      title: asRoot ? '终端 (root)' : '终端',
-      asRoot,
+      title: '终端',
       streamId: null, // 新建持久会话，Terminal 建立后经 onStream 回填
     };
     setPanes((prev) => [...prev, pane]);
     setActivePaneId(pane.id);
+  };
+
+  /** 打开 root 终端（单例：每容器一个共享 root 会话；已开则聚焦） */
+  const openRootTerminal = () => {
+    setPanes((prev) => {
+      const existing = prev.find((p) => p.kind === 'root');
+      if (existing) {
+        setActivePaneId(existing.id);
+        return prev;
+      }
+      const pane: Pane = { id: ROOT_PANE_ID, kind: 'root', title: '终端 (root)' };
+      setActivePaneId(pane.id);
+      return [...prev, pane];
+    });
   };
 
   /** 打开面板（非终端类：同类已存在则聚焦，否则新建） */
@@ -278,8 +294,10 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
     );
   };
 
-  /** 关闭面板：关闭后激活相邻面板；终端面板 = 关闭该终端（pty.close
-   *  终结会话，生命周期由 server 持有——不影响其他终端/连接） */
+  /** 关闭面板：关闭后激活相邻面板。
+   *  用户终端 = pty.close 终结会话（生命周期由 server 持有）；
+   *  root 终端 = root_terminal_close（kill 容器内 root shell + root 通道退出）
+   *  ——root 会话是共享的，关面板即关会话（与用户终端一致的产品语义） */
   const closePane = (id: string) => {
     const pane = panes.find((p) => p.id === id);
     if (pane && pane.kind === 'terminal' && pane.streamId != null) {
@@ -288,6 +306,10 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
         console.error('pty_close failed:', err),
       );
       useTerminalStore.getState().clearCwd(sid);
+    } else if (pane && pane.kind === 'root') {
+      invoke('root_terminal_close').catch((err) =>
+        console.error('root_terminal_close failed:', err),
+      );
     }
     setPanes((prev) => {
       const idx = prev.findIndex((p) => p.id === id);
@@ -375,14 +397,14 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
               <Dropdown
                 menu={{
                   items: [
-                    { key: 'user', label: '新建终端 (node)' },
-                    { key: 'root', label: '新建终端 (root)' },
+                    { key: 'user', label: '新建终端 (用户)' },
+                    { key: 'root', label: '打开 root 终端（共享会话）' },
                   ],
-                  onClick: ({ key }) => openTerminal(key === 'root'),
+                  onClick: ({ key }) => (key === 'root' ? openRootTerminal() : openTerminal()),
                 }}
                 placement="bottomLeft"
               >
-                <Tooltip title="新建终端（多实例，node/root）" mouseEnterDelay={4}>
+                <Tooltip title="新建终端（多实例，用户/root）" mouseEnterDelay={4}>
                   <button className="tool-button">
                     <CodeOutlined />
                     <DownOutlined style={{ fontSize: 10 }} />
@@ -476,12 +498,12 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
               >
                 {p.kind === 'terminal' && (
                   <Terminal
-                    asRoot={p.asRoot ?? false}
                     streamId={p.streamId ?? null}
                     onStream={(sid) => bindTerminalStream(p.id, sid)}
                     onExit={() => closePane(p.id)}
                   />
                 )}
+                {p.kind === 'root' && <RootTerminal onExited={() => closePane(p.id)} />}
                 {p.kind === 'passthrough' && <PassthroughManager />}
                 {p.kind === 'config' && <ConfigManager containerName={containerName} />}
                 {p.kind === 'editor' && p.path && (

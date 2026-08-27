@@ -42,5 +42,6 @@ easytidy-shared = { path = "../shared" }
 [package.metadata.shared]
 SERVER_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
 # root 通道进程（宿主用户身份，rootless socket exec --user 0 持有容器内 root
-# shell）。与 SERVER_BIN 同构：dev 构建树 / 随安装包发布到 /usr/bin。
-ROOT_CHANNEL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
+# shell）。**宿主原生二进制**（非容器内进程）：dev = 原生 target/debug
+# （SERVER_BIN 是 musl 目标，二者不同）；prod 随安装包发布到 /usr/bin。
+ROOT_CHANNEL_BIN = { dev = "../../target/debug/", prod = "/usr/bin" }

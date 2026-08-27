@@ -55,8 +55,12 @@ pub struct GuiSession {
     pub session_id: std::sync::Mutex<Option<String>>,
     /// 下一个消息 ID
     pub next_msg_id: AtomicU64,
-    /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧；node 与 root 会话共用）
+    /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）
     pub active_ptys: Arc<tokio::sync::Mutex<HashMap<u32, PtySink>>>,
+    /// root 会话写侧（每容器一个共享 root shell，root 通道专用连接；
+    /// None = 未 attach。root 会话是单例——流 ID 恒为 ROOT_STREAM_ID，
+    /// 不需要 stream_id 索引）
+    pub root_sink: Arc<tokio::sync::Mutex<Option<PtySink>>>,
 }
 
 /// PTY 事件（通过 Channel 发送给前端）

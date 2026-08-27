@@ -127,8 +127,14 @@ export interface ContainerConfig {
   network: ContainerNetworkConfig;
   /// 容器环境变量（"KEY=VALUE" 列表）
   env: string[];
-  /// 用户一致性映射开关（keep-id：容器内 uid 与宿主对齐）
-  user_home: boolean;
+  /// 用户一致性映射开关（keep-id：宿主 uid ↔ 容器同 uid 锁死 1:1）
+  keep_id: boolean;
+  /// 容器默认用户 uid（null = 宿主登录用户 uid）
+  user_uid?: number | null;
+  /// 容器默认用户 gid（null = 宿主登录用户 gid）
+  user_gid?: number | null;
+  /// 容器内用户名（可选；有值时首次创建经 root exec useradd 建号）
+  user_name?: string | null;
   /// 血缘：来源 flavor 模板名（展开时盖章；null = 自由创建，不参与模板同步）
   flavor?: string | null;
 }
@@ -143,7 +149,8 @@ export interface FlavorStatus {
   drifted: boolean;
 }
 
-/// 宿主用户信息（uid 映射语义对照表数据源；null = 探测失败，容器降级 root 运行）
+/// 宿主用户信息（uid 映射语义对照表数据源；null = 探测失败，
+/// 容器创建报错而非静默降级 root）
 export interface HostUser {
   name: string;
   uid: number;
@@ -156,11 +163,12 @@ export interface HostUser {
 export interface ContainerConfigView {
   mounts: MountConfig[];
   network: ContainerNetworkConfig;
-  /// 当前生效环境变量（含 EASYTIDY_USER_* 系统注入与 podman 默认 PATH/HOSTNAME 等）
+  /// 当前生效环境变量（含 EASYTIDY_HOME/EASYTIDY_USER_NAME 系统注入与
+  /// podman 默认 PATH/HOSTNAME 等）
   env: string[];
-  /// 容器进程用户（keep-id 下为 "0:0"）
+  /// 容器进程用户（"<uid>:<gid>"，即容器默认用户）
   user: string | null;
-  /// userns 模式（keep-id 容器可能回显 "private"/null，语义以 user_home + docs/12 为准）
+  /// userns 模式（keep-id 容器可能回显 "private"/null，语义以 keep_id + docs/12 为准）
   userns_mode: string | null;
 }
 
@@ -173,13 +181,11 @@ export interface ContainerConfigResult {
   flavor_status?: FlavorStatus | null;
 }
 
-/// 活跃终端会话（get_terminals / server pty.list）
+/// 活跃终端会话（get_terminals / server pty.list；均为容器默认用户会话）
 export interface TerminalInfo {
   stream_id: number;
   /// 显示命令（pty.open 的 cmd；空 = 默认登录 shell）
   cmd: string;
-  /// 以 root 运行
-  as_root: boolean;
   /// 常驻会话（server 持有，不随连接断开清理）
   persistent: boolean;
   /// 最近一次工作目录

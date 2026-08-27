@@ -55,7 +55,10 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   mounts: [],
   network: { mode: 'host', ports: [] },
   env: [],
-  user_home: true,
+  keep_id: true,
+  user_uid: null,
+  user_gid: null,
+  user_name: null,
   flavor: null,
 };
 
@@ -270,8 +273,14 @@ export function ContainerConfigEditor({
           <UserOutlined /> 用户
         </h3>
         <UserPane
-          userHome={value.user_home}
-          onUserHomeChange={(user_home) => update({ user_home })}
+          keepId={value.keep_id}
+          userUid={value.user_uid ?? null}
+          userGid={value.user_gid ?? null}
+          userName={value.user_name ?? null}
+          onKeepIdChange={(keep_id) => update({ keep_id })}
+          onUserUidChange={(user_uid) => update({ user_uid })}
+          onUserGidChange={(user_gid) => update({ user_gid })}
+          onUserNameChange={(user_name) => update({ user_name })}
           hostUser={hostUser}
           effective={effective}
         />

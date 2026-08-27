@@ -5,6 +5,7 @@
 //! - config:配置管理器(读取/应用)
 //! - socket:容器 server socket 连接与请求
 //! - pty:终端(attach 常驻会话)
+//! - root:root 终端(宿主 root 通道,每容器共享 root shell)
 //! - fs:文件系统 + 宿主↔容器传输
 //! - apps:桌面应用枚举
 //! - passthrough:宿主 .desktop 导出/auto-start
@@ -16,4 +17,5 @@ pub mod containers;
 pub mod fs;
 pub mod passthrough;
 pub mod pty;
+pub mod root;
 pub mod socket;

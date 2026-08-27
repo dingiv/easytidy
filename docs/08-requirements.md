@@ -1,8 +1,12 @@
 # 08. 需求阐述 v0.6（2026-08-22）
 
-> 状态：需求 v0.6——命名收敛：原"中心化 GUI"=**Master GUI**、原"per-容器 GUI"=**Worker GUI**；
-> PID 1 修订：容器以 User=node 烘焙 init 镜像（keep-id），server 直接以容器默认身份运行；
-> root 终端走宿主侧 bollard exec 通道（不再经容器内 server su 桥接）；
+> 状态：需求 v0.6（2026-08-27 身份模型勘误）——命名收敛：原"中心化 GUI"=**Master GUI**、
+> 原"per-容器 GUI"=**Worker GUI**；
+> 身份模型（勘误取代 v0.6 的 init 镜像烘焙）：容器直接以配置 `<uid>:<gid>` 运行
+> （默认 = 宿主登录用户，可自定义 uid/gid/用户名；keep-id 锁 1:1），**无 init 镜像烘焙**
+> （user_name 建号改由创建后宿主侧 root exec 幂等完成），server 以容器默认用户同身份
+> 运行（无 root、无 su 降权）；root 终端走宿主 `easytidy-root-channel` 进程（每容器
+> 共享 root shell，`exec --user 0`，不再经容器内 server su 桥接）；
 > 数据目录统一到 `~/.easytidy` 下子目录（flavors / logs / icons / …）。
 > 调研前置：docs/01-07。
 
@@ -23,7 +27,7 @@
 |---|---|---|
 | 宿主 GUI manager core（三入口） | **Rust**（GUI 壳 = **Tauri 2 + React**，D1 已定） | Master、Worker、无头 CLI 共用同一核心 crate |
 | 容器内 server | **Rust**，静态二进制（musl，容器内零依赖） | 容器 entry（默认用户 node），经 unix socket 服务 GUI |
-| 引擎层 | Rust 直连 **podman socket API**：**bollard**（Docker compat 面）+ 手写 libpod 扩展端点 + `/events` 事件流 + 宿主侧 bollard exec（root 终端新通道） | 生命周期/快照/网络/mount/exec/stats/events 全覆盖；**GUI 与 CLI 三入口零 podman CLI 依赖** |
+| 引擎层 | Rust 直连 **podman socket API**：**bollard**（Docker compat 面）+ 手写 libpod 扩展端点 + `/events` 事件流 + 宿主侧 exec（一次性 `exec_oneshot` 建号/装包 + root-channel 进程持有 root shell） | 生命周期/快照/网络/mount/exec/stats/events 全覆盖；**GUI 与 CLI 三入口零 podman CLI 依赖** |
 | 状态/配置 | `~/.easytidy/` 下子目录（容器注册表 configfile、flavors、icons、logs 等） + `flock` 进程锁（每 GUI 实例一把） | GUI 多实例与 CLI 的互通通道；进程锁防多实例 |
 | 数据目录布局 | `~/.easytidy/{flavors,icons,logs}/` + 容器注册表 + 配置 + socket 目录（`$XDG_RUNTIME_DIR/easytidy/`） | 不依赖系统目录，便于打包与卸载 |
 
@@ -44,26 +48,34 @@
                        └─► 容器内无头应用
 
 容器命名空间：
-  PID 1 / 容器默认用户 = node（uid/gid = 宿主登录用户；keep-id 烘焙镜像）
-  └─► easytidy server（以容器默认用户 node 运行；进程按 euid 分派）
+  PID 1 / 容器默认用户 = 配置 <uid>:<gid>（默认 = 宿主登录用户；keep-id 锁 1:1）
+  └─► easytidy server（以容器默认用户同身份运行；身份自发现，无 root）
    ├─► entry 应用（链式拉起）
    ├─► passthrough 应用（server 拉起；apps.launch / apps.ps / apps.logs / apps.kill）
-   ├─► 终端会话（node PTY，经 socket；server 持久持有，多终端面板 attach 复用）
-   └─► 应用子进程（按需降权到 node；root 通道由宿主 Worker GUI 直连 bollard exec）
+   ├─► 终端会话（默认用户 PTY，经 socket；server 持久持有，多终端面板 attach 复用）
+   ├─► root shell（每容器一个共享，宿主 root-channel 进程 exec --user 0 持有，
+   │    容器内父 = conmon；root 终端经其 unix socket attach/回放/detach/close）
+   └─► 应用子进程（默认用户身份运行，无降权）
 ```
 
 - GUI ↔ server：unix socket（bind-mount 进容器，`$XDG_RUNTIME_DIR/easytidy/<name>/socket`）
 - **生命周期边界【O2 已决】**：conmon 管理"容器"这个能力实体；server 管理容器内业务；**GUI 生命周期与容器生命周期不绑定**——GUI 退出容器不退出，除非 GUI 显式关闭容器
 - 跨命名空间无 OS 父子：逻辑父子经 socket 协议（`shutdown`/`childExited`）
-- **root 通道不走容器内 server**：Worker GUI 直接经宿主 podman socket 走 bollard `create_exec/start_exec`；
-  stream_id 偏移 `1 << 30` 防与 server id 撞，关闭 = drop input（stdin EOF → shell 退出）
+- **root 通道不走容器内 server**：宿主 `easytidy-root-channel` 进程（rootless，按需拉起、
+  flock 防多实例）经 podman socket `exec --user 0` 持有**每容器一个共享 root shell**
+  （容器内 exec 进程父 = conmon，容器 stop 时被 conmon 回收），GUI/CLI 经其 unix socket
+  （`$XDG_RUNTIME_DIR/easytidy-root/`，独立于 bind 进容器的 socket 目录）attach/detach/close；
+  流 ID 常量 `1 << 30` 防与 server PTY id 撞；detach = 仅退订（会话续存），close = kill shell
 
-## easytidy server 职责清单（PID 1 身份 = node，euid 分派）
+## easytidy server 职责清单（PID 1 身份 = 容器默认用户）
 
-容器内进程树：PID 1 = server（容器 entry；默认用户 node）——静态 Rust 二进制，容器内零依赖；
-**容器以 User=node 烘焙**（`core` 一次性烘 init 镜像 `easytidy/init/<image>:u<uid>g<gid>`，按宿主 uid/gid tag 缓存幂等），
-keep-id 下容器 uid 1000 = 宿主登录用户（**实测文件属主，非字面 uid_map**，见 docs/12）。
-**server 按自身 euid 分派**：新容器（euid=node）→ 直接跑；旧 root 容器（euid=0）→ 保留兼容分支（装包 su 仍可用）。
+容器内进程树：PID 1 = server（容器 entry；容器默认用户）——静态 Rust 二进制，容器内零依赖；
+**容器直接以配置 `<uid>:<gid>` 运行**（libpod create `User` 字段；默认 = 宿主登录用户，
+用户可自定义 uid/gid/用户名；配置 `user_name` 时创建后由宿主侧 root exec 幂等 useradd
+建号——**init 镜像烘焙方案已废弃**）。keep-id 下容器 uid = 宿主登录 uid（**实测文件
+属主，非字面 uid_map**，见 docs/12）。**server 以容器默认用户同身份运行**（经
+`/proc/self/status` + `/etc/passwd` 自发现身份，无 root、无 su 降权；euid==0 仅旧
+测试容器兼容警告）。
 
 server 职责（3 项）：
 1. **业务级 setup 自实现**：server 即容器 entrypoint 命令；用户创建/挂载/环境等 setup 由我们自己的逻辑实现（不复用 distrobox-init）
@@ -133,9 +145,9 @@ server 职责（3 项）：
 | L1 | 语言 | **全栈 Rust**（GUI core 三入口 + 容器内 server） |
 | L2 | 引擎通信 | **podman socket API**（bollard compat 面 + libpod 端点 + `/events` 事件流 + bollard exec 通道）；**三入口零 podman CLI 依赖**；podman.socket 一次性启用由安装器/首启引导做（systemctl，socket 激活无常驻） |
 | D1 | GUI 壳 | **Tauri 2 + React**（CJK/IME spike 已通过，见 docs/10）；NVIDIA 宿主需 `WEBKIT_DISABLE_DMABUF_RENDERER=1`（正式 GUI 在 main.rs 内置，类 clash-verge-rev 的 NVIDIA 检测 + 运行时注入） |
-| O1 | 终端通道 | server 提供 node PTY（多终端持久会话 attach 复用，TTY 事件驱动 cwd 推送）；root 终端走宿主 bollard exec 通道（不经 server） |
+| O1 | 终端通道 | server 提供默认用户 PTY（多终端持久会话 attach 复用，TTY 事件驱动 cwd 推送）；root 终端走宿主 root-channel 进程（每容器共享 root shell，不经 server） |
 | O2 | 生命周期边界 | conmon 管容器能力、server 管容器内业务；**GUI 与容器生命周期不绑定**；GUI 退出容器不退出，除非显式关闭 |
-| O3 | 容器根进程（v0.6 再次修订） | **server = PID 1 / 容器 entry / 默认用户 node**；keep-id 烘焙 init 镜像保证容器内 uid 与宿主对齐；**server 按自身 euid 分派**（新容器直跑、装包 su 仅旧容器兼容） |
+| O3 | 容器根进程（2026-08-27 身份模型勘误） | **server = PID 1 / 容器 entry / 容器默认用户**（配置 `<uid>:<gid>`，默认宿主登录用户；keep-id 锁 1:1）；**无 init 镜像烘焙**（user_name 建号 = 创建后宿主侧 root exec 幂等 useradd）；server 与默认用户同身份运行（无 root） |
 | Q3 | 快照范围 | 仅容器文件系统层 |
 | Q4 | 开机自启动 | entry 应用 + 静默标志 + 宿主 systemd unit（`easytidy boot --container <name> [--gui]`） |
 | Q5 | Master / Worker GUI | 同一二进制，不同参数；不常驻、多实例、配置文件 + 进程锁通信；新命名替换原"中心化/per-容器" |
@@ -147,7 +159,7 @@ server 职责（3 项）：
 1. **常驻语义**：server（PID 1 / 容器默认用户）存活期间容器常驻；容器停止 = server 退出（显式关闭或 podman stop）
 2. **PID 1 义务工程化**（v0.6 已大幅简化）：server 直接承担 PID 1 角色（僵尸回收 + 信号转发 + 优雅关闭）；测试覆盖 SIGTERM 广播 + 子进程升级
 3. **keep-id 真实身份**：容器 uid 1000 = 宿主登录用户（**文件属主实证**，docs/12）；容器 uid 0 = 宿主 subuid 100000（**不是**宿主默认用户）—— 误判易致理解偏差
-4. **root 终端语义**：走宿主 exec 通道，不持久化（重开窗口新建会话），无 cwd 跟随，无持久恢复
+4. **root 终端语义**：走宿主 root-channel 进程（每容器一个共享 root shell，容器内父 = conmon），**持久化 + 多客户端 attach**（128KB 回放，2026 同步包裹）；detach = 仅退订（GUI/CLI 退出不影响会话），close = kill shell；无 cwd 跟随
 5. **引擎层重写**：Rust 实现 podman socket API 客户端（create/start/stop/exec/commit/export/import/inspect/events + 标签管理）；容器配置 schema（entry 应用/静默标志/挂载/网络/passthrough/用户一致性映射）；宿主 systemd unit 生成；.desktop 图标生成
 6. **配置文件竞争**：多实例 GUI + CLI 并发读写共享状态——原子写 + flock 是硬性设计约束；不再依赖 schema 版本化（`~/.easytidy` 集中布局 + 进程锁足够）
 7. **网络映射（4.8）**：仅对 bridge 网络容器有意义

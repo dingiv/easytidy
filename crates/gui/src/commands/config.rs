@@ -89,6 +89,11 @@ pub async fn apply_container_config(
         .await
         .map_err(|e| e.to_string())?;
 
+    // 容器内准备（fontconfig + 可选 useradd）：失败不阻断重建（落日志）
+    if let Err(e) = podman.prepare_container(&name, &container_config.params).await {
+        tracing::error!("容器内准备失败（{name}）：{e}");
+    }
+
     // 更新 configfile（与重建后的容器保持一致）
     let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
     let config_file = ConfigFile::with_path(config_path);
@@ -133,6 +138,10 @@ pub async fn config_sync_from_template(name: String) -> Result<String, String> {
         .rebuild(&name, &next, &server_bin)
         .await
         .map_err(|e| format!("重建容器失败：{e}"))?;
+    // 容器内准备（fontconfig + 可选 useradd）：失败不阻断同步（落日志）
+    if let Err(e) = podman.prepare_container(&name, &next.params).await {
+        tracing::error!("容器内准备失败（{name}）：{e}");
+    }
     config_file
         .register_container(next)
         .map_err(|e| format!("更新容器配置失败：{e}"))?;

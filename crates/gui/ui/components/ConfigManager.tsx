@@ -160,7 +160,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           <Popconfirm
             title="保存并重启容器"
             description={`将提交并重建容器以应用新的挂载、网络、环境变量与用户配置，期间容器会短暂停止。${
-              !(edit?.user_home ?? true) ? '警告：用户一致性映射已关闭！' : ''
+              !(edit?.keep_id ?? true) ? '警告：用户一致性映射（keep-id）已关闭！' : ''
             }`}
             okText="保存并重启"
             cancelText="取消"

@@ -15,7 +15,7 @@ import { errMsg } from '../lib/errors';
 import type { ConfTemplate, ContainerConfig } from '../types';
 import { BLANK_CONTAINER_CONFIG, ContainerConfigEditor } from './config/ContainerConfigEditor';
 
-/** 空白 conf 模板（新建表单初始值；user_home 默认 true 与 Rust 共享基座对齐） */
+/** 空白 conf 模板（新建表单初始值；keep_id 默认 true 与 Rust 共享基座对齐） */
 function emptyConfTemplate(): ConfTemplate {
   return {
     ...BLANK_CONTAINER_CONFIG,

@@ -1,4 +1,6 @@
-// 终端组件：xterm + server PTY 流。
+// 用户终端组件：xterm + 容器 server PTY 流（容器默认用户身份）。
+//
+// root 终端已拆出（RootTerminal.tsx，走宿主 root 通道，单例共享 root shell）。
 //
 // 多终端（2026-08-08）：每条会话一条专用连接，面板由 WorkerView 常驻渲染
 // （display 切换，切 tab 不销毁）。会话生命周期由 server 持有：
@@ -43,8 +45,6 @@ function fallbackCopy(text: string) {
 }
 
 interface TerminalProps {
-  /** 以 root 身份运行（false = node 常规终端；各自独立持久会话） */
-  asRoot?: boolean;
   /** 已有会话 stream_id：附接重连（server 回放当前屏幕）；
    *  缺省/null = 新建独立持久会话（多终端实例） */
   streamId?: number | null;
@@ -54,7 +54,7 @@ interface TerminalProps {
   onExit?: (streamId: number) => void;
 }
 
-function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: TerminalProps) {
+function TerminalInner({ streamId: initialStreamId, onStream, onExit }: TerminalProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const terminalInstance = useRef<XTerminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -177,8 +177,7 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
     let streamGen = 0;
 
     /** 建立流（初始挂载 / 断线重连共用）。
-     *  - node 面板：优先 attach 旧会话（server 死会话自动 fallback 新建）
-     *  - root 面板：宿主 exec 通道无 attach 语义，每次新开会话
+     *  - 优先 attach 旧会话（server 死会话自动 fallback 新建）
      *  - StrictMode dev 模式:共享 inFlightInvokeRef 让 Mount 2 等 Mount 1,
      *    Mount 2 拿到 sid 后用 attachStreamId 二次 invoke 注册本 mount 的 ch
      *    (server 不创建新 bash,只是 fan-out 给 ch_2) */
@@ -199,13 +198,10 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
             cmd: null,
             cols: term.cols,
             rows: term.rows,
-            // ⚠️ Tauri 2 invoke 参数为 camelCase（Rust snake_case 自动转换）
-            asRoot: asRoot ?? false,
             persistent: true, // 重连语义：server 死会话时 fallback 新建持久会话
             // 恢复/重连：attach 既有会话（server 清屏 + 环形缓冲回放当前屏幕；
-            // 死会话自动换新）。node 与 root 同语义（root 也走 server 会话，
-            // 幂等：remount 只 attach 不复建）。ref 为空（首次挂载）用面板传入的
-            // 恢复 id
+            // 死会话自动换新；幂等：remount 只 attach 不复建）。ref 为空
+            // （首次挂载）用面板传入的恢复 id
             attachStreamId: streamIdRef.current ?? initialStreamId ?? undefined,
           }).then((s) => {
             streamIdRef.current = s; // 在 promise 链发布——任何 await 者都可见
@@ -234,7 +230,6 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
             cmd: null,
             cols: term.cols,
             rows: term.rows,
-            asRoot: asRoot ?? false,
             persistent: true,
             attachStreamId: streamIdRef.current, // attach 不 create
           });
@@ -257,8 +252,8 @@ function TerminalInner({ asRoot, streamId: initialStreamId, onStream, onExit }: 
     };
 
     /** 写通道断开 → 自动重连（server 全权负责生命周期：死会话已被清理，
-     *  attach 旧 id 会拿到新会话；root exec 通道每次新开）。防循环：单次
-     *  重连进行中丢弃后续触发，失败保留错误提示由用户手动刷新。 */
+     *  attach 旧 id 会拿到新会话）。防循环：单次重连进行中丢弃后续触发，
+     *  失败保留错误提示由用户手动刷新。 */
     const reconnect = (reason: unknown) => {
       if (streamCancelled || reconnecting) return;
       reconnecting = true;

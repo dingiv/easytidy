@@ -287,6 +287,12 @@ pub async fn env_new(
     );
     try_log!(p.start(&config.name).await, "启动容器");
 
+    // 容器内准备：fontconfig（恒执行）+ useradd（仅 user_name 配置时）。
+    // 失败不阻断创建（装包等可后续重建补齐；错误落日志），但给出提示。
+    if let Err(e) = p.prepare_container(&config.name, &config.params).await {
+        error!("容器内准备失败（{name}）：{e}");
+    }
+
     let config_path = try_log!(ConfigFile::default_path(), "解析配置路径");
     let config_file = ConfigFile::with_path(config_path);
     try_log!(config_file.register_container(config), "注册环境配置");
@@ -407,6 +413,10 @@ pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) ->
     p.rebuild(&name, &config, &server_bin)
         .await
         .map_err(|e| format!("重建失败：{e}"))?;
+    // 容器内准备（fontconfig + 可选 useradd）：失败不阻断重建（落日志）
+    if let Err(e) = p.prepare_container(&name, &config.params).await {
+        tracing::error!("容器内准备失败（{name}）：{e}");
+    }
     podman.return_podman(p).await;
     info!("环境 {name} 已按注册配置重建并启动");
     Ok(())
