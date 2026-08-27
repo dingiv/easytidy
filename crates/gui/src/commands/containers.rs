@@ -438,8 +438,16 @@ pub async fn env_stop(podman: tauri::State<'_, PodmanState>, name: String) -> Re
 pub fn open_container_window(name: String) -> Result<(), String> {
     use std::process::Command;
 
-    // 用当前可执行文件自身启动 Worker 实例（dev/prod 通用，不依赖 PATH）
+    // 用当前可执行文件自身启动 Worker 实例（dev/prod 通用，不依赖 PATH）。
+    // dev 坑：本进程 exe 被 cargo 重建替换后 current_exe() 返回带
+    // " (deleted)" 后缀的路径（文件已不存在）→ 剥离后缀回落到新构建
+    // （target/debug 同路径已重新落盘）
     let exe = std::env::current_exe().map_err(|e| format!("解析当前可执行文件失败：{}", e))?;
+    let exe = if let Some(stripped) = exe.to_string_lossy().strip_suffix(" (deleted)") {
+        std::path::PathBuf::from(stripped)
+    } else {
+        exe
+    };
     let _child = Command::new(exe)
         .arg("--container")
         .arg(&name)
