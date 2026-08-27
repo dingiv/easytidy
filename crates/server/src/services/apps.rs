@@ -217,26 +217,17 @@ pub(crate) async fn spawn_managed_process(
         return Err(anyhow!("Empty command"));
     }
 
-    let mut child = if let Some(user) = user_map() {
-        TokioCommand::new("su")
-            .arg("-c")
-            .arg(cmd)
-            .arg(&user.name)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to spawn command (su)")?
-    } else {
-        let parts: Vec<&str> = cmd.split_whitespace().collect();
-        let cmd0 = parts[0];
-        let args = &parts[1..];
-        TokioCommand::new(cmd0)
-            .args(args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("Failed to spawn command")?
-    };
+    // 新模型：server 即容器默认用户，直接继承身份 spawn——不经 su
+    // （su 要求调用方 root，新模型下不存在）。命令串经 shell 执行
+    // （entry/passthrough 命令含 `;`/引号/重定向，裸 split_whitespace
+    // 直 exec 本来就是错的）。
+    let mut child = TokioCommand::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn command (sh -c)")?;
 
     let pid = child.id().unwrap();
 

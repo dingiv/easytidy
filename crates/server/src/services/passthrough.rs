@@ -22,7 +22,7 @@ use crate::services::apps::spawn_managed_process;
 fn container_passthrough_path() -> PathBuf {
     let home = user_map()
         .map(|u| u.home.clone())
-        .unwrap_or_else(|| "/home/easytidy".to_string());
+        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
     PathBuf::from(home).join(".config/easytidy/passthrough.toml")
 }
 

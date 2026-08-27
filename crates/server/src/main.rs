@@ -86,7 +86,7 @@ use connection::handle_connection;
 use http::start_http_server;
 use services::apps::child_prune_task;
 use services::lifecycle::perform_graceful_shutdown;
-use setup::{ensure_xauthority, fixup_xdg_data_dirs, setup_fontconfig, setup_user_mapping};
+use setup::{ensure_xauthority, fixup_xdg_data_dirs, setup_user_identity};
 use state::ServerState;
 
 #[derive(Parser, Debug)]
@@ -178,21 +178,17 @@ async fn main() -> Result<()> {
         child_prune_task(reaper_state).await;
     });
 
-    // 用户一致性映射（distrobox 式）：容器内用户 = 宿主用户（同名/同 uid/gid）。
-    // 宿主侧 create_with_config 在 user_home=true 时注入 EASYTIDY_USER_*；
-    // 成功则 PTY/entry 经 su 以该用户运行；失败（env 缺失/工具缺失）回退 root，
-    // 行为与旧版一致。server 仍以 root 运行——root 才有权创建用户/装包，
-    // 应用层经 su 降权。
-    setup_user_mapping().await;
+    // 身份自发现（新模型）：server 即容器默认用户（容器 User = 配置 uid:gid），
+    // 经 /proc/self/status + /etc/passwd + EASYTIDY_HOME/USER_NAME 提示 env
+    // 构造身份（setup.rs）。旧 root 容器（euid 0）仅告警后按 uid 0 继续。
+    // 建号/sudoers/fontconfig 等 root 操作已迁宿主侧
+    // （core::podman::user::prepare_container）。
+    let identity = setup_user_identity();
 
-    // 宿主字体接入 fontconfig（flavor gui=true 把宿主字体挂到 /usr/share/easytidy-host，
-    // 写 local.conf 让 fontconfig 找到——不能覆盖容器自身 /usr/share/fonts，
-    // 否则字体/图标包 postinst 写入失败导致 dpkg 安装中断，实测）
-    setup_fontconfig();
-
-    // 持久层初始化：/home/easytidy 数据目录 + 旧配置迁移
-    // （config 曾存 /run tmpfs，容器重启即丢）
-    storage::init();
+    // 持久层初始化：{home}/.easytidy 数据目录 + 旧配置迁移
+    // （/home/easytidy 硬编码已废——server 以配置 uid 运行时 /home 常不可写；
+    // config 曾存 /run tmpfs，容器重启即丢）
+    storage::init(&identity.home);
 
     // Setup signal handler for graceful shutdown
     let shutdown_flag = state.shutting_down.clone();

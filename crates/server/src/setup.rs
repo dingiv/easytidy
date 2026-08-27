@@ -1,12 +1,27 @@
-//! 用户环境 setup（euid 分派）：用户映射建号 / XDG 修正 / fontconfig / su 工具。
+//! 用户身份 setup（身份自发现）+ XDG 修正 + XAUTHORITY 探测。
+//!
+//! 新模型（2026-08-27）：server 即容器默认用户——容器 `User` 字段直接
+//! 指向配置 uid:gid（宿主侧 create_with_config），server 无需建号/降权。
+//! 身份来源（零 getent 依赖，server 与自身 uid 同权限）：
+//! 1. `/proc/self/status`（Uid/Gid 行）
+//! 2. `/etc/passwd`（uid 反查名字与 home；无条目 = 镜像未预置且宿主
+//!    未配置用户名，正常形态——whoami 显示 uid 数字）
+//! 3. 宿主侧注入的提示 env：`EASYTIDY_USER_NAME`（配置用户名，与
+//!    `prepare_container` 的 useradd 命名一致）、`EASYTIDY_HOME`
+//!    （未配用户名时 server 的 HOME 回退值——keep-id 容器期望应用
+//!    数据落宿主 home）
+//!
+//! 旧 root 容器（User=0:0）不再支持完整功能：检测到 euid==0 仅告警，
+//! 按 uid 0 身份继续（存量测试容器能跑即可，装包走宿主 root 通道）。
+//! 容器内建号/sudoers/fontconfig 等 root 操作已全部迁到宿主侧
+//! （`core::podman::user::prepare_container`）。
 
 use std::fs;
-use std::path::Path;
 use std::sync::OnceLock;
 
-use tokio::process::Command as TokioCommand;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
+#[derive(Clone)]
 pub(crate) struct UserMap {
     pub(crate) name: String,
     pub(crate) uid: u32,
@@ -14,209 +29,102 @@ pub(crate) struct UserMap {
     pub(crate) home: String,
 }
 
-/// 容器内用户固定名（与宿主用户名不同，符合"名字不同、uid 相同"语义）。
-pub(crate) const CONTAINER_USER: &str = "easytidy";
-
-/// server 自身 euid（/proc/self/status 解析，零依赖）。
-///
-/// euid 分派依据：容器默认用户 node 化后 server 以 node 运行（无建号/
-/// su 能力）；旧容器（User=root）以 root 运行——同一二进制双行为。
-pub(crate) fn current_euid() -> Option<u32> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    status
-        .lines()
-        .find(|l| l.starts_with("Uid:"))
-        .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+/// 自身 uid/gid（/proc/self/status 解析，零依赖）。
+pub(crate) fn self_uid_gid() -> (u32, u32) {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let mut uid = 0u32;
+    let mut gid = 0u32;
+    for line in status.lines() {
+        if let Some(v) = line.strip_prefix("Uid:") {
+            uid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("Gid:") {
+            gid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        }
+    }
+    (uid, gid)
 }
 
-/// 用户映射全局态：`setup_user_mapping` 成功后才写入。
-/// `user_map()` 返回 `None` 表示映射未生效（PTY/entry 回退 root /bin/sh，与旧版一致）。
+/// 身份全局态：`setup_user_identity` 后写入。
+/// `user_map()` 理论上恒有值（main 在 listen 前初始化）；保留 Option
+/// 仅为防御（初始化前的极早期调用）。
 pub(crate) static USER_MAP: OnceLock<UserMap> = OnceLock::new();
 
-/// 当前生效的用户映射。
-///
-/// 默认 shell/应用的常规身份恒为容器内 node 用户（uid/gid 与宿主真实对齐，
-/// 名字不同）。keep-id 语义（实测文件属主）：node（uid 1000）= 宿主登录
-/// 用户（读宿主 /run/user/1000 显示 socket、写宿主 home 属主 1000）；
-/// 容器 root（uid 0）= 容器层文件属主（宿主侧 subuid 100000，**不是宿主
-/// 默认用户**）——装包身份，`run --root` 或免密 sudo 进入。
+/// 当前生效的身份（容器默认用户 = server 自身）。
 pub(crate) fn user_map() -> Option<&'static UserMap> {
     USER_MAP.get()
 }
 
-/// 从环境变量读取用户映射（EASYTIDY_USER_UID/GID，缺失返回 None）。
-///
-/// 容器内用户固定名为 `node`（与宿主用户名不同），home 为容器内
-/// `/home/node`（用户add -m 创建，应用数据存容器层）——rootless podman 的
-/// userns 偏移（容器 uid N → 宿主 100000+N）使"uid 对齐"仅为名义一致；
-/// 宿主挂载 home 的写操作经免密 sudo 完成（见 setup_user_mapping 第 4 步）。
-pub(crate) fn user_map_from_env() -> Option<UserMap> {
-    let uid = std::env::var("EASYTIDY_USER_UID").ok()?.parse().ok()?;
-    let gid = std::env::var("EASYTIDY_USER_GID").ok()?.parse().ok()?;
-    Some(UserMap {
-        name: CONTAINER_USER.to_string(),
-        uid,
-        gid,
-        home: format!("/home/{CONTAINER_USER}"),
-    })
+/// /etc/passwd 条目（name/home 提取；`name:x:uid:gid:gecos:home:shell`）。
+struct PasswdEntry {
+    name: String,
+    home: String,
 }
 
-/// 启动期用户映射 setup（main 初始化后、listen 前调用）。
+/// 纯解析：passwd 文本中 uid 对应的条目。
+fn passwd_entry_for_uid(passwd: &str, uid: u32) -> Option<PasswdEntry> {
+    for line in passwd.lines() {
+        let f: Vec<&str> = line.split(':').collect();
+        if f.len() >= 6 && f[2].parse::<u32>().ok() == Some(uid) {
+            return Some(PasswdEntry {
+                name: f[0].to_string(),
+                home: f[5].to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// 由输入构造身份（纯函数，单测点）。
 ///
-/// 1. 组：`getent group <gid>` 未命中则 `groupadd -g <gid> <name>`（缺失回退
-///    `addgroup -g <gid> <name>`，alpine/busybox 系）
-/// 2. 用户（容器内固定名 `node`，uid/gid 取宿主值，三种情形）：
-///    - uid 未占用：`useradd -m -u <uid> -g <gid> -s <shell> node`（容器内 home
-///      `/home/node`，应用数据存容器层；缺失回退 adduser，alpine 系）
-///    - uid 已存在且同名：无需操作
-///    - uid 被镜像默认用户占用（如 ubuntu 镜像 uid 1000 = `ubuntu`）：`usermod -l`
-///      改名 + `-d /home/node` + `-g <gid>` 对齐（仅 debian 系有 usermod）
-/// 3. 容器内 home（/home/node）存在性 + 属主（容器内目录，chown 安全）
-/// 4. ⚠️ 绝不 chown 宿主挂载的 home：会改写宿主文件属主、致宿主用户失权
-///    （2026-08-06 实测事故）
-/// 5. 免密 sudo：`/etc/sudoers.d/easytidy-node`（宿主 home 写操作/包管理经此提升）
+/// 名字优先级：`EASYTIDY_USER_NAME` → passwd 反查 → `uid<uid>`（无 passwd
+/// 条目的正常形态）。
 ///
-/// rootless 说明：userns 偏移（容器 uid N → 宿主 100000+N）使"uid 对齐"为名义一致；
-/// 应用常态化权限 = 容器内 node 用户权限；宿主挂载目录读可达、写经免密 sudo。
-///
-/// 返回用户映射是否生效（env 齐全且用户创建成功）；失败回退 root 运行。
-pub(crate) async fn setup_user_mapping() -> bool {
-    let Some(user) = user_map_from_env() else {
-        debug!("未收到 EASYTIDY_USER_* 环境变量，跳过用户映射（root 容器）");
-        return false;
+/// HOME 优先级：配置用户名 → `/home/<name>`（prepare_container 的
+/// useradd -m 建目录，不依赖 useradd 执行时序）；未配用户名 →
+/// `EASYTIDY_HOME`（keep-id 容器 = 宿主 home）→ passwd 条目 home → `/`。
+/// 绝不造 `/home/<uid>` 这类无意义路径。
+pub(crate) fn identity_from_inputs(
+    passwd: &str,
+    uid: u32,
+    gid: u32,
+    env_name: Option<&str>,
+    env_home: Option<&str>,
+) -> UserMap {
+    let env_name = env_name.filter(|n| !n.is_empty());
+    let env_home = env_home.filter(|h| !h.is_empty());
+    let entry = passwd_entry_for_uid(passwd, uid);
+
+    let name = match env_name {
+        Some(n) => n.to_string(),
+        None => entry.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| format!("uid{uid}")),
     };
+    let home = match env_name {
+        Some(n) => format!("/home/{n}"),
+        None => match env_home {
+            Some(h) => h.to_string(),
+            None => entry.as_ref().map(|e| e.home.clone()).unwrap_or_else(|| "/".to_string()),
+        },
+    };
+    UserMap { name, uid, gid, home }
+}
 
-    // euid 分派：容器默认用户 node 化（新模型）下 server 以 node 运行——
-    // 用户已由 init 镜像烘焙预置（创建链路临时 root 容器），server 无权
-    // 也无需 useradd；校验存在即采用。root（旧容器）走下方完整建号逻辑。
-    if current_euid().unwrap_or(0) != 0 {
-        if user_exists(&user).await {
-            info!(
-                "node 容器：烘焙用户 {}({}:{}) 生效（免建号）",
-                user.name, user.uid, user.gid
-            );
-            let _ = USER_MAP.set(user);
-            return true;
-        }
+/// 启动期身份初始化（main 初始化后、listen 前调用；同步，无 IO 阻塞点）。
+pub(crate) fn setup_user_identity() -> UserMap {
+    let (uid, gid) = self_uid_gid();
+    if uid == 0 {
         warn!(
-            "server 以非 root 运行但用户 {} 不存在（init 烘焙未执行？），跳过映射",
-            user.name
+            "server 以 root（uid 0）运行——旧形态容器，新模型不再支持 \
+             （装包/root 操作走宿主 root 通道）；按 uid 0 身份继续"
         );
-        return false;
     }
-
-    // 1. 确保组存在
-    if !group_gid_exists(user.gid).await {
-        let gid = user.gid.to_string();
-        let group_ok = if command_available("groupadd") {
-            run_cmd(&["groupadd", "-g", &gid, &user.name]).await
-        } else if command_available("addgroup") {
-            run_cmd(&["addgroup", "-g", &gid, &user.name]).await
-        } else {
-            warn!("容器内缺少 groupadd/addgroup，无法创建组 {}（gid {}）", user.name, gid);
-            false
-        };
-        if !group_ok {
-            warn!("组创建未成功（可能已存在），继续：{}（gid {}）", user.name, gid);
-        }
-    }
-
-    // 2. 确保用户存在（同名/同 uid/gid）
-    match username_for_uid(user.uid).await {
-        // uid 未占用 → 创建（debian 系 useradd；alpine/busybox 系 adduser）
-        None => {
-            let uid = user.uid.to_string();
-            let gid = user.gid.to_string();
-            let shell = user_shell_path();
-            let user_ok = if command_available("useradd") {
-                // -m：容器内 home（/home/node），应用数据存容器层（重启/重建保留）；
-                // 宿主挂载 home 只读可达，写操作经免密 sudo
-                run_cmd(&["useradd", "-m", "-u", &uid, "-g", &gid, "-s", shell, &user.name]).await
-            } else if command_available("adduser") {
-                run_cmd(&[
-                    "adduser", "-D", "-u", &uid, "-G", &user.name, "-s", shell, "-h", &user.home,
-                    &user.name,
-                ])
-                .await
-            } else {
-                warn!("容器内缺少 useradd/adduser，无法创建用户 {}", user.name);
-                false
-            };
-            if !user_ok {
-                warn!("用户创建失败，回退 root 运行：{}", user.name);
-                return false;
-            }
-        }
-        // uid 已存在且同名 → 无需操作
-        Some(existing) if existing == user.name => {}
-        // uid 被镜像默认用户占用（ubuntu 镜像 uid 1000 = ubuntu）→ usermod 改名对齐
-        Some(existing) => {
-            if !command_available("usermod") {
-                warn!(
-                    "uid {} 已被镜像用户 {} 占用且容器内无 usermod，无法对齐，回退 root 运行",
-                    user.uid, existing
-                );
-                return false;
-            }
-            let gid = user.gid.to_string();
-            let renamed = run_cmd(&["usermod", "-l", &user.name, &existing]).await;
-            let home_ok = renamed && run_cmd(&["usermod", "-d", &user.home, &user.name]).await;
-            let gid_ok = home_ok && run_cmd(&["usermod", "-g", &gid, &user.name]).await;
-            if !gid_ok {
-                warn!(
-                    "usermod 对齐用户失败（{} → {}），回退 root 运行",
-                    existing, user.name
-                );
-                return false;
-            }
-            info!(
-                "镜像默认用户 {} 已重命名为 {}（uid {}）",
-                existing, user.name, user.uid
-            );
-        }
-    }
-
-    // 3. 确保容器内 home 存在并归用户所有（容器内目录，非宿主挂载，chown 安全）
-    if !Path::new(&user.home).exists() {
-        run_cmd(&["mkdir", "-p", &user.home]).await;
-    }
-    let uid_gid = format!("{}:{}", user.uid, user.gid);
-    run_cmd(&["chown", &uid_gid, &user.home]).await;
-
-    // 4. ⚠️ 绝不 chown 宿主挂载的 home！
-    //    宿主 home 是 bind mount，chown 会改写宿主机文件属主，导致宿主用户失去访问权
-    //    （2026-08-06 实测事故：宿主环境崩溃）。权限一致性靠 uid/gid 对齐实现——
-    //    容器用户与宿主用户同 uid/gid，天然拥有相同权限，无需也不能动属主。
-
-    // 5. 免密 sudo：容器用户提升权限的通道（宿主 home 写操作、包管理等）。
-    //    直接写 /etc/sudoers.d（root 写文件不依赖 sudo 二进制是否已装；
-    //    flavor setup 可能在 server 启动后才安装 sudo——文件先就位，装好即生效）。
-    //    alpine/busybox 系无 sudo：文件写了无害，装 sudo 后自然生效。
-    {
-        let sudoers = format!("/etc/sudoers.d/easytidy-{}", user.name);
-        let rule = format!("{} ALL=(ALL) NOPASSWD: ALL\n", user.name);
-        // 基础镜像装 sudo 前可能没有 /etc/sudoers.d（apt 装 sudo 才创建）——先建目录
-        let _ = std::fs::create_dir_all("/etc/sudoers.d");
-        let write_result = std::fs::write(&sudoers, rule);
-        let chmod_ok = write_result.is_ok() && run_cmd(&["chmod", "440", &sudoers]).await;
-        if chmod_ok {
-            info!("免密 sudo 已配置：{}", user.name);
-        } else if let Err(e) = write_result {
-            warn!("免密 sudo 配置失败（写 {} 出错：{e}）", sudoers);
-        } else {
-            warn!("免密 sudo 配置失败（chmod 440 失败：{}）", sudoers);
-        }
-    }
-
-    // 6. 校验 + 记录
-    if !user_exists(&user).await {
-        warn!("用户映射校验失败（用户未创建成功），回退 root 运行：{}", user.name);
-        return false;
-    }
-
-    info!("用户映射：{}({}:{}) home={}", user.name, user.uid, user.gid, user.home);
-    let _ = USER_MAP.set(user);
-    true
+    let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let env_name = std::env::var("EASYTIDY_USER_NAME").ok();
+    let env_home = std::env::var("EASYTIDY_HOME").ok();
+    let identity =
+        identity_from_inputs(&passwd, uid, gid, env_name.as_deref(), env_home.as_deref());
+    let _ = USER_MAP.set(identity.clone());
+    info!("身份自发现：{}({}:{}) home={}", identity.name, identity.uid, identity.gid, identity.home);
+    identity
 }
 
 /// 修正 XDG_DATA_DIRS 值，确保包含系统默认数据目录。
@@ -248,102 +156,6 @@ pub(crate) fn fixup_xdg_data_dirs() {
         std::env::set_var("XDG_DATA_DIRS", &merged);
         info!("XDG_DATA_DIRS 已修正（追加系统默认）: {merged}");
     }
-}
-
-/// 宿主字体接入 fontconfig。
-///
-/// flavor `gui=true` 把宿主 `/usr/share/fonts` 与 `~/.local/share/fonts` 只读挂载到
-/// `/usr/share/easytidy-host/`（非覆盖容器自身目录，避免破坏字体/图标包安装）。
-/// 此处写 `/etc/fonts/local.conf` 把这些目录接入 fontconfig（容器需有 fontconfig，
-/// 否则跳过——多数发行版镜像自带）。
-pub(crate) fn setup_fontconfig() {
-    const HOST_ROOT: &str = "/usr/share/easytidy-host";
-    if !Path::new(HOST_ROOT).exists() {
-        return;
-    }
-    if !Path::new("/etc/fonts").is_dir() {
-        info!("容器无 /etc/fonts（未装 fontconfig），跳过宿主字体接入");
-        return;
-    }
-    let conf = format!(
-        r#"<?xml version="1.0"?>
-<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-<fontconfig>
-  <dir>{HOST_ROOT}/fonts</dir>
-  <dir>{HOST_ROOT}/.local/share/fonts</dir>
-</fontconfig>
-"#
-    );
-    match std::fs::write("/etc/fonts/local.conf", conf) {
-        Ok(()) => info!("宿主字体已接入 fontconfig（{HOST_ROOT}）"),
-        Err(e) => warn!("写入 /etc/fonts/local.conf 失败：{e}"),
-    }
-}
-
-/// 探测 PATH 中是否存在可执行命令（区分镜像系：debian/ubuntu 用 useradd/groupadd，
-/// alpine/busybox 用 adduser/addgroup）。
-pub(crate) fn command_available(cmd: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
-    })
-}
-
-/// 容器内可用 shell：/bin/bash 优先（ubuntu 系），缺失回退 /bin/sh（alpine/busybox）。
-pub(crate) fn user_shell_path() -> &'static str {    if Path::new("/bin/bash").exists() {
-        "/bin/bash"
-    } else {
-        "/bin/sh"
-    }
-}
-
-/// 运行命令（无输出捕获，返回成功与否）。
-pub(crate) async fn run_cmd(args: &[&str]) -> bool {
-    if args.is_empty() {
-        return false;
-    }
-    match TokioCommand::new(args[0]).args(&args[1..]).status().await {
-        Ok(s) => s.success(),
-        Err(e) => {
-            warn!("执行命令失败（{} {}）：{e}", args[0], args.join(" "));
-            false
-        }
-    }
-}
-
-/// `getent <database> <key>` 查询（glibc 与 busybox 系均支持）。
-pub(crate) async fn run_getent(database: &str, key: &str) -> bool {
-    command_available("getent") && run_cmd(&["getent", database, key]).await
-}
-
-/// 组 gid 是否已存在（getent 优先；容器无 getent 时解析 /etc/group 兜底）。
-pub(crate) async fn group_gid_exists(gid: u32) -> bool {
-    if run_getent("group", &gid.to_string()).await {
-        return true;
-    }
-    std::fs::read_to_string("/etc/group").ok().is_some_and(|content| {
-        content.lines().any(|line| {
-            let f: Vec<&str> = line.split(':').collect();
-            f.len() >= 3 && f[2].parse::<u32>().ok() == Some(gid)
-        })
-    })
-}
-
-/// 用户（uid + name）是否已存在：/etc/passwd 直接解析（不依赖 getent）。
-pub(crate) async fn user_exists(user: &UserMap) -> bool {
-    username_for_uid(user.uid).await.as_deref() == Some(user.name.as_str())
-}
-
-/// /etc/passwd 中 uid 对应的用户名（不依赖 getent，容器无 getent 时兜底）。
-pub(crate) async fn username_for_uid(uid: u32) -> Option<String> {
-    let content = std::fs::read_to_string("/etc/passwd").ok()?;
-    content.lines().find_map(|line| {
-        let f: Vec<&str> = line.split(':').collect();
-        if f.len() >= 3 && f[2].parse::<u32>().ok() == Some(uid) {
-            Some(f[0].to_string())
-        } else {
-            None
-        }
-    })
 }
 
 /// 探测 X11 auth 文件并强制覆盖进程 `XAUTHORITY`(server 内置 GUI 透传)。
@@ -398,6 +210,66 @@ pub(crate) fn ensure_xauthority() -> Option<String> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
+                     tidy:x:1000:1000::/home/tidy:/bin/bash\n\
+                     other:x:1001:1001::/home/other:/bin/sh\n";
+
+    #[test]
+    fn test_identity_named_user() {
+        // 配置用户名：名字 = env 值，home = /home/<name>（不依赖 passwd 条目）
+        let id = identity_from_inputs(PASSWD, 1000, 1000, Some("tidy"), Some("/home/div"));
+        assert_eq!(id.name, "tidy");
+        assert_eq!(id.home, "/home/tidy");
+        // useradd 尚未执行（无 passwd 条目）也成立
+        let id = identity_from_inputs("", 1000, 1000, Some("tidy"), None);
+        assert_eq!(id.name, "tidy");
+        assert_eq!(id.home, "/home/tidy");
+    }
+
+    #[test]
+    fn test_identity_passwd_lookup() {
+        // 未配用户名 + passwd 有条目 → 反查名字与 home
+        let id = identity_from_inputs(PASSWD, 1000, 1000, None, Some("/home/div"));
+        assert_eq!(id.name, "tidy");
+        assert_eq!(id.home, "/home/div", "EASYTIDY_HOME 优先于 passwd home");
+    }
+
+    #[test]
+    fn test_identity_passwd_home_fallback() {
+        // 未配用户名 + 无 HOME 提示 → passwd 条目 home
+        let id = identity_from_inputs(PASSWD, 1000, 1000, None, None);
+        assert_eq!(id.name, "tidy");
+        assert_eq!(id.home, "/home/tidy");
+    }
+
+    #[test]
+    fn test_identity_no_passwd_entry() {
+        // 未配用户名 + 无 passwd 条目（正常形态）→ uid<uid> + EASYTIDY_HOME
+        let id = identity_from_inputs(PASSWD, 2000, 2000, None, Some("/home/div"));
+        assert_eq!(id.name, "uid2000");
+        assert_eq!(id.home, "/home/div");
+        // 连 HOME 提示都没有 → "/"
+        let id = identity_from_inputs(PASSWD, 2000, 2000, None, None);
+        assert_eq!(id.name, "uid2000");
+        assert_eq!(id.home, "/");
+    }
+
+    #[test]
+    fn test_identity_empty_env_ignored() {
+        // 空串 env 按缺失处理
+        let id = identity_from_inputs(PASSWD, 1000, 1000, Some(""), Some(""));
+        assert_eq!(id.name, "tidy");
+        assert_eq!(id.home, "/home/tidy");
+    }
+
+    #[test]
+    fn test_self_uid_gid_reads_proc() {
+        // 真实进程身份：非负且与 libc 一致（Linux 容器环境）
+        let (uid, gid) = self_uid_gid();
+        assert_eq!(uid, unsafe { libc::getuid() });
+        assert_eq!(gid, unsafe { libc::getgid() });
+    }
 
     /// 测试串行化:`ensure_xauthority` 修改的是**进程全局 env**(XDG_RUNTIME_DIR +
     /// XAUTHORITY),并行跑会让测试互相污染(一个测试设的目录会被另一个读到)。

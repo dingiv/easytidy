@@ -16,7 +16,6 @@ use easytidy_protocol::{
 };
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use serde_json::json;
-use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
 
@@ -159,11 +158,11 @@ pub(crate) async fn handle_pty_open(
         .openpty(pty_size)
         .context("Failed to open PTY")?;
 
-    // ⚠️ 模型（2026-08-27 调整）：终端不指定用户——server 进程本身即容器
-    // 默认用户（新模型经 init 镜像烘焙预置，uid 与宿主对齐），直接 exec
-    // 命令、继承 server 身份与环境；登录 env（HOME/USER 等）由下方显式
-    // 覆盖（客户端 env 继承自宿主进程）。as_root 保留为协议字段（旧模型
-    // root 容器下 server 本身即 root）。
+    // ⚠️ 模型（2026-08-27 定案）：终端不指定用户——server 进程本身即容器
+    // 默认用户（容器 User 字段 = 配置 uid:gid，宿主侧 create_with_config），
+    // 直接 exec 命令、继承 server 身份与环境；登录 env（HOME/USER 等）由
+    // 下方显式覆盖（客户端 env 继承自宿主进程）。root 终端不走此通道
+    // （协议 v2 删 as_root，root 走宿主 easytidy-root-channel）。
     let (cmd, argv) = if req.cmd.is_empty() {
         // 默认终端 = 登录 shell（-l 读 /etc/profile，HOME 由下方 env 注入）
         let shell = if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
@@ -209,8 +208,14 @@ pub(crate) async fn handle_pty_open(
         cmd_builder.env("TERM", "xterm-256color");
     }
 
-    // Set working directory
-    cmd_builder.cwd(&req.cwd);
+    // Set working directory：空或 "/" = 落用户 home（登录 shell 不会自行
+    // chdir home——GUI 恒传 "/"，直接以 "/" 为 cwd 会让 shell 停在根目录）
+    let cwd = if req.cwd.is_empty() || req.cwd == "/" {
+        user_map().map(|u| u.home.clone()).unwrap_or_default()
+    } else {
+        req.cwd.clone()
+    };
+    cmd_builder.cwd(&cwd);
 
     let slave = pty_pair.slave;
     let master = pty_pair.master;
@@ -482,31 +487,12 @@ pub(crate) fn pty_reader_thread(
     info!("PTY reader thread ended: stream_id={}, exit_code={}", stream_id, exit_code);
 }
 
-/// 读取进程 cwd：先直接读（server 的直接子进程可读，如 root 终端 bash）；
-/// ptrace 拒绝（node 属主进程，root 缺 CAP_SYS_PTRACE 时）→ 经 `su node`
-/// 执行 readlink——同 uid 可读（node 属主进程对 node 自己无 ptrace 限制）。
-pub(crate) async fn read_cwd(pid: u32) -> Option<String> {
-    let direct = std::fs::read_link(format!("/proc/{pid}/cwd"))
+/// 读取进程 cwd：直接 readlink（新模型下 server 与子进程同 uid，
+/// 无 ptrace 权限问题——旧 root 模型的 `su node` 兜底已无意义，删除）。
+pub(crate) fn read_cwd(pid: u32) -> Option<String> {
+    std::fs::read_link(format!("/proc/{pid}/cwd"))
         .ok()
-        .map(|p| p.to_string_lossy().into_owned());
-    if direct.is_some() {
-        return direct;
-    }
-    // ptrace 拒绝 → 以 node 身份读取
-    if let Some(user) = user_map() {
-        let out = TokioCommand::new("su")
-            .args(["-c", &format!("readlink /proc/{pid}/cwd"), &user.name])
-            .output()
-            .await
-            .ok()?;
-        if out.status.success() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() {
-                return Some(s);
-            }
-        }
-    }
-    None
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Handle pty.cwd：查询会话主进程的实时工作目录。
@@ -716,7 +702,7 @@ pub(crate) async fn session_cwd(session: &Arc<PtySession>) -> Option<String> {
         .ok()
         .and_then(|c| c.split_whitespace().next().map(|s| s.parse::<u32>().unwrap_or(0)));
     match child_pid {
-        Some(pid) => read_cwd(pid).await,
-        None => read_cwd(spawn_pid).await,
+        Some(pid) => read_cwd(pid),
+        None => read_cwd(spawn_pid),
     }
 }

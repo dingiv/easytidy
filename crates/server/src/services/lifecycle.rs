@@ -230,15 +230,21 @@ Icon=test-icon
         assert_eq!(app.icon_path, Some("test-icon".to_string()));
     }
 
-    /// 环境变量解析：缺失任一 EASYTIDY_USER_* → None
+    /// 身份自发现：server 自身 uid 必有身份（名字可能为 uid<uid> 兜底）
     #[test]
-    fn test_user_map_from_env_missing() {
-        // 测试进程通常无 EASYTIDY_USER_*；即便宿主注入也逐项移除（并行测试安全：
-        // 其他用例不读这些变量）
-        for key in ["EASYTIDY_USER_NAME", "EASYTIDY_USER_UID", "EASYTIDY_USER_GID", "EASYTIDY_USER_HOME"] {
-            std::env::remove_var(key);
-        }
-        assert!(user_map_from_env().is_none());
+    fn test_identity_self_discovery() {
+        let (uid, gid) = crate::setup::self_uid_gid();
+        let id = crate::setup::identity_from_inputs(
+            "root:x:0:0:root:/root:/bin/sh\n",
+            uid,
+            gid,
+            None,
+            None,
+        );
+        assert_eq!(id.uid, uid);
+        assert_eq!(id.gid, gid);
+        assert!(!id.name.is_empty());
+        assert!(!id.home.is_empty());
     }
 
     /// Test config get/set
