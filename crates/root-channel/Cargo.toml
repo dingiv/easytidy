@@ -1,0 +1,24 @@
+[package]
+name = "easytidy-root-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "easytidy-root-channel"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+clap = { workspace = true }
+fs2 = { workspace = true }
+easytidy-core = { path = "../core" }
+easytidy-protocol = { path = "../protocol" }

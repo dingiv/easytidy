@@ -104,7 +104,6 @@ mod tests {
     use crate::services::apps::parse_desktop_file;
     use crate::services::config::handle_config_get;
     use crate::services::fs::handle_fs_list;
-    use crate::setup::*;
     use easytidy_protocol::ops::{CfgGetResp, FsList, FsListResp};
     use easytidy_protocol::{FrameCodec, Handshake, HandshakeAck, PROTOCOL_VERSION};
     use futures::{SinkExt, StreamExt};

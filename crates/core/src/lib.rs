@@ -28,6 +28,7 @@ pub mod flavor;
 pub mod libpod;
 pub mod models;
 pub mod podman;
+pub mod root_channel;
 pub mod systemd;
 pub mod userenv;
 
