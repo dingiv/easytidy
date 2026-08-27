@@ -239,11 +239,9 @@ async fn handle_client(
         warn!("resize root shell 失败（忽略）：{e}");
     }
     let mut rx = session.subscribe(token);
-    framed.send(Frame::Raw {
-        stream_id: ROOT_STREAM_ID,
-        data: session.replay(),
-    })
-    .await?;
+    // ack 先于回放发送（同 server pty attach 的有效顺序：客户端读到的第一帧
+    // 必须是 JSON ack；回放 Raw 帧随后被 GUI 的 reader 任务消费。若回放在前，
+    // GUI 的 rc.attach 响应解析会撞上 Raw 帧报「响应应为 JSON 帧」）
     framed
         .send(resp(
             attach_id,
@@ -255,6 +253,11 @@ async fn handle_client(
             None,
         ))
         .await?;
+    framed.send(Frame::Raw {
+        stream_id: ROOT_STREAM_ID,
+        data: session.replay(),
+    })
+    .await?;
     info!("客户端 attach（token={token}，alive={}）", session.alive());
 
     // 双向 I/O 循环（无超时：交互 shell 读屏可长时间静默；对端死亡
