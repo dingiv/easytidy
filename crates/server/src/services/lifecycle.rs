@@ -230,39 +230,6 @@ Icon=test-icon
         assert_eq!(app.icon_path, Some("test-icon".to_string()));
     }
 
-    /// 单引号转义：普通 / 含单引号 / 空串 / 含空白与变量 / unicode
-    #[test]
-    fn test_shell_escape_single_quote() {
-        assert_eq!(shell_escape_single_quote("whoami"), "'whoami'");
-        assert_eq!(shell_escape_single_quote("a'b"), "'a'\\''b'");
-        assert_eq!(shell_escape_single_quote(""), "''");
-        assert_eq!(shell_escape_single_quote("echo $HOME"), "'echo $HOME'");
-        assert_eq!(shell_escape_single_quote("中文"), "'中文'");
-    }
-
-    /// su -c 完整命令拼接：cmd + argv[1..]（argv[0] == cmd 时与整体 argv 拼接等价）
-    #[test]
-    fn test_build_su_command() {
-        // CLI 形态：easytidy run --container n -- sh -c 'echo $HOME'
-        assert_eq!(
-            build_su_command(
-                "sh",
-                &["sh".to_string(), "-c".to_string(), "echo $HOME".to_string()]
-            ),
-            "'sh' '-c' 'echo $HOME'"
-        );
-        // 单命令无参
-        assert_eq!(build_su_command("whoami", &[]), "'whoami'");
-        // 命令内含单引号（如 grep 'a b'）
-        assert_eq!(
-            build_su_command(
-                "bash",
-                &["bash".to_string(), "-c".to_string(), "echo 'a b'".to_string()]
-            ),
-            "'bash' '-c' 'echo '\\''a b'\\'''"
-        );
-    }
-
     /// 环境变量解析：缺失任一 EASYTIDY_USER_* → None
     #[test]
     fn test_user_map_from_env_missing() {

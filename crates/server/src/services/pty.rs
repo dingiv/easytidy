@@ -1,6 +1,6 @@
 //! PTY 服务：open/attach/回放/resize/close/枚举/cwd 跟随。
 use crate::state::{PtySession, RING_MAX, ServerState};
-use crate::setup::{build_su_command, user_map, command_available, fixup_xdg_data_dirs_value};
+use crate::setup::{user_map, fixup_xdg_data_dirs_value};
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -19,10 +19,6 @@ use serde_json::json;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
-
-struct PtyCenter {
-
-}
 
 /// 把连接订阅到已有 PTY 会话：按请求尺寸同步 PTY + 清屏回放环形缓冲 + 登记订阅。
 /// 返回 None = 会话不存在（调用方回退新建路径）。
@@ -162,82 +158,30 @@ pub(crate) async fn handle_pty_open(
         .openpty(pty_size)
         .context("Failed to open PTY")?;
 
-    // ⚠️ 最终模型（2026-08-17 定案）：server 以容器 root 运行；
-    // 非 as_root 时经 portable-pty 的凭证设置（内部 fork+exec 前钩子做
-    // setgid+setuid+setgroups）直接降权到 easytidy 用户——不经 su
-    // （免 shell 转义/子命令退出竞态，HOME/SHELL 由 server 显式注入）。
-    // as_root=true：直接以容器 root 运行（rootless 下 = 宿主 subuid）。
-    // 映射未生效（env 缺失/用户创建失败）：/bin/sh root 兜底。
-    let mut cmd_builder = if req.as_root {
-        let cmd = if req.cmd.is_empty() {
-            if Path::new("/bin/bash").exists() {
-                "/bin/bash".to_string()
-            } else {
-                "/bin/sh".to_string()
-            }
-        } else {
-            req.cmd.clone()
-        };
-        let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
-
-        let mut b = CommandBuilder::new(cmd);
-        for arg in &argv[1..] {
-            b.arg(arg);
-        }
-        b
-    } else if let Some(user) = user_map() {
-        // easytidy 身份降权：setpriv（util-linux）内部即 setgroups+setgid+
-        // setuid 后 exec——"fork+exec+setuid+setgid"语义的现成封装，
-        // 无 PAM/密码/转义问题。portable-pty CommandBuilder 无凭证 API，
-        // 故经 argv 前缀注入。无 setpriv 的最小镜像回退 su。
-        let mut b = if command_available("setpriv") {
-            let mut b = CommandBuilder::new("setpriv");
-            b.arg(format!("--reuid={}", user.uid));
-            b.arg(format!("--regid={}", user.gid));
-            b.arg("--init-groups");
-            if req.cmd.is_empty() {
-                // 登录 shell（-l 读 /etc/profile，HOME 由下方 env 注入）
-                if Path::new("/bin/bash").exists() {
-                    b.arg("/bin/bash");
-                    b.arg("-l");
-                } else {
-                    b.arg("/bin/sh");
-                    b.arg("-l");
-                }
-            } else {
-                b.arg(&req.cmd);
-                for a in &req.argv[1..] {
-                    b.arg(a);
-                }
-            }
-            b
-        } else if req.cmd.is_empty() {
-            let mut b = CommandBuilder::new("su");
-            b.arg("-");
-            b.arg(&user.name);
-            b
-        } else {
-            let full = build_su_command(&req.cmd, &req.argv);
-            let mut b = CommandBuilder::new("su");
-            b.arg("-c");
-            b.arg(full);
-            b.arg(&user.name);
-            b
-        };
-        if req.cwd == "/" {
-            b.cwd(&user.home); // login 落 home
-        }
-        b
+    // ⚠️ 模型（2026-08-27 调整）：终端不指定用户——server 进程本身即容器
+    // 默认用户（新模型经 init 镜像烘焙预置，uid 与宿主对齐），直接 exec
+    // 命令、继承 server 身份与环境；登录 env（HOME/USER 等）由下方显式
+    // 覆盖（客户端 env 继承自宿主进程）。as_root 保留为协议字段（旧模型
+    // root 容器下 server 本身即 root）。
+    let (cmd, argv) = if req.cmd.is_empty() {
+        // 默认终端 = 登录 shell（-l 读 /etc/profile，HOME 由下方 env 注入）
+        let shell = if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
+        (shell.to_string(), vec![shell.to_string(), "-l".to_string()])
     } else {
-        let cmd = if req.cmd.is_empty() { "/bin/sh".to_string() } else { req.cmd.clone() };
-        let argv = if req.argv.is_empty() { vec![cmd.clone()] } else { req.argv.clone() };
-
-        let mut b = CommandBuilder::new(cmd);
-        for arg in &argv[1..] {
-            b.arg(arg);
-        }
-        b
+        (
+            req.cmd.clone(),
+            if req.argv.is_empty() {
+                vec![req.cmd.clone()]
+            } else {
+                req.argv.clone()
+            },
+        )
     };
+
+    let mut cmd_builder = CommandBuilder::new(&cmd);
+    for arg in &argv[1..] {
+        cmd_builder.arg(arg);
+    }
 
     // Set environment variables。XDG_DATA_DIRS 必须含系统默认目录（旧 flavor 注入
     // 纯覆盖值导致 gdk-pixbuf 找不到系统 loaders.cache，PNG 图标解码失败、GTK
@@ -250,8 +194,8 @@ pub(crate) async fn handle_pty_open(
         }
     }
     // 登录语义 env 后置覆盖：CLI/GUI 客户端 env 继承自宿主进程（HOME=宿主
-    // home、USER=宿主用户名），会覆盖降权身份的正确值——在客户端 env 之后
-    // 显式注入 easytidy 的登录环境
+    // home、USER=宿主用户名）——在客户端 env 之后显式注入容器默认用户的
+    // 登录环境
     if !req.as_root {
         if let Some(user) = user_map() {
             cmd_builder.env("HOME", &user.home);

@@ -394,31 +394,6 @@ pub(crate) fn ensure_xauthority() -> Option<String> {
     None
 }
 
-/// POSIX shell 单引号转义：参数包在单引号内，内部 `'` 用 `'\''` 序列
-/// （闭合-转义-重开），保证 `su -c '<cmd>'` 内命令原样传给用户 shell 解析。
-pub(crate) fn shell_escape_single_quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
-    for c in s.chars() {
-        if c == '\'' {
-            out.push_str("'\\''");
-        } else {
-            out.push(c);
-        }
-    }
-    out.push('\'');
-    out
-}
-
-/// 构建 `su -c` 的完整命令串：cmd + argv[1..] 逐个单引号转义后空格拼接
-/// （argv 与 cmd 同构：CLI/GUI 均约定 argv[0] == cmd）。
-pub(crate) fn build_su_command(cmd: &str, argv: &[String]) -> String {
-    let mut parts = Vec::with_capacity(argv.len() + 1);
-    parts.push(shell_escape_single_quote(cmd));
-    parts.extend(argv.iter().skip(1).map(|a| shell_escape_single_quote(a)));
-    parts.join(" ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
