@@ -1,9 +1,9 @@
 //! PTY 命令：打开（attach 常驻终端）/写入/尺寸/关闭/心跳/工作目录。
 //!
-//! 终端通道：容器 server socket（**node 与 root 同一条通道**）。每会话一条
-//! 专用连接，server 持有生命周期 + 环形缓冲回放 + cwd 跟随；root 由
-//! `pty.open{as_root=true}` 以容器 root 起 shell（server 进程即容器 root），
-//! 与 node 共用 persistent/attach 语义 → 幂等。
+//! 终端通道：容器 server socket，承载**容器默认用户**会话。每会话一条
+//! 专用连接，server 持有生命周期 + 环形缓冲回放 + cwd 跟随，
+//! persistent/attach 语义 → 幂等。root 终端不经此通道——走宿主
+//! root-channel 进程（见 `commands/root.rs` 的 `root_terminal_*` 命令）。
 
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
@@ -24,7 +24,8 @@ use crate::state::{GuiSession, PtyEvent};
 /// 获取当前所有活跃终端（server 持有的 PTY 会话；多终端面板恢复用——
 /// 重开窗口时逐个 attach_stream 重连，输出经环形缓冲回放）。
 ///
-/// node 与 root 终端都在 server 会话内（root 以 as_root=true 创建），均持久化、可恢复。
+/// 仅覆盖容器默认用户终端（root 终端在宿主 root-channel 进程内，
+/// 经 `root_terminal_status` 单独探测）。
 #[tauri::command]
 pub async fn get_terminals(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -65,8 +66,6 @@ pub async fn pty_open(
     cmd: Option<String>,
     cols: u16,
     rows: u16,
-    // 以 root 运行（root 终端；Tauri 参数名 camelCase → 前端传 asRoot）
-    as_root: bool,
     // 新建独立持久会话（多终端；Tauri 参数名 camelCase → 前端传 persistent）
     persistent: bool,
     // 附接已有会话（多终端恢复；前端传 attachStreamId）
@@ -78,11 +77,9 @@ pub async fn pty_open(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container_name = sess.container_name.clone();
 
-    // 终端统一走容器 server（node 与 root 同一条通道）：root 由 server
-    // `pty.open{as_root=true}` 以容器 root 起 shell（server 进程本身即容器
-    // root，见实测 `root@chrome`），与 node 共用 persistent/attach/回放语义
-    // → 幂等（StrictMode remount 只 attach 不复建）。曾用宿主 exec 通道
-    // （bollard exec User=0），代价是不持久化、无 attach、每次新建会话。
+    // 终端走容器 server，承载容器默认用户会话（root 终端走宿主 root-channel
+    // 通道，见 commands/root.rs）。persistent/attach/回放语义 → 幂等
+    // （StrictMode remount 只 attach 不复建）。
     // 专用连接 + 握手（与 cli cmd_run 同构）。该连接是**双向信道**
     // （server 经 Raw 帧/Evt 反向推送 PTY 输出），session_id 仅日志/排障用。
     let (mut framed, _session_id) = connect_to_container(&container_name)
@@ -96,10 +93,6 @@ pub async fn pty_open(
         (String::new(), Vec::new())
     };
 
-    // 注意：`as_root` 参数不再随 pty.open 下发（协议 v2 删除 as_root 字段）——
-    // 新模型下 root 终端走宿主 root-channel 通道（C7 接线），server PTY 通道
-    // 只承载容器默认用户会话。参数保留供前端契约过渡，C7 起 root 分支改道。
-    let _ = as_root;
     let pty_open = PtyOpen {
         cmd,
         argv,
