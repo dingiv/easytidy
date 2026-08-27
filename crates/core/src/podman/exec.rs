@@ -143,6 +143,81 @@ impl Podman {
         let mut w = input.lock().await;
         w.write_all(data).await.map_err(Error::Io)
     }
+
+    /// 在运行中容器内以指定用户执行**一次性命令（非 tty）**：读 stdout/stderr
+    /// 至结束，返回退出码与两路输出。
+    ///
+    /// 用途：容器内 root 一次性操作（useradd 建号、fontconfig 接入、装包
+    /// 校验）——要退出码与 stderr 语义，不需要交互 TTY。
+    /// bollard 已按 `LogOutput` 变体完成 multiplex 头 demux，无需手写解析。
+    ///
+    /// 容器必须 running（未启动时 podman 拒绝 exec，返回 Api 错误）。
+    pub async fn exec_oneshot(&self, container: &str, user: &str, cmd: Vec<String>) -> Result<ExecOnce> {
+        let exec = self
+            .docker
+            .create_exec::<String>(
+                container,
+                CreateExecOptions {
+                    attach_stdin: Some(false),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(false),
+                    env: None,
+                    cmd: Some(cmd),
+                    privileged: None,
+                    detach_keys: None,
+                    user: Some(user.to_string()),
+                    working_dir: None,
+                },
+            )
+            .await
+            .map_err(Error::Api)?;
+
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let StartExecResults::Attached { output, .. } = self
+            .docker
+            .start_exec(&exec.id, Some(StartExecOptions { detach: false, tty: false, output_capacity: None }))
+            .await
+            .map_err(Error::Api)?
+        {
+            use futures::StreamExt;
+            let mut stream = output;
+            while let Some(item) = stream.next().await {
+                match item {
+                    Ok(log) => match log {
+                        bollard::container::LogOutput::StdOut { message } => stdout.push_str(&String::from_utf8_lossy(&message)),
+                        bollard::container::LogOutput::StdErr { message } => stderr.push_str(&String::from_utf8_lossy(&message)),
+                        _ => {}
+                    },
+                    Err(e) => return Err(Error::Api(e)),
+                }
+            }
+        }
+        let code = self.wait_exec_code(&exec.id).await?;
+        Ok(ExecOnce { code, stdout, stderr })
+    }
+
+    /// 等待 exec 退出码（流结束后状态落盘可能短暂延迟，短暂重试）。
+    pub async fn wait_exec_code(&self, exec_id: &str) -> Result<i32> {
+        for attempt in 0..10 {
+            if let Some(code) = self.exec_exit_code(exec_id).await? {
+                return Ok(code);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (attempt + 1) as u64)).await;
+        }
+        Err(Error::Connect(format!(
+            "exec {exec_id} 退出码未就绪（流已结束但 inspect 无 exit_code，状态落盘延迟超出重试窗口）"
+        )))
+    }
+}
+
+/// 非 tty 一次性 exec 的结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOnce {
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[cfg(test)]

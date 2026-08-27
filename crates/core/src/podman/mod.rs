@@ -18,9 +18,11 @@ use crate::models::{
     NetworkConfig, NetworkMode, PortMapping,
 };
 
-/// 宿主侧 exec PTY（root 终端通道；见 exec.rs）
+/// 宿主侧 exec（PTY 会话 + 非 tty 一次性；见 exec.rs）
 pub mod exec;
-pub use exec::ExecPty;
+pub use exec::{ExecOnce, ExecPty};
+/// 容器内用户准备（root 一次性 exec：useradd/fontconfig；见 user.rs）
+pub mod user;
 
 /// Podman 客户端封装。
 pub struct Podman {
