@@ -94,7 +94,7 @@ fn default_network() -> NetworkConfig {
     NetworkConfig::default()
 }
 
-/// `ContainerParams.user_home` 的 serde 默认值（旧配置无该字段 → 默认开启映射）。
+/// `ContainerParams.keep_id` 的 serde 默认值（旧配置无该字段 → 默认开启）。
 fn default_true() -> bool {
     true
 }
@@ -124,14 +124,26 @@ pub struct ContainerParams {
     /// 网络配置（默认 Host 模式）
     #[serde(default = "default_network")]
     pub network: NetworkConfig,
-    /// 用户一致性映射（keep-id：容器内 uid 与宿主对齐）。与 GUI 透传的
-    /// 关系：`gui=true` 的 flavor 展开时强制开启。
-    #[serde(default = "default_true")]
-    pub user_home: bool,
+    /// 用户命名空间 keep-id：开启时宿主登录 uid ↔ 容器同 uid 锁死
+    /// （podman `userns.keep-id`，docs/12）。与 GUI 透传的关系：
+    /// `gui=true` 的 flavor 展开时强制开启。
+    /// 旧字段名 `user_home`（用户一致性映射）经 alias 无缝读入。
+    #[serde(default = "default_true", alias = "user_home")]
+    pub keep_id: bool,
+    /// 容器默认用户 uid（`None` = 创建时取宿主登录 uid）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_uid: Option<u32>,
+    /// 容器默认用户 gid（`None` = 创建时取宿主登录 gid）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_gid: Option<u32>,
+    /// 容器内用户名（可选；设置后创建/重建时经宿主 root exec 幂等 useradd
+    /// 建号，否则容器仅按 uid/gid 运行、可能无 passwd 条目）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_name: Option<String>,
 }
 
 impl Default for ContainerParams {
-    /// 与 serde 默认保持一致：`user_home` 默认 true（用户一致性映射开启）。
+    /// 与 serde 默认保持一致：`keep_id` 默认 true；用户字段缺省 None（宿主值）。
     fn default() -> Self {
         Self {
             image: String::new(),
@@ -139,7 +151,10 @@ impl Default for ContainerParams {
             entry_args: Vec::new(),
             mounts: Vec::new(),
             network: NetworkConfig::default(),
-            user_home: true,
+            keep_id: true,
+            user_uid: None,
+            user_gid: None,
+            user_name: None,
         }
     }
 }
@@ -197,11 +212,12 @@ pub struct ContainerConfigView {
     /// 补的 PATH/HOSTNAME/TERM/HOME——GUI 对比时需过滤后子集比较）
     #[serde(default)]
     pub env: Vec<String>,
-    /// 容器进程用户（inspect `Config.User`；keep-id 下为 "0:0"，未设则 None）
+    /// 容器进程用户（inspect `Config.User`；新模型下为配置值 `<uid>:<gid>`，
+    /// 旧 root 容器为 "0:0"，未设则 None）
     #[serde(default)]
     pub user: Option<String>,
     /// userns 模式（inspect `HostConfig.UsernsMode`；keep-id 容器实际回显
-    /// 可能为 "private" 或 None——语义以 `user_home` 配置 + docs/12 为准）
+    /// 可能为 "private" 或 None——语义以 `keep_id` 配置 + docs/12 为准）
     #[serde(default)]
     pub userns_mode: Option<String>,
 }
@@ -226,7 +242,10 @@ persistent = true
         assert_eq!(config.params.network.mode, NetworkMode::Host);
         assert!(config.params.network.ports.is_empty());
         assert!(config.env.is_empty());
-        assert!(config.params.user_home);
+        assert!(config.params.keep_id);
+        assert!(config.params.user_uid.is_none());
+        assert!(config.params.user_gid.is_none());
+        assert!(config.params.user_name.is_none());
         // flatten 形状：基座字段平铺在外层（旧文件直接兼容）
         assert_eq!(config.params.image, "alpine:latest");
         assert_eq!(config.params.entry.as_deref(), Some("/bin/sh"));
@@ -270,8 +289,8 @@ persistent = true
     }
 
     #[test]
-    fn test_user_home_serde_default_true() {
-        // 旧配置文件（无 user_home 字段）→ 默认 true（用户一致性映射开启）
+    fn test_keep_id_serde_default_true() {
+        // 旧配置文件（无 keep_id 字段）→ 默认 true
         let toml_str = r#"
 name = "legacy"
 image = "alpine:latest"
@@ -279,21 +298,60 @@ silent_boot = false
 persistent = true
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.params.user_home, "旧配置缺失 user_home 字段应默认 true");
+        assert!(config.params.keep_id, "旧配置缺失 keep_id 字段应默认 true");
 
-        // 显式 false → 关闭映射（非 GUI 容器可选项）
+        // 旧字段名 user_home 经 alias 读入
         let toml_str = r#"
-name = "no-home"
+name = "legacy-name"
 image = "alpine:latest"
 silent_boot = false
 persistent = true
 user_home = false
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
-        assert!(!config.params.user_home);
+        assert!(!config.params.keep_id, "旧字段名 user_home 应经 alias 读入");
 
-        // Rust 侧 Default 与 serde 默认一致（struct literal 走 ..Default::default() 的入口同语义）
-        assert!(ContainerConfig::default().params.user_home);
+        // 显式 false → 关闭 keep-id（非 GUI 容器可选项）
+        let toml_str = r#"
+name = "no-keep"
+image = "alpine:latest"
+silent_boot = false
+persistent = true
+keep_id = false
+"#;
+        let config: ContainerConfig = toml::from_str(toml_str).unwrap();
+        assert!(!config.params.keep_id);
+
+        // Rust 侧 Default 与 serde 默认一致
+        assert!(ContainerConfig::default().params.keep_id);
+    }
+
+    #[test]
+    fn test_user_fields_serde_default_none() {
+        // 缺省 → None（创建时取宿主值）；显式值往返不丢
+        let toml_str = r#"
+name = "uid"
+image = "alpine:latest"
+silent_boot = false
+persistent = true
+user_uid = 1000
+user_gid = 1000
+user_name = "tidy"
+"#;
+        let config: ContainerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.params.user_uid, Some(1000));
+        assert_eq!(config.params.user_gid, Some(1000));
+        assert_eq!(config.params.user_name.as_deref(), Some("tidy"));
+
+        // skip_serializing_if：None 字段不落盘
+        let bare = ContainerConfig {
+            name: "bare".to_string(),
+            ..Default::default()
+        };
+        let toml_str = toml::to_string(&bare).unwrap();
+        assert!(!toml_str.contains("user_uid"));
+        assert!(!toml_str.contains("user_gid"));
+        assert!(!toml_str.contains("user_name"));
     }
 
     #[test]
@@ -317,7 +375,10 @@ user_home = false
                         protocol: "tcp".to_string(),
                     }],
                 },
-                user_home: true,
+                keep_id: true,
+                user_uid: Some(1000),
+                user_gid: Some(1000),
+                user_name: Some("tidy".to_string()),
             },
             env: vec!["DISPLAY=:0".to_string()],
             silent_boot: true,

@@ -41,3 +41,6 @@ easytidy-shared = { path = "../shared" }
 # （$XDG_DATA_HOME/easytidy/bin 作为历史兼容回退由 server_binary_path() 内部处理。）
 [package.metadata.shared]
 SERVER_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
+# root 通道进程（宿主用户身份，rootless socket exec --user 0 持有容器内 root
+# shell）。与 SERVER_BIN 同构：dev 构建树 / 随安装包发布到 /usr/bin。
+ROOT_CHANNEL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }

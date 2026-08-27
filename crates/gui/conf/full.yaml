@@ -28,7 +28,7 @@ persistent: true
 
 # 用户一致性映射（keep-id：容器内 uid 与宿主对齐，应用默认以 node 用户运行）
 # 关闭后容器以 root 运行 + 移除 $HOME 挂载（GUI 应用将无法访问宿主显示 socket）
-user_home: true
+keep_id: true
 
 # 路径映射（bind mount，每条 = 宿主路径 → 容器路径 → 是否只读）
 mounts:

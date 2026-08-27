@@ -266,10 +266,10 @@ pub fn keep_id_create_body(
     exposed_ports: Option<std::collections::HashMap<String, std::collections::HashMap<(), ()>>>,
     port_bindings: Option<Value>,
     working_dir: Option<String>,
-    // 容器默认用户（PID 1 与 podman exec 的默认身份）；None = "0:0"（root，
-    // 旧行为）。node 化容器传 "<uid>:<gid>"——node 用户经 init 镜像烘焙预置
+    // 容器默认用户（PID 1 与 podman exec 的默认身份）；None = "0:0"（root）。
+    // 新模型恒传 "<uid>:<gid>"——server 直接以该用户运行（无 root、无 su）
     default_user: Option<&str>,
-    // keep-id 用户命名空间（user_home 映射）；false = 无 userns（root 容器）
+    // keep-id 用户命名空间；false = 无 userns（容器内 uid 落宿主 subuid 段）
     keep_id: bool,
 ) -> Value {
     // libpod SpecGenerator 的 env 是 map[string]string（Docker compat 才是数组）
@@ -307,10 +307,8 @@ pub fn keep_id_create_body(
         "image": image,
         // libpod SpecGenerator 用 "command"（Docker compat 才是 "cmd"）
         "command": cmd,
-        // keep-id 下容器进程默认被设为 uid 1000（keep-id 值）——旧模型显式
-        // "0:0" 让 server 以容器 root 运行（装包能力，应用经 su 降权）；
-        // 新模型传 "<uid>:<gid>"：server 直接以 node 运行（用户已由 init
-        // 镜像烘焙预置），root 需求走宿主 exec 通道
+        // 新模型传 "<uid>:<gid>"：server 直接以该用户运行（无 root、无 su）；
+        // None 保留 "0:0" 仅作无身份场景的回退（create_with_config 已禁止）
         "user": default_user.unwrap_or("0:0"),
         "env": env_map,
         "labels": labels,
@@ -322,7 +320,7 @@ pub fn keep_id_create_body(
         "port_bindings": port_bindings,
         "working_dir": working_dir,
     });
-    // libpod 专属：keep-id（user_home 映射容器）。注意：字段放**顶层** userns
+    // libpod 专属：keep-id 用户命名空间。注意：字段放**顶层** userns
     // （实测 namespaces.userns 被忽略）。
     // 真实映射语义（实测文件属主，2026-08-07；/proc/self/uid_map 字面
     // 不代表最终属主）：容器 uid 1000（node）= 宿主登录用户（1000）；

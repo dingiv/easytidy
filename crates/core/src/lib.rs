@@ -166,6 +166,30 @@ pub fn server_binary_path() -> Result<PathBuf> {
     })
 }
 
+/// 解析 root-channel 二进制路径（宿主侧）。
+///
+/// 与 [`server_binary_path`] 完全同构：`ROOT_CHANNEL_BIN` namespace
+/// dev/prod 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。
+/// 供 `root_channel::ensure_running`（GUI/CLI 共用）spawn 用。
+pub fn root_channel_binary_path() -> Result<PathBuf> {
+    let loader = easytidy_shared::loader!();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.extend(loader.ns_candidates("ROOT_CHANNEL_BIN", "easytidy-root-channel"));
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-root-channel"));
+    }
+    candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
+        let tried = candidates
+            .iter()
+            .map(|p| format!("  {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Error::Connect(format!(
+            "easytidy-root-channel 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
+        ))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

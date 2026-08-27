@@ -31,7 +31,7 @@ pub struct ConfTemplate {
     #[serde(flatten)]
     pub config: ContainerConfig,
     /// GUI 透传(展开时注入宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR
-    /// + /tmp/.X11-unix 与 $XDG_RUNTIME_DIR 挂载 + 字体图标只读挂载 + user_home=true)
+    /// + /tmp/.X11-unix 与 $XDG_RUNTIME_DIR 挂载 + 字体图标只读挂载 + keep_id=true)
     #[serde(default)]
     pub gui: bool,
     /// 创建后按序执行的安装命令(本轮只存不执行;执行链路与 data 启动脚本
@@ -80,7 +80,7 @@ mod tests {
         let json = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
             "entry":"google-chrome-stable","entry_args":[],
-            "mounts":[],"network":{"mode":"host","ports":[]},"user_home":true,
+            "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
             "env":[],"silent_boot":false,"persistent":true
         }"#;
         let t: ConfTemplate = serde_json::from_str(json).unwrap();
@@ -123,7 +123,7 @@ mod tests {
         let json_old = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
             "entry":"google-chrome-stable","entry_args":[],
-            "mounts":[],"network":{"mode":"host","ports":[]},"user_home":true,
+            "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
             "env":[],"silent_boot":false,"persistent":true
         }"#;
         let t_old: ConfTemplate = serde_json::from_str(json_old).unwrap();
@@ -132,7 +132,7 @@ mod tests {
         let json_new = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
             "entry":"google-chrome-stable","entry_args":[],
-            "mounts":[],"network":{"mode":"host","ports":[]},"user_home":true,
+            "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
             "env":[],"silent_boot":false,"persistent":true,
             "gui":true
         }"#;

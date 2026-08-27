@@ -5,7 +5,7 @@
 # (见 core::conf_template::ConfTemplate::build_config + inject_gui_passthrough)。
 #
 # GUI 透传开关 = gui: true（展开时宿主 env 自动注入 + 字体图标只读挂载 + /tmp/.X11-unix +
-# $XDG_RUNTIME_DIR 挂载 + user_home 强开 keep-id）。
+# $XDG_RUNTIME_DIR 挂载 + 强开 keep_id）。
 # entry_args 加 --ozone-platform=wayland：Wayland 会话下 Chrome 走 Wayland 而非 X11,
 # 避免 X11 链路上的 XAUTHORITY 不可达 / dbus 系统总线缺失导致的初始化失败。
 #
@@ -20,7 +20,7 @@ entry_args:
   - --ozone-platform=wayland  # Wayland 会话下避免 X11 初始化失败
 silent_boot: false
 persistent: true
-user_home: true
+keep_id: true
 
 mounts:
   # X11 socket（Wayland 会话下兜底兼容 X11 应用）

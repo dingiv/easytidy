@@ -31,7 +31,7 @@ pub struct Flavor {
     pub params: ContainerParams,
     /// GUI 应用：展开时自动注入宿主显示环境（DISPLAY/WAYLAND_DISPLAY/
     /// XAUTHORITY）+ 挂载 /tmp 与 $XDG_RUNTIME_DIR（X11/Wayland socket
-    /// 透传）+ 字体/图标只读透传；并强制 user_home
+    /// 透传）+ 字体/图标只读透传；并强制 keep_id
     #[serde(default)]
     pub gui: bool,
     /// 容器内按序执行的安装命令（经 server PTY 以 `bash -c` 执行）
@@ -148,8 +148,8 @@ impl Flavor {
     /// - 字体/图标透传（只读）：`/usr/share/fonts`、`$HOME/.local/share/fonts`、
     ///   `/usr/share/icons`、`$HOME/.local/share/icons`（容器内 GUI 应用中文渲染
     ///   与图标主题需要宿主字体；distrobox 同类挂载）
-    /// - 用户一致性映射（distrobox 式）：gui=true 强制 `user_home=true`，
-    ///   由 create_with_config 映射 `$HOME` + 注入 EASYTIDY_USER_*
+    /// - 用户命名空间（distrobox 式）：gui=true 强制 `keep_id=true`，
+    ///   由 create_with_config 映射 `$HOME` + 注入身份提示 env
     /// - GPU 透传（--gpus=all + NVIDIA_* env）与 apparmor=unconfined 属 P1（需宿主
     ///   nvidia-container-toolkit），此处仅做纯显示透传，GUI 应用以软件渲染可用。
     ///
@@ -279,8 +279,8 @@ pub fn inject_gui_passthrough(params: &mut ContainerParams, env: &mut Vec<String
             }
         }
     }
-    // 6. gui=true 恒开用户一致性映射(GUI 应用需以宿主用户身份读写宿主挂载目录)
-    params.user_home = true;
+    // 6. gui=true 恒开 keep-id(GUI 应用需以宿主用户身份读写宿主挂载目录)
+    params.keep_id = true;
 }
 
 // ============================================================================
@@ -327,7 +327,7 @@ pub fn lineage_status(config: &ContainerConfig) -> Option<LineageStatus> {
 /// 从来源模板重新同步容器配置（flavor = 实例配置批量管理的核心动作）：
 /// 重新展开 → 保留实例侧字段 → 重建容器 → 更新注册。
 ///
-/// - 基座（image/entry/entry_args/mounts/network/user_home）与 env 取模板
+/// - 基座（image/entry/entry_args/mounts/network/keep_id/user_*）与 env 取模板
 ///   重新展开结果（env 重解析当前宿主显示环境）
 /// - `silent_boot` / `persistent` 保留实例当前值（用户本地决策不随模板走）
 ///

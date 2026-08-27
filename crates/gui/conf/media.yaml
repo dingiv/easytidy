@@ -15,7 +15,7 @@ entry_args:
 silent_boot: false
 persistent: true
 
-user_home: true
+keep_id: true
 
 mounts:
   # 数据盘：读写

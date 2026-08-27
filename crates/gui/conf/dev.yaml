@@ -2,7 +2,7 @@
 #
 # 字段对齐 crates/gui/ui/types/index.ts 的 ContainerConfig 接口：
 #   name / image / entry / entry_args / silent_boot / persistent /
-#   mounts / network / env / user_home / flavor
+#   mounts / network / env / keep_id / flavor
 #
 # 加载路径：MasterView 「配置编辑器」 → ContainerConfigEditor 顶部"加载 YAML"
 # → 此文件被解析 → 表单预填 → 提交 env_new(config) 创建并启动容器。
@@ -17,7 +17,7 @@ silent_boot: false              # 宿主开机时不静默拉起
 persistent: true                # 容器常驻：catatonit + server 托管生命周期
 
 # 用户一致性映射（keep-id）：容器内 uid 与宿主对齐，应用默认以 node 运行
-user_home: true
+keep_id: true
 
 # 路径映射（bind mount）
 mounts:

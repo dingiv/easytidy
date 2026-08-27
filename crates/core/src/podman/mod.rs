@@ -169,9 +169,10 @@ impl Podman {
     /// - 标签: manager=easytidy + easytidy.name=<name>
     /// - 网络: `Host` → `network_mode = "host"`（端口映射无意义，忽略并告警）；
     ///   `Mapped` → 不设 network_mode（podman 默认 bridge）+ ExposedPorts + PortBindings
-    /// - 用户一致性映射（`config.params.user_home`，distrobox 式）：`$HOME` → `$HOME`（rw）
-    ///   与注入 `EASYTIDY_USER_NAME/UID/GID/HOME`，容器内 server 据此创建同名用户并
-    ///   经 su 拉起应用（见 crates/server）；`host_user()` 失败时跳过并告警
+    /// - 容器默认用户（新模型）：`User` 字段 = 配置 uid:gid（缺省 = 宿主登录用户），
+    ///   server 直接以该用户运行（无 root、无 su，见 crates/server）
+    /// - keep-id（`config.params.keep_id`）：`$HOME` → `$HOME`（rw）+ 注入
+    ///   `EASYTIDY_USER_NAME`/`EASYTIDY_HOME` 身份提示 env（server 身份自发现用）
     ///
     /// 镜像不存在则先拉取。
     pub async fn create_with_config(
@@ -234,34 +235,37 @@ impl Podman {
             });
         }
 
-        // 用户一致性映射（distrobox 式，config.params.user_home）：映射宿主用户目录 +
-        // 注入 EASYTIDY_USER_*（容器内 server 据此创建同名/同 uid/gid 用户，
-        // 应用经 su 以该用户运行而非 root）。
-        //
-        // host_user() 失败（无法解析用户名/home）时仅告警并跳过——容器仍以 root
-        // 运行，行为与旧版一致。
+        // 容器默认用户解析（新模型）：配置值优先，缺省取宿主登录用户；
+        // 均不可得 → 报错（不再静默回退 root——root 模型已移除）
+        let host = crate::userenv::host_user();
+        let (user_uid, user_gid) = resolve_container_user(&config.params, host.as_ref())?;
+
         let mut env = config.env.clone();
-        if config.params.user_home {
-            if let Some(user) = crate::userenv::host_user() {
-                if !mount_has_target(&mounts, &user.home) && Path::new(&user.home).exists() {
-                    mounts.push(Mount {
-                        typ: Some(MountTypeEnum::BIND),
-                        source: Some(user.home.clone()),
-                        target: Some(user.home.clone()),
-                        read_only: Some(false),
-                        ..Default::default()
-                    });
-                }
-                // 容器内用户固定名 node（server 侧），仅需 uid/gid 对齐宿主
-                env.push(format!("EASYTIDY_USER_UID={}", user.uid));
-                env.push(format!("EASYTIDY_USER_GID={}", user.gid));
-            } else {
-                tracing::warn!(
-                    "容器 {}：user_home=true 但无法探测宿主用户（host_user() 失败），\
-                     跳过用户映射，容器内以 root 运行",
-                    name
-                );
+        if let Some(host) = host {
+            // keep-id：宿主 home 补挂（容器内 server 以宿主 uid 运行，读写宿主
+            // home 属主自然一致；已挂载或目录不存在则跳过）
+            if config.params.keep_id
+                && !mount_has_target(&mounts, &host.home)
+                && Path::new(&host.home).exists()
+            {
+                mounts.push(Mount {
+                    typ: Some(MountTypeEnum::BIND),
+                    source: Some(host.home.clone()),
+                    target: Some(host.home.clone()),
+                    read_only: Some(false),
+                    ..Default::default()
+                });
             }
+            // 身份提示 env（server 侧身份自发现的兜底输入）：
+            // - EASYTIDY_HOME：未配置用户名时 server 的 HOME 回退值（keep-id 容器
+            //   期望应用数据落宿主 home）
+            // - EASYTIDY_USER_NAME：配置用户名时传入（与 useradd 命名一致）
+            if config.params.user_name.is_none() {
+                env.push(format!("EASYTIDY_HOME={}", host.home));
+            }
+        }
+        if let Some(name) = &config.params.user_name {
+            env.push(format!("EASYTIDY_USER_NAME={name}"));
         }
 
         // 构建 HostConfig
@@ -344,17 +348,14 @@ impl Podman {
             server_cmd.push(entry_cmd);
         }
 
-        // 用户一致性映射（user_home=true）→ keep-id 必须走 libpod 端点
-        // （Docker compat 端点不支持 userns.keep-id，实测；见 libpod.rs）。
-        // keep-id 使容器内 uid 1000（node 用户）= 宿主当前登录用户：
+        // 容器默认用户（新模型）：User = <uid>:<gid>，server 直接以该用户运行
+        // （无 root、无 su）。keep-id 时宿主登录 uid ↔ 容器同 uid 锁死（docs/12）。
+        let user_spec = format!("{user_uid}:{user_gid}");
+
+        // keep-id → 必须走 libpod 端点（Docker compat 端点不支持 userns.keep-id，
+        // 实测；见 libpod.rs）。keep-id 使容器内 uid 1000 = 宿主当前登录用户：
         // 宿主 home 读写 / /run/user/1000（显示 socket）自然可达（GUI 窗口可用）。
-        // ⚠️ 最终模型（2026-08-17 定案）：
-        // - 容器 User = root（PID 1 init 与 server 均 root，OCI 单 User 字段；
-        //   podman exec 默认 root 是容器程序限制，无法单独设默认用户）
-        // - keep-id：宿主 1000 ↔ 容器 1000（easytidy 用户，server 启动时创建）
-        // - server(root) 拉起子进程（bash 等）经 fork+exec+setuid+setgid
-        //   降权到 easytidy（见 server services/pty.rs，不再经 su）
-        if config.params.user_home {
+        if config.params.keep_id {
             let libpod = crate::libpod::Libpod::new().await?;
             // mounts / port_bindings 已在 host_config 中（早于本分支 move），从 host_config 取
             let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
@@ -375,15 +376,15 @@ impl Podman {
                 exposed_ports.clone(),
                 port_bindings_json,
                 None,
-                None,
+                Some(user_spec.as_str()),
                 true,
             );
             let id = libpod.create_container(name, body).await?;
             tracing::info!("容器 {} 创建成功（ID: {}，keep-id）", name, id);
             return Ok(id);
         }
-        // 非 user_home 路径同样走 libpod 端点创建（仅支持 podman；
-        // 不带 userns，容器以 root 运行，行为与旧版一致）
+        // 非 keep-id 路径同样走 libpod 端点创建（仅支持 podman；
+        // 不带 userns，容器内 uid 落在宿主 subuid 段，User 字段仍为配置 uid:gid）
         let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
             .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
         let port_bindings_json = match &host_config.port_bindings {
@@ -403,7 +404,7 @@ impl Podman {
             exposed_ports,
             port_bindings_json,
             None,
-            None,
+            Some(user_spec.as_str()),
             false,
         );
         let id = libpod.create_container(name, body).await?;
@@ -578,10 +579,10 @@ impl Podman {
             .and_then(|c| c.env.clone())
             .unwrap_or_default();
 
-        // 容器进程用户（keep-id 分支 create 时写 "0:0"）
+        // 容器进程用户（新模型 = 配置值 <uid>:<gid>；旧 root 容器为 "0:0"）
         let user = info.config.as_ref().and_then(|c| c.user.clone());
 
-        // userns 模式（keep-id 容器实际可能回显 "private"/None——语义以 user_home + docs/12 为准）
+        // userns 模式（keep-id 容器实际可能回显 "private"/None——语义以 keep_id + docs/12 为准）
         let userns_mode = info.host_config.as_ref().and_then(|h| h.userns_mode.clone());
 
         Ok(ContainerConfigView {
@@ -843,6 +844,33 @@ fn mount_has_target(mounts: &[bollard::models::Mount], target: &str) -> bool {
     mounts.iter().any(|m| m.target.as_deref() == Some(target))
 }
 
+/// 解析容器默认用户 uid/gid（新模型）：配置值优先，缺省取宿主登录用户。
+///
+/// 两者均不可得（未配置 + `host_user()` 探测失败）→ `Error::Config`——
+/// 不再静默回退 root（root 模型已移除，`user="0:0"` 创建被禁止）。
+fn resolve_container_user(
+    params: &ContainerParams,
+    host: Option<&crate::userenv::HostUser>,
+) -> Result<(u32, u32)> {
+    let uid = params
+        .user_uid
+        .or_else(|| host.map(|h| h.uid))
+        .ok_or_else(|| {
+            Error::Config(
+                "无法确定容器默认用户：未配置 user_uid 且宿主用户探测失败（host_user() = None）".to_string(),
+            )
+        })?;
+    let gid = params
+        .user_gid
+        .or_else(|| host.map(|h| h.gid))
+        .ok_or_else(|| {
+            Error::Config(
+                "无法确定容器默认用户：未配置 user_gid 且宿主用户探测失败（host_user() = None）".to_string(),
+            )
+        })?;
+    Ok((uid, gid))
+}
+
 /// 校验 bind mount 配置（bind 类型要求宿主路径已存在）。
 fn validate_mount(m: &MountConfig) -> Result<()> {
     if m.host_path.is_empty() {
@@ -862,4 +890,95 @@ fn validate_mount(m: &MountConfig) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::userenv::HostUser;
+
+    fn host(uid: u32, gid: u32) -> HostUser {
+        HostUser {
+            name: "tester".into(),
+            uid,
+            gid,
+            home: "/home/tester".into(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_container_user_config_wins() {
+        // 配置值优先于宿主值
+        let params = ContainerParams {
+            user_uid: Some(1001),
+            user_gid: Some(1002),
+            ..Default::default()
+        };
+        assert_eq!(resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(), (1001, 1002));
+    }
+
+    #[test]
+    fn test_resolve_container_user_host_fallback() {
+        // 缺省 → 宿主登录 uid/gid
+        let params = ContainerParams::default();
+        assert_eq!(resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(), (1000, 1000));
+    }
+
+    #[test]
+    fn test_resolve_container_user_mixed() {
+        // uid 配置、gid 缺省 → 混用（uid 配置值 + gid 宿主值）
+        let params = ContainerParams {
+            user_uid: Some(1001),
+            ..Default::default()
+        };
+        assert_eq!(resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(), (1001, 1000));
+    }
+
+    #[test]
+    fn test_resolve_container_user_both_missing() {
+        // 未配置 + 宿主探测失败 → 报错（禁止静默回退 root）
+        let params = ContainerParams::default();
+        let err = resolve_container_user(&params, None).unwrap_err();
+        assert!(matches!(err, Error::Config(_)));
+        assert!(err.to_string().contains("无法确定容器默认用户"));
+    }
+
+    #[test]
+    fn test_libpod_body_user_field() {
+        // keep_id_create_body：default_user 透传 + keep-id 时顶层 userns 块
+        let body = crate::libpod::keep_id_create_body(
+            "c1",
+            "alpine:latest",
+            vec!["/bin/sh".into()],
+            Vec::new(),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            Some("1000:1000"),
+            true,
+        );
+        assert_eq!(body["user"], "1000:1000");
+        assert_eq!(body["userns"]["nsmode"], "keep-id");
+
+        // default_user = None → "0:0"（旧行为保留，仅供无身份场景）
+        let body = crate::libpod::keep_id_create_body(
+            "c1",
+            "alpine:latest",
+            vec!["/bin/sh".into()],
+            Vec::new(),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        );
+        assert_eq!(body["user"], "0:0");
+        assert!(body.get("userns").is_none());
+    }
 }
