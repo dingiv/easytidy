@@ -69,11 +69,16 @@ async fn rebuild_applies_mounts_and_ports() {
         .unwrap();
 
     // 配置：一条 bind mount + 一个 mapped 端口（8080 类随机空闲端口 → 80/tcp）
+    // + 显式容器默认用户（新身份模型：uid/gid 缺省 = 宿主登录用户；
+    // 此处显式设 1000:1000 断言 inspect 回显——与宿主 uid 解耦，
+    // 保证无登录用户环境下 e2e 仍成立）
     let host_port = free_host_port();
     let config = ContainerConfig {
         name: name.clone(),
         params: easytidy_core::models::ContainerParams {
             image: "docker.io/library/alpine:latest".to_string(),
+            user_uid: Some(1000),
+            user_gid: Some(1000),
             mounts: vec![MountConfig {
                 host_path: src_dir.to_string_lossy().to_string(),
                 container_path: "/data".to_string(),
@@ -200,6 +205,16 @@ async fn rebuild_applies_mounts_and_ports() {
         println!("[inspect] State.Running = {running}");
         check(running, "rebuild 后容器应处于运行状态")?;
 
+        // 验证 4：新身份模型——容器默认用户 = 配置的 <uid>:<gid>（inspect
+        // Config.User 回显；不再恒为 "0:0"）。路径同 core inspect_config
+        let user = info
+            .config
+            .as_ref()
+            .and_then(|c| c.user.as_deref())
+            .unwrap_or_default();
+        println!("[inspect] Config.User = {user}");
+        check(user == "1000:1000", "inspect Config.User 应回显配置的 1000:1000")?;
+
         Ok(())
     }
     .await;
@@ -210,4 +225,138 @@ async fn rebuild_applies_mounts_and_ports() {
     }
 
     result.expect("e2e 验证失败");
+}
+
+/// e2e（`#[ignore]`，需真实 podman + 可运行容器）：新身份模型的容器内
+/// 用户准备与 root 通道。
+///
+/// 验证点：
+/// 1. 命名用户（`user_name` 有值）经 `prepare_container` 建号 → 容器内
+///    `getent passwd <name>` 回显正确 uid/gid/home；**幂等**（二次 prepare
+///    不报错、不重复建号）
+/// 2. root 通道一次性 exec（`exec_oneshot` user="0"）：容器内 `id -u` == 0
+///    （root 身份可用）
+///
+/// 运行方式：
+/// ```bash
+/// systemctl --user start podman.socket
+/// cargo test -p easytidy --test rebuild_e2e -- --ignored --nocapture
+/// ```
+#[tokio::test]
+#[ignore = "需要真实 podman socket + 可运行容器（alpine）"]
+async fn identity_prepare_user_and_root_exec() {
+    let podman = Podman::connect()
+        .await
+        .expect("无法连接 podman socket（请先启用 podman.socket user unit）");
+
+    let tmp = tempfile::TempDir::new().expect("创建临时目录失败");
+    let name = unique_name("easytidy-identity");
+    let user_name = "tidye2e";
+    let uid: u32 = 1011;
+    let gid: u32 = 1011;
+
+    // 假 server 二进制（容器内 sleep 保持运行）
+    let fake_server = tmp.path().join("easytidy-server");
+    fs::write(&fake_server, "#!/bin/sh\nsleep 300\n").unwrap();
+    fs::set_permissions(&fake_server, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+        .unwrap();
+
+    // 配置：命名用户 + 显式 uid/gid（keep-id 开——与宿主 uid 无关，
+    // 直接断言容器内 uid；GUI 容器才需要与宿主对齐，此处验证建号本身）
+    let config = ContainerConfig {
+        name: name.clone(),
+        params: easytidy_core::models::ContainerParams {
+            image: "docker.io/library/alpine:latest".to_string(),
+            keep_id: false,
+            user_uid: Some(uid),
+            user_gid: Some(gid),
+            user_name: Some(user_name.to_string()),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let config_file = ConfigFile::with_path(tmp.path().join("config.toml"));
+    config_file.register_container(config.clone()).expect("注册容器配置失败");
+
+    let result: Result<(), String> = async {
+        podman
+            .create_with_config(&name, &config.params.image, &fake_server, &config)
+            .await
+            .map_err(|e| format!("创建容器失败：{e}"))?;
+        println!("[create] 容器 {name}");
+        podman.start(&name).await.map_err(|e| format!("启动容器失败：{e}"))?;
+        // 等待 server/容器就绪（alpine 镜像首启需拉取/解压）
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+        // 1. 容器内准备（fontconfig + useradd 建号）
+        podman
+            .prepare_container(&name, &config.params)
+            .await
+            .map_err(|e| format!("prepare_container 失败：{e}"))?;
+        println!("[prepare] 容器内用户准备完成");
+
+        // 2. 验证建号：getent passwd <name>（root exec，非 tty 一次性）
+        let getent = podman
+            .exec_oneshot(
+                &name,
+                "0",
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("getent passwd {user_name}"),
+                ],
+            )
+            .await
+            .map_err(|e| format!("getent exec 失败：{e}"))?;
+        println!("[getent] 退出码={} stdout={:?}", getent.code, getent.stdout.trim());
+        check(getent.code == 0, "getent passwd 退出码应为 0（用户已建号）")?;
+        // getent 行格式：name:passwd:uid:gid:gecos:home:shell
+        let fields: Vec<&str> = getent.stdout.trim().split(':').collect();
+        check(fields.len() >= 7, "getent 行格式应至少 7 段")?;
+        check(fields[0] == user_name, "passwd 条目名应匹配 user_name")?;
+        check(fields[2] == uid.to_string(), "passwd 条目 uid 应匹配配置")?;
+        check(fields[3] == gid.to_string(), "passwd 条目 gid 应匹配配置")?;
+        check(fields[5] == format!("/home/{user_name}"), "passwd 条目 home 应为 /home/<name>")?;
+
+        // 3. 幂等：二次 prepare 不报错、不改变建号结果
+        podman
+            .prepare_container(&name, &config.params)
+            .await
+            .map_err(|e| format!("二次 prepare_container（幂等）失败：{e}"))?;
+        let getent2 = podman
+            .exec_oneshot(
+                &name,
+                "0",
+                vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    format!("getent passwd {user_name} | wc -l"),
+                ],
+            )
+            .await
+            .map_err(|e| format!("二次 getent exec 失败：{e}"))?;
+        check(
+            getent2.stdout.trim() == "1",
+            "二次 prepare 后该用户仍应恰好 1 条 passwd 记录（幂等，不重复建号）",
+        )?;
+
+        // 4. root 通道一次性 exec：容器内 id -u == 0（root 身份可用）
+        let idu = podman
+            .exec_oneshot(&name, "0", vec!["id".to_string(), "-u".to_string()])
+            .await
+            .map_err(|e| format!("id -u exec 失败：{e}"))?;
+        println!("[id -u] 退出码={} stdout={:?}", idu.code, idu.stdout.trim());
+        check(idu.code == 0, "id -u 退出码应为 0")?;
+        check(idu.stdout.trim() == "0", "容器内 root exec 的 id -u 应为 0")?;
+
+        Ok(())
+    }
+    .await;
+
+    // 清理（尽力）
+    if let Err(e) = podman.remove(&name, true).await {
+        println!("[cleanup] 删除容器失败（忽略）：{e}");
+    }
+
+    result.expect("identity e2e 验证失败");
 }

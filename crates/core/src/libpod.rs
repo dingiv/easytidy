@@ -302,6 +302,36 @@ pub fn keep_id_create_body(
             })
         })
         .collect();
+    // libpod SpecGenerator 的端口字段是 `portmappings`（扁平 []PortMapping，
+    // host_port/container_port 为**数字** uint16）；入参沿用 Docker PortBinding
+    // 嵌套形状（{"PORT/PROTO": [{HostIp, HostPort}]，bollard serde 标签为
+    // **PascalCase**，HostPort 为字符串），在此归一化——字段名/形状不对时
+    // libpod 静默忽略（曾按小写键取值 → host_port 全落空 → podman 随机分配，
+    // 2026-08-27 socket 实测）。
+    let portmappings: Vec<Value> = match port_bindings {
+        Some(pb) => pb
+            .as_object()
+            .into_iter()
+            .flatten()
+            .flat_map(|(key, val)| {
+                let (port, proto) = key.split_once('/').unwrap_or((key, "tcp"));
+                let container_port = port.parse::<u16>().unwrap_or(0);
+                val.as_array().into_iter().flatten().map(move |b| {
+                    let host_port = b.get("HostPort").and_then(|v| {
+                        v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+                    }).unwrap_or(0);
+                    json!({
+                        "host_ip": b.get("HostIp").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                        "host_port": host_port,
+                        "container_port": container_port,
+                        "protocol": proto,
+                    })
+                })
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
     let mut body = json!({
         "name": name,
         "image": image,
@@ -317,7 +347,7 @@ pub fn keep_id_create_body(
         "mounts": podman_mounts,
         "network_mode": network_mode,       // Some("host") 或 null（bridge 默认）
         "exposed_ports": exposed_ports,
-        "port_bindings": port_bindings,
+        "portmappings": portmappings,
         "working_dir": working_dir,
     });
     // libpod 专属：keep-id 用户命名空间。注意：字段放**顶层** userns

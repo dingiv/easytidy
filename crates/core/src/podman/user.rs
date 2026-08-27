@@ -22,11 +22,31 @@ use super::Podman;
 ///
 /// 工具探测在脚本内完成（`command -v`）：debian 系 useradd/groupadd，
 /// alpine/busybox 回退 adduser/addgroup——宿主无法预知容器内工具。
+///
+/// **运行时/podman 数字占位条目（2026-08-27 实测）**：容器以数字
+/// `<uid>:<gid>` 启动时，运行时自动向可写层写入占位条目——
+/// `/etc/passwd`：`<uid>:*:<uid>:<gid>:container user:/:/bin/sh`、
+/// `/etc/group`：`<gid>:x:<gid>:<gid>`（名字即数字）。若不先清除：
+/// - uid 保护分支会把占位误判为"他人占用" → 静默跳过建号
+/// - busybox adduser 建组首选 gid=uid，占位组占着 gid 会拿不到
+/// 占位判定 = 条目名恰为数字 uid/gid（真实用户名等于数字 uid 的极端情形
+/// 不在保护范围，可接受）。
+///
+/// **busybox adduser 坑（2026-08-27 实测）**：
+/// - `-G` 取**组名**而非数字 gid（数字报 "unknown group 1011"）
+/// - 让 `adduser` 自动建同名组（首选 gid=uid，占位清除后恰好可用）
 pub fn build_useradd_script(name: &str, uid: u32, gid: u32, home: &str) -> String {
     format!(
         r#"set -u
 if grep -q "^{name}:" /etc/passwd; then
   exit 0
+fi
+# 运行时数字占位条目（条目名 == uid/gid）先清除，再继续正式建号
+if [ "$(getent passwd {uid} | cut -d: -f1)" = "{uid}" ]; then
+  sed -i '/^{uid}:/d' /etc/passwd
+fi
+if [ "$(getent group {gid} | cut -d: -f1)" = "{gid}" ]; then
+  sed -i '/^{gid}:/d' /etc/group
 fi
 if [ -n "$(getent passwd {uid})" ]; then
   echo "warning: uid {uid} already owned by another user; skipping useradd" >&2
@@ -37,8 +57,13 @@ if command -v groupadd >/dev/null 2>&1; then
   getent group "{gid}" >/dev/null || groupadd -g {gid} {name} 2>/dev/null || addgroup -g {gid} {name} 2>/dev/null
   useradd -m -u {uid} -g {gid} -d {home} -s "$SHELL" {name}
 else
-  getent group "{gid}" >/dev/null || addgroup -g {gid} {name}
-  adduser -D -u {uid} -G {gid} -h {home} -s "$SHELL" {name}
+  if [ "{uid}" = "{gid}" ]; then
+    # busybox：不预建组，adduser 自动建同名组（首选 gid=uid）
+    adduser -D -u {uid} -h {home} -s "$SHELL" {name}
+  else
+    getent group "{gid}" >/dev/null || addgroup -g {gid} {name}
+    adduser -D -u {uid} -G {name} -h {home} -s "$SHELL" {name}
+  fi
 fi
 mkdir -p "{home}"
 chown {uid}:{gid} "{home}"
@@ -100,18 +125,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_build_useradd_script_shape() {
+    fn test_build_useradd_script_shape_uid_eq_gid() {
         let s = build_useradd_script("tidy", 1000, 1000, "/home/tidy");
         // 幂等前缀：同名已存在即退出
         assert!(s.contains("grep -q \"^tidy:\" /etc/passwd"));
+        // 运行时数字占位条目清除（条目名 == uid/gid）
+        assert!(s.contains(r#"sed -i '/^1000:/d' /etc/passwd"#));
+        assert!(s.contains(r#"sed -i '/^1000:/d' /etc/group"#));
         // uid 冲突保护：不覆盖他人 uid
         assert!(s.contains("getent passwd 1000"));
-        // 参数化正确
+        // debian 分支：useradd -g 数字 gid
         assert!(s.contains("useradd -m -u 1000 -g 1000 -d /home/tidy -s \"$SHELL\" tidy"));
         assert!(s.contains("chown 1000:1000 \"/home/tidy\""));
         // 双工具回退分支存在
         assert!(s.contains("command -v groupadd"));
-        assert!(s.contains("adduser -D -u 1000"));
+        // busybox uid==gid：不预建组，adduser 自动建同名组（-G 数字会失败）
+        assert!(s.contains("[ \"1000\" = \"1000\" ]"));
+        assert!(s.contains("adduser -D -u 1000 -h /home/tidy -s \"$SHELL\" tidy"));
+    }
+
+    #[test]
+    fn test_build_useradd_script_shape_gid_differs() {
+        let s = build_useradd_script("tidy", 1001, 1002, "/home/tidy");
+        // 运行时数字占位条目清除（条目名 == gid）
+        assert!(s.contains(r#"sed -i '/^1002:/d' /etc/group"#));
+        // busybox gid!=uid：预建组（组名=name）+ adduser -G 组名（非数字）
+        assert!(s.contains("addgroup -g 1002 tidy"));
+        assert!(s.contains("adduser -D -u 1001 -G tidy -h /home/tidy -s \"$SHELL\" tidy"));
+        assert!(s.contains("chown 1001:1002 \"/home/tidy\""));
+        // -G 不得跟数字 gid（busybox 把 -G 当组名）
+        assert!(!s.contains("-G 1002"));
     }
 
     #[test]

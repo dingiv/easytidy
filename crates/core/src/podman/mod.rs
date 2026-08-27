@@ -983,4 +983,37 @@ mod tests {
         assert_eq!(body["user"], "0:0");
         assert!(body.get("userns").is_none());
     }
+
+    #[test]
+    fn test_libpod_body_portmappings_libpod_shape() {
+        // 入参为 bollard PortBinding 序列化的嵌套形状（**PascalCase**
+        // HostIp/HostPort，HostPort 为字符串）；libpod SpecGenerator 需要
+        // 扁平 `portmappings` []PortMapping（host_port/container_port 为
+        // 数字，container_port/protocol 从键推导）——形状不对时 libpod 静默
+        // 忽略（socket 实测）。
+        let bindings = serde_json::json!({
+            "80/tcp": [
+                { "HostIp": null, "HostPort": "18080" }
+            ]
+        });
+        let body = crate::libpod::keep_id_create_body(
+            "c1",
+            "alpine:latest",
+            vec!["/bin/sh".into()],
+            Vec::new(),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            None,
+            None,
+            Some(bindings),
+            None,
+            Some("1000:1000"),
+            false,
+        );
+        let pm = &body["portmappings"][0];
+        assert_eq!(pm["container_port"], 80);
+        assert_eq!(pm["protocol"], "tcp");
+        assert_eq!(pm["host_port"], 18080); // 数字（uint16），非字符串
+        assert!(body.get("port_bindings").is_none());
+    }
 }
