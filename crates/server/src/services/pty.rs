@@ -107,11 +107,12 @@ pub(crate) async fn handle_pty_open(
         .context("Failed to parse PtyOpen")?;
 
     // 接线常驻终端：server 按身份各持一个 attach 终端（persistent 会话，
-    // 不随连接断开清理；key: "user"=node 常规 / "root"=root）。
+    // 不随连接断开清理；key 恒 "user"（新模型 server 即容器默认用户，无
+    // root 会话——root 通道走宿主 easytidy-root-channel）。
     // 已有 → 订阅 + 回放环形缓冲 → 复用同一 stream_id；无 → 走新建路径并登记。
     // ⚠️ guard 先取值再 await：std RwLock guard 在 if-let scrutinee 中存活
     // 整个语句，跨 await 导致 future 非 Send
-    let attach_key = if req.as_root { "root" } else { "user" };
+    let attach_key = "user";
     let default_sid = state
         .default_terminal
         .read()
@@ -195,14 +196,12 @@ pub(crate) async fn handle_pty_open(
     }
     // 登录语义 env 后置覆盖：CLI/GUI 客户端 env 继承自宿主进程（HOME=宿主
     // home、USER=宿主用户名）——在客户端 env 之后显式注入容器默认用户的
-    // 登录环境
-    if !req.as_root {
-        if let Some(user) = user_map() {
-            cmd_builder.env("HOME", &user.home);
-            cmd_builder.env("USER", &user.name);
-            cmd_builder.env("LOGNAME", &user.name);
-            cmd_builder.env("SHELL", if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" });
-        }
+    // 登录环境（新模型下恒注入：server 即容器默认用户）
+    if let Some(user) = user_map() {
+        cmd_builder.env("HOME", &user.home);
+        cmd_builder.env("USER", &user.name);
+        cmd_builder.env("LOGNAME", &user.name);
+        cmd_builder.env("SHELL", if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" });
     }
     // TERM 注入：交互 shell 必需（clear 等依赖），客户端 env 未必携带
     // （实测 "TERM environment variable not set"）
@@ -244,7 +243,7 @@ pub(crate) async fn handle_pty_open(
         def.insert(attach_key.to_string(), stream_id);
         info!("常驻终端已登记：{attach_key} → stream_id={stream_id}");
     } else if req.persistent {
-        info!("多终端会话已创建：stream_id={stream_id} as_root={}", req.as_root);
+        info!("多终端会话已创建：stream_id={stream_id}");
     }
 
     // Create session
@@ -257,7 +256,6 @@ pub(crate) async fn handle_pty_open(
         spawn_pid,
         last_cwd: std::sync::Mutex::new(None),
         cmd: req.cmd.clone(),
-        as_root: req.as_root,
     });
 
     // Store session
@@ -270,8 +268,8 @@ pub(crate) async fn handle_pty_open(
     drop(slave);
 
     info!(
-        "[SRV-DBG] new PTY: sid={} persistent={} as_root={} cmd={:?}",
-        stream_id, persistent, req.as_root, req.cmd
+        "[SRV-DBG] new PTY: sid={} persistent={} cmd={:?}",
+        stream_id, persistent, req.cmd
     );
     info!("PTY opened: stream_id={}, cmd={}", stream_id, req.cmd);
 
@@ -525,7 +523,6 @@ pub(crate) async fn handle_pty_list(msg: Message, state: &Arc<ServerState>) -> R
         .map(|(sid, s)| PtyTerminalInfo {
             stream_id: *sid,
             cmd: s.cmd.clone(),
-            as_root: s.as_root,
             persistent: s.persistent.load(std::sync::atomic::Ordering::SeqCst),
             cwd: s.last_cwd.lock().unwrap().clone(),
         })

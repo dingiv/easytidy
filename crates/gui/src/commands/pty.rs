@@ -96,6 +96,10 @@ pub async fn pty_open(
         (String::new(), Vec::new())
     };
 
+    // 注意：`as_root` 参数不再随 pty.open 下发（协议 v2 删除 as_root 字段）——
+    // 新模型下 root 终端走宿主 root-channel 通道（C7 接线），server PTY 通道
+    // 只承载容器默认用户会话。参数保留供前端契约过渡，C7 起 root 分支改道。
+    let _ = as_root;
     let pty_open = PtyOpen {
         cmd,
         argv,
@@ -103,9 +107,6 @@ pub async fn pty_open(
         cwd: "/".to_string(),
         cols,
         rows,
-        // ⚠️ 曾硬编码 false 且命令缺 as_root 参数——前端 asRoot 被静默忽略,
-        // root 终端 attach 到 node 会话（2026-08-08 实测）
-        as_root,
         // 多终端：新开 = 独立持久会话；恢复 = 附接已有会话
         // （server 持有句柄，连接断开不清理；重开窗口回放当前屏幕）
         attach: false,

@@ -51,8 +51,6 @@ pub(crate) struct PtySession {
     pub(crate) last_cwd: std::sync::Mutex<Option<String>>,
     /// 显示命令（pty.open 的 cmd；空 = 默认登录 shell；pty.list 展示用）
     pub(crate) cmd: String,
-    /// 以 root 运行（身份标签；pty.list 展示用）
-    pub(crate) as_root: bool,
 }
 
 impl PtySession {

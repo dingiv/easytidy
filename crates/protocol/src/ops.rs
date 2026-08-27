@@ -23,10 +23,6 @@ pub struct PtyOpen {
     pub cols: u16,
     /// 终端行数
     pub rows: u16,
-    /// 以 root 运行（默认 false：用户映射生效时经 su 以容器用户运行；
-    /// setup/包管理场景传 true 跳过 su）
-    #[serde(default)]
-    pub as_root: bool,
     /// 接线常驻终端（默认 false）：server 持有每容器一个常驻交互终端
     /// （persistent 会话，不随连接断开清理）；true 时优先复用已有常驻
     /// 终端（输出回放），无则新建并设为常驻。CLI 执行命令传 false。
@@ -60,8 +56,6 @@ pub struct PtyTerminalInfo {
     pub stream_id: u32,
     /// 显示命令（pty.open 的 cmd；空 = 默认登录 shell）
     pub cmd: String,
-    /// 以 root 运行（身份标签）
-    pub as_root: bool,
     /// 常驻会话（server 持有，不随连接断开清理）
     pub persistent: bool,
     /// 最近一次工作目录（pty.cwd 查询过才有）
@@ -584,7 +578,6 @@ mod tests {
             cwd: "/home/user".to_string(),
             cols: 80,
             rows: 24,
-            as_root: false,
             attach: false,
             persistent: false,
             attach_stream: None,
