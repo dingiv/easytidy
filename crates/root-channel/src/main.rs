@@ -93,8 +93,23 @@ async fn main() -> anyhow::Result<()> {
 
     // 2. 连 podman + 起共享 root shell（exec --user 0，父 = conmon）
     let podman = Arc::new(Podman::connect().await.context("连接 podman socket 失败")?);
+    // 优先 bash（行编辑 / 历史 / 补全体验更好），容器无 bash 时回退 /bin/sh。
+    // 探测经容器内 root exec（`command -v bash`），工具差异由容器 shell 自行
+    // 判断——宿主无法预知容器内是否有 bash（alpine 默认无，debian 有）。
+    let shell = match podman
+        .exec_oneshot(
+            &name,
+            "0",
+            vec!["/bin/sh".to_string(), "-c".to_string(), "command -v bash".to_string()],
+        )
+        .await
+    {
+        Ok(out) if out.code == 0 && !out.stdout.trim().is_empty() => out.stdout.trim().to_string(),
+        _ => "/bin/sh".to_string(),
+    };
+    info!("root shell 选用：{shell}");
     let exec = podman
-        .exec_pty(&name, "0", 80, 24, vec!["/bin/sh".to_string(), "-l".to_string()])
+        .exec_pty(&name, "0", 80, 24, vec![shell, "-l".to_string()])
         .await
         .with_context(|| format!("exec root shell 失败（容器 {name} 未运行？）"))?;
 
