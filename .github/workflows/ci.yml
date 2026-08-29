@@ -40,5 +40,7 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: build server (musl)
-        run: cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl
+      - name: build in-container binaries (musl)
+        run: |
+          cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl
+          cargo build -p easytidy-ctool --release --target x86_64-unknown-linux-musl

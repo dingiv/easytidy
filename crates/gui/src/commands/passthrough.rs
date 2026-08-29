@@ -65,13 +65,14 @@ const EASYTIDY_BRAND_ICON: &[u8] = include_bytes!("../../icons/easytidy256x256.p
 // 供 state 枚举与 revoke 定位。
 // ============================================================================
 
-/// 宿主 CLI 绝对路径（passthrough .desktop 的 Exec/TryExec 用）。
+/// 宿主 CLI 绝对路径（passthrough .desktop 与 GUI 入口 .desktop 的
+/// Exec/TryExec 用——所有桌面快捷方式统一指向 CLI 垫片 `easytidy open`）。
 ///
 /// 探测顺序：① GUI 同目录的 easytidy（开发布局 target/debug 共存）；
 /// ② 安装目录 ~/.local/share/easytidy/bin/easytidy（部署布局）；
 /// ③ PATH 中的 easytidy。宿主 PATH 未必有 easytidy（实测未安装），
 /// 必须给出绝对路径，否则桌面入口无法启动。
-fn cli_path() -> String {
+pub(crate) fn cli_path() -> String {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             let sibling = parent.join("easytidy");
@@ -666,7 +667,8 @@ pub async fn passthrough_revoke(
 
 /// 导出本容器的 GUI 管理界面桌面快捷方式（菜单 + 桌面图标）。
 ///
-/// Exec = 当前 GUI 二进制 --container <name>（Worker GUI 模式），
+/// Exec = 宿主 CLI 垫片 `easytidy open --container <name>`（点击时由 CLI
+/// 决定保活/弹 GUI/友好报错；不再冷启动 380MB 的 GUI 二进制）。
 /// TryExec 同；内置品牌 SVG 图标；桌面副本 chmod +x + gio trusted。
 /// 返回应用菜单路径。
 #[tauri::command]
@@ -679,17 +681,9 @@ pub async fn export_gui_shortcut(
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    // 当前进程即 GUI 二进制（Worker GUI 模式入口）；current_exe 失败
-    // 回退命令行 argv[0]，再不行报错（Exec 必须绝对路径）
-    let gui_path = std::env::current_exe()
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-        .or_else(|| std::env::args().next())
-        .ok_or_else(|| "无法确定 GUI 可执行路径".to_string())?;
-
     let menu_path = easytidy_core::desktop::write_gui_entry(
         &sess.container_name,
-        &gui_path,
+        &cli_path(),
         desktop_icon.unwrap_or(true),
     )
     .map_err(|e| e.to_string())?;

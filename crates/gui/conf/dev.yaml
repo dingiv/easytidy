@@ -16,7 +16,8 @@ entry_args: []
 silent_boot: false              # 宿主开机时不静默拉起
 persistent: true                # 容器常驻：catatonit + server 托管生命周期
 
-# 用户一致性映射（keep-id）：容器内 uid 与宿主对齐，应用默认以 node 运行
+# 用户一致性映射（keep-id）：容器内 uid 与宿主对齐，应用默认以容器默认
+# 用户运行（家目录 = 该用户 passwd home，容器层持久）
 keep_id: true
 
 # 路径映射（bind mount）

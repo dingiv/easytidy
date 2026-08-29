@@ -44,6 +44,50 @@ fn check(cond: bool, msg: &str) -> Result<(), String> {
     }
 }
 
+/// 假 ctool 脚本（仅 e2e）：最小模拟 `prepare`（alpine/busybox 工具集）：
+/// 幂等（同名已存在即退出）→ 清运行时占位条目（home=/ 的该 uid 条目）→
+/// adduser 建号 → mkdir home。真实 ctool 是纯 Rust 二进制（零命令依赖），
+/// 此脚本只用于不构建 musl 二进制的 e2e 环境。
+const FAKE_CTOOL_SCRIPT: &str = r#"#!/bin/sh
+set -u
+uid=1000; gid=1000; name=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    prepare) shift ;;
+    --uid) uid="$2"; shift 2 ;;
+    --gid) gid="$2"; shift 2 ;;
+    --name) name="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$name" ]; then
+  [ -n "$(getent passwd "$name")" ] && exit 0
+  ph="$(awk -F: -v u="$uid" '$3+0==u+0 && $6=="/" {print $1; exit}' /etc/passwd)"
+  if [ -n "$ph" ]; then
+    sed -i "/^${ph}:/d" /etc/passwd /etc/group
+  fi
+  adduser -D -u "$uid" -h "/home/$name" -s /bin/sh "$name"
+  mkdir -p "/home/$name"
+fi
+exit 0
+"#;
+
+/// 假容器内二进制（e2e 专用）：server = sleep 保活；ctool = 最小 prepare
+/// 模拟。测试直接传假路径，不依赖任何环境变量解析。
+fn make_fake_bins(dir: &std::path::Path) -> easytidy_core::ContainerBins {
+    use std::os::unix::fs::PermissionsExt;
+    let fake_server = dir.join("easytidy-server");
+    fs::write(&fake_server, "#!/bin/sh\nsleep 300\n").unwrap();
+    fs::set_permissions(&fake_server, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_ctool = dir.join("easytidy-ctool");
+    fs::write(&fake_ctool, FAKE_CTOOL_SCRIPT).unwrap();
+    fs::set_permissions(&fake_ctool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    easytidy_core::ContainerBins {
+        server: fake_server,
+        ctool: fake_ctool,
+    }
+}
+
 #[tokio::test]
 #[ignore = "需要真实 podman socket（systemctl --user start podman.socket）"]
 async fn rebuild_applies_mounts_and_ports() {
@@ -60,13 +104,9 @@ async fn rebuild_applies_mounts_and_ports() {
     fs::create_dir_all(&src_dir).expect("创建挂载源目录失败");
     fs::write(src_dir.join("hello.txt"), "hello from host").unwrap();
 
-    // 假 server 二进制（带 shebang，容器内可执行；sleep 让容器保持运行）
-    // rebuild() 与 create_with_config() 均显式接收 server 二进制路径——测试直接传假路径，
-    // 不依赖任何环境变量解析（比旧的 XDG_DATA_HOME hack 更隔离）。
-    let fake_server = tmp_path.join("easytidy-server");
-    fs::write(&fake_server, "#!/bin/sh\nsleep 300\n").unwrap();
-    fs::set_permissions(&fake_server, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    // 假容器内二进制（rebuild/create 显式接收路径——测试直接传假路径，
+    // 不依赖任何环境变量解析，比旧的 XDG_DATA_HOME hack 更隔离）
+    let bins = make_fake_bins(tmp_path);
 
     // 配置：一条 bind mount + 一个 mapped 端口（8080 类随机空闲端口 → 80/tcp）
     // + 显式容器默认用户（新身份模型：uid/gid 缺省 = 宿主登录用户；
@@ -107,7 +147,7 @@ async fn rebuild_applies_mounts_and_ports() {
     let result: Result<(), String> = async {
         // create（初始状态，含旧配置）
         let id = podman
-            .create_with_config(&name, &config.params.image, &fake_server, &config)
+            .create_with_config(&name, &config.params.image, &bins, &config)
             .await
             .map_err(|e| format!("创建容器失败：{e}"))?;
         println!("[create] id = {id}");
@@ -128,7 +168,7 @@ async fn rebuild_applies_mounts_and_ports() {
 
         // rebuild：commit → stop → rm → create（同名，新配置）→ start
         let new_id = podman
-            .rebuild(&name, &config2, &fake_server)
+            .rebuild(&name, &config2, &bins)
             .await
             .map_err(|e| format!("rebuild 失败：{e}"))?;
         println!("[rebuild] new id = {new_id}");
@@ -255,11 +295,9 @@ async fn identity_prepare_user_and_root_exec() {
     let uid: u32 = 1011;
     let gid: u32 = 1011;
 
-    // 假 server 二进制（容器内 sleep 保持运行）
-    let fake_server = tmp.path().join("easytidy-server");
-    fs::write(&fake_server, "#!/bin/sh\nsleep 300\n").unwrap();
-    fs::set_permissions(&fake_server, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-        .unwrap();
+    // 假容器内二进制（server = sleep 保活；ctool = 最小 prepare 模拟——
+    // 真实 ctool 是 musl 静态二进制，e2e 不构建它）
+    let bins = make_fake_bins(tmp.path());
 
     // 配置：命名用户 + 显式 uid/gid（keep-id 开——与宿主 uid 无关，
     // 直接断言容器内 uid；GUI 容器才需要与宿主对齐，此处验证建号本身）
@@ -280,7 +318,7 @@ async fn identity_prepare_user_and_root_exec() {
 
     let result: Result<(), String> = async {
         podman
-            .create_with_config(&name, &config.params.image, &fake_server, &config)
+            .create_with_config(&name, &config.params.image, &bins, &config)
             .await
             .map_err(|e| format!("创建容器失败：{e}"))?;
         println!("[create] 容器 {name}");

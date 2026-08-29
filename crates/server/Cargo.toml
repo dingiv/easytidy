@@ -9,6 +9,7 @@ name = "easytidy-server"
 path = "src/main.rs"
 
 [dependencies]
+easytidy-core = { path = "../core" }
 easytidy-protocol = { path = "../protocol" }
 serde = { workspace = true }
 serde_json = { workspace = true }

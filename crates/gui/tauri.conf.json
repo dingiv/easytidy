@@ -5,12 +5,12 @@
   "identifier": "io.github.dingiv.easytidy",
   "build": {
     "beforeDevCommand": {
-      "script": "sh -c 'cargo build -p easytidy-server --target x86_64-unknown-linux-musl && cargo build -p easytidy-root-channel && pnpm dev'",
+      "script": "sh -c 'cargo build -p easytidy-server --target x86_64-unknown-linux-musl && cargo build -p easytidy-ctool --target x86_64-unknown-linux-musl && cargo build -p easytidy-root-channel && pnpm dev'",
       "cwd": "."
     },
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": {
-      "script": "sh -c 'cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl && cargo build -p easytidy-root-channel --release && pnpm build'",
+      "script": "sh -c 'cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl && cargo build -p easytidy-ctool --release --target x86_64-unknown-linux-musl && cargo build -p easytidy-root-channel --release && pnpm build'",
       "cwd": "."
     },
     "frontendDist": "dist"

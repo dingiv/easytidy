@@ -17,7 +17,7 @@
   - ② **Worker GUI**（单容器作用域的浏览器式管理界面；原称"per-容器 GUI"），从宿主桌面图标打开
   - ③ **easytidy 无头 one-shot CLI**（一等公民：管理、脚本、自启动单元都用它）
 - ① 与 ② 是**同一个 GUI 应用**：不常驻、多实例、经**配置文件互通**、不同 CLI 参数启动、支持私有配置文件
-- **默认无头容器 + 有头管理界面封装**；容器 GUI 透传保持 DistroBox 哲学（共享 home / 显示 / GPU）
+- **默认无头容器 + 有头管理界面封装**；容器 GUI 透传保持 DistroBox 哲学（共享显示 / GPU）。家目录**不共享**：跟随容器默认用户的 passwd home（容器层持久，2026-08-28 定案）
 - **容器内零 systemd**；与宿主 systemd 的交互仅发生在"开机自启动"场景
 - **与 DistroBox 的关系声明**：仅参考其架构与产品语义（docs/01），**不依赖其代码**；不调用 podman CLI（改走 **podman socket API**，调研第 5 轮证据：版本化 socket API 决定工具生死，CLI 解析在每次版本升级中破裂）
 
@@ -107,7 +107,7 @@ server 职责（3 项）：
 ## 需求 4：Worker GUI（单容器 GUI，原"per-容器 GUI"）
 
 - **4.1** 继承 Master GUI 的能力（容器配置、文件浏览器、终端、passthrough），作用域限定于单个容器
-- **4.2** 通过宿主机桌面图标打开该 GUI（`Exec = easytidy-gui --container <name>`）
+- **4.2** 通过宿主机桌面图标打开该 GUI（`Exec = easytidy open --container <name>`——CLI 垫片：保活容器后按 `silent_boot` 决定是否弹 GUI，容器不存在时弹终端友好报错）
 - **4.3** 内置多终端（node / root 双身份）：
   - **node 终端**：经容器内 server PTY（持久会话，attach 重连回放屏幕）
   - **root 终端**：经宿主侧 bollard exec 通道（不经 server；stream_id 偏移 `1<<30`）

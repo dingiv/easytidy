@@ -110,7 +110,7 @@ export function ContainerPane({
             unCheckedChildren="关"
           />
           <Typography.Text type="secondary">
-            宿主开机时无头启动容器（不弹 GUI）
+            点击桌面快捷方式时仅静默启动容器（不弹 GUI 窗口）
           </Typography.Text>
         </Space>
       </div>

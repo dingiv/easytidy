@@ -26,8 +26,9 @@ silent_boot: false
 # 常驻：catatonit + server 托管生命周期（停止容器 = podman stop）
 persistent: true
 
-# 用户一致性映射（keep-id：容器内 uid 与宿主对齐，应用默认以 node 用户运行）
-# 关闭后容器以 root 运行 + 移除 $HOME 挂载（GUI 应用将无法访问宿主显示 socket）
+# 用户一致性映射（keep-id：容器内 uid 与宿主对齐，应用默认以容器默认用户
+# 运行；家目录 = 该用户 passwd home，容器层持久，不挂载宿主 home）
+# 关闭后 uid 与宿主不对齐（GUI 应用将无法访问宿主显示 socket）
 keep_id: true
 
 # 路径映射（bind mount，每条 = 宿主路径 → 容器路径 → 是否只读）

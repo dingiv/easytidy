@@ -209,11 +209,18 @@ pub(crate) async fn handle_pty_open(
     }
 
     // Set working directory：空或 "/" = 落用户 home（登录 shell 不会自行
-    // chdir home——GUI 恒传 "/"，直接以 "/" 为 cwd 会让 shell 停在根目录）
+    // chdir home——GUI 恒传 "/"，直接以 "/" 为 cwd 会让 shell 停在根目录）。
+    // home 可能暂缺（prepare_container 补齐是 best-effort、创建后窗口期开
+    // 终端）→ 非目录时回退 "/"，不阻断开终端
     let cwd = if req.cwd.is_empty() || req.cwd == "/" {
         user_map().map(|u| u.home.clone()).unwrap_or_default()
     } else {
         req.cwd.clone()
+    };
+    let cwd = if std::path::Path::new(&cwd).is_dir() {
+        cwd
+    } else {
+        "/".to_string()
     };
     cmd_builder.cwd(&cwd);
 

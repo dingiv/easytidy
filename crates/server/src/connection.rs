@@ -18,10 +18,6 @@ use tokio::time::timeout;
 use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 
-struct ConnectionState {
-
-}
-
 /// Handle a single connection
 pub(crate) async fn handle_connection(
     stream: UnixStream,

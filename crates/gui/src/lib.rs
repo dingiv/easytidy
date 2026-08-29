@@ -45,6 +45,18 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             .init();
     }
 
+    // 存量桌面快捷方式迁移：旧 Exec（GUI 直连 / `easytidy run`）重写为 CLI
+    // 垫片 `easytidy open` 格式。幂等且便宜（只扫两个目录、只改 easytidy-*.desktop），
+    // Master/Worker 都跑。旧格式升级后仍可用，迁移是补齐而非防坏。
+    {
+        let n = easytidy_core::desktop::migrate_shortcuts(
+            &commands::passthrough::cli_path(),
+        );
+        if n > 0 {
+            tracing::info!("已迁移 {n} 个桌面快捷方式到 CLI 垫片格式");
+        }
+    }
+
     // 第二步：启动 Tauri 应用
     // 根据模式决定是否初始化 GuiSession
     let gui_session = match &mode {

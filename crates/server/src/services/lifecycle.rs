@@ -233,11 +233,10 @@ Icon=test-icon
     #[test]
     fn test_identity_self_discovery() {
         let (uid, gid) = crate::setup::self_uid_gid();
-        let id = crate::setup::identity_from_inputs(
+        let id = easytidy_core::incontainer::resolve_identity(
             "root:x:0:0:root:/root:/bin/sh\n",
             uid,
             gid,
-            None,
             None,
         );
         assert_eq!(id.uid, uid);

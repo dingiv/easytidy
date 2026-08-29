@@ -21,6 +21,7 @@ pub mod conf_template;
 pub mod guilock;
 pub mod desktop;
 pub mod icon;
+pub mod incontainer;
 pub mod passthrough;
 pub mod error;
 pub mod events;
@@ -165,6 +166,51 @@ pub fn server_binary_path() -> Result<PathBuf> {
             "server 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装 easytidy-server"
         ))
     })
+}
+
+/// 解析 ctool 二进制路径（宿主侧）。
+///
+/// 与 [`server_binary_path`] 完全同构：`CTOOL_BIN` namespace dev/prod
+/// 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。ctool 是容器内
+/// root 一次性工具（`/usr/bin/easytidy-ctool`），与 server 同为 musl
+/// 静态二进制（同一构建目标，见 CTOOL_BIN namespace 注释）。
+pub fn ctool_binary_path() -> Result<PathBuf> {
+    let loader = easytidy_shared::loader!();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.extend(loader.ns_candidates("CTOOL_BIN", "easytidy-ctool"));
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-ctool"));
+    }
+    candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
+        let tried = candidates
+            .iter()
+            .map(|p| format!("  {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Error::Connect(format!(
+            "easytidy-ctool 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
+        ))
+    })
+}
+
+/// 容器内二进制（ro bind-mount 进容器）：server（常驻）+ ctool（root
+/// 一次性工具）。`create_with_config`/`rebuild` 的统一输入。
+#[derive(Debug, Clone)]
+pub struct ContainerBins {
+    /// → `/usr/bin/easytidy-server`
+    pub server: PathBuf,
+    /// → `/usr/bin/easytidy-ctool`
+    pub ctool: PathBuf,
+}
+
+impl ContainerBins {
+    /// 宿主侧解析两个二进制的安装位置（纯路径解析，无副作用）。
+    pub fn resolve() -> Result<Self> {
+        Ok(Self {
+            server: server_binary_path()?,
+            ctool: ctool_binary_path()?,
+        })
+    }
 }
 
 /// 解析 root-channel 二进制路径（宿主侧）。

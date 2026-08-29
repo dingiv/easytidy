@@ -7,12 +7,20 @@
 > + useradd/sudoers + su 降权）、§7 的 sudo 提升通道、§8 的 `--root` 语义描述的是
 > **已废弃的旧模型**。现行模型：容器直接以配置 `<uid>:<gid>` 运行（默认 = 宿主登录
 > 用户，可自定义 uid/gid/用户名），server 与默认用户**同身份**运行（无 root、无
-> su 降权、无 sudoers）；`user_name` 建号 = 创建后宿主侧 root exec 幂等 useradd
+> su 降权、无 sudoers）；`user_name` 建号 = 创建后宿主侧 root exec 幂等建号
 > （**init 镜像烘焙方案作废**）；root 终端走宿主 `easytidy-root-channel` 进程
-> （每容器共享 root shell，`exec --user 0`，父 = conmon，detach/close 语义见
+> （每容器共享 root shell，`exec --user 0`，detach/close 语义见
 > docs/08）。**§2（rootless userns 现实）与 §4（keep-id 真实映射实证）仍然有效**——
 > keep-id 下容器 uid = 宿主登录 uid（文件属主实证），容器 root（uid 0）= 宿主
 > subuid 100000 的结论不变。
+>
+> **勘误（2026-08-29 容器内准备改 ctool）**：容器内准备（建号 / 家目录补齐 /
+> fontconfig 接入）不再以 `/bin/sh -c` 脚本执行，改为宿主 exec 容器内
+> `easytidy-ctool prepare`——bind-mount 的 musl 静态二进制（与 server 同前提），
+> 纯 Rust 行式读写 /etc/passwd、/etc/group，**零容器内命令依赖**（无
+> sh/useradd/sed/awk，alpine/busybox 与 debian 同路径）；身份名字/HOME 解析
+> 的单一事实在 `core::incontainer::resolve_identity`（server 自发现与 ctool
+> ensure-home 共用）。
 
 ## 1. 为什么默认用户必须是普通用户（非 root）
 
@@ -76,10 +84,11 @@ rootless podman 下每个容器运行在自己的 user namespace 中。默认映
 
 ```
 userns: keep-id（容器 uid 1000 = 宿主登录用户）
-user:   "0:0"（容器进程以 uid 0 运行——server 才有装包权）
-mounts: $HOME→$HOME（rw）、/tmp/.X11-unix（ro）、$XDG_RUNTIME_DIR、
+user:   <uid>:<gid>（容器默认用户——server 以该用户运行，无 root）
+mounts: /tmp/.X11-unix（ro）、$XDG_RUNTIME_DIR、
         /usr/share/easytidy-host/{fonts,icons}（ro，非覆盖容器自身目录）、
         server 二进制（ro）、socket 目录（rw）
+        （家目录不挂载宿主 home——跟随容器默认用户 passwd home，容器层持久）
 env:    DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR（宿主值）、
         EASYTIDY_USER_UID/GID
 network: host（默认，端口映射可选 mapped）

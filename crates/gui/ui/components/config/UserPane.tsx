@@ -6,7 +6,8 @@
 // - **keep-id 关**：用户显式配置 uid/gid 映射（rootless 下宿主经 /etc/subuid
 //   映射；容器内 uid 0 = 宿主 subuid 100000）
 // - **user_name 有值**：首次创建经宿主 root exec useradd 建号（/home/<name>）；
-//   无值 = 容器按 uid 运行（whoami 显示 uid 数字或镜像同 uid 既有用户）
+//   无值 = 跟随容器默认用户（镜像同 uid 的 passwd 条目，whoami 显示其名字；
+//   无条目则显示 uid 数字），家目录 = 该用户 passwd home（容器层持久）
 // uid/gid 留空 = 宿主登录用户值。keep-id 语义实证见 docs/12。
 
 import { Alert, Input, InputNumber, Space, Switch, Table, Typography } from 'antd';
@@ -158,7 +159,7 @@ export function UserPane({
           type="warning"
           showIcon
           message="keep-id 开启但 uid 与宿主不一致"
-          description={`keep-id 下宿主登录 uid（${hostUser.uid}）↔ 容器同 uid 锁死 1:1。配置 uid ${userUid} 与宿主不一致，keep-id 映射将按容器 uid ${userUid} 生效（宿主侧需存在该 uid 的 subuid 映射），宿主 home 属主呈现将异常。请确认有意为之。`}
+          description={`keep-id 下宿主登录 uid（${hostUser.uid}）↔ 容器同 uid 锁死 1:1。配置 uid ${userUid} 与宿主不一致，keep-id 映射将按容器 uid ${userUid} 生效（宿主侧需存在该 uid 的 subuid 映射），容器内文件宿主侧属主呈现将异常。请确认有意为之。`}
           className="mode-hint"
         />
       )}
@@ -167,7 +168,7 @@ export function UserPane({
           type="warning"
           showIcon
           message="keep-id 已关闭"
-          description="容器默认用户 uid 与宿主不再对齐：宿主 $HOME 挂载与显示环境可能不可用（GUI 应用无法访问宿主显示 socket）。仅适用于无头/非 GUI 容器；此配置随「保存并重启」重建容器后生效。"
+          description="容器默认用户 uid 与宿主不再对齐：显示环境可能不可用（GUI 应用无法访问宿主显示 socket）。仅适用于无头/非 GUI 容器；此配置随「保存并重启」重建容器后生效。"
           className="mode-hint"
         />
       )}

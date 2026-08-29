@@ -31,6 +31,9 @@ pub struct Podman {
 }
 
 impl Podman {
+    /// ctool 二进制的容器内挂载目标（prepare_container 的 exec 目标）。
+    pub(crate) const CTOOL_TARGET: &str = "/usr/bin/easytidy-ctool";
+
     /// 连接到 rootless podman socket 并协商 API 版本。
     ///
     /// 路径规则：$XDG_RUNTIME_DIR/podman/podman.sock（缺失则 Error::NoXdgRuntime）。
@@ -137,7 +140,7 @@ impl Podman {
         &self,
         name: &str,
         image: &str,
-        server_bin_path: &Path,
+        bins: &crate::ContainerBins,
     ) -> Result<String> {
         let config = ContainerConfig {
             name: name.to_string(),
@@ -152,8 +155,7 @@ impl Podman {
             },
             ..Default::default()
         };
-        self.create_with_config(name, image, server_bin_path, &config)
-            .await
+        self.create_with_config(name, image, bins, &config).await
     }
 
     /// 创建容器并应用完整配置（mounts / 网络映射）。
@@ -161,27 +163,32 @@ impl Podman {
     /// 参数：
     /// - name: 容器名
     /// - image: 镜像（如 "docker.io/library/alpine:latest"）
-    /// - server_bin_path: server 二进制路径（宿主绝对路径，将 ro bind-mount 进容器）
+    /// - bins: 容器内二进制（server + ctool，宿主绝对路径，均 ro bind-mount 进容器）
     /// - config: 容器配置（mounts + 网络模式/端口映射）
     ///
     /// 在 `create()` 的既有基础之上追加（rebuild 保留同一套基础）：
     /// - HostConfig.init = true（catatonit = PID 1）
     /// - Cmd = [<server-bin>, "--socket", "/run/easytidy/server.sock"]
-    /// - Bind mounts: server 二进制（ro）+ socket 目录（rw）+ config.params.mounts（宿主路径须已存在）
+    /// - Bind mounts: server 二进制（ro）+ ctool 二进制（ro）+ socket 目录（rw）
+    ///   + config.params.mounts（宿主路径须已存在）
     /// - 标签: manager=easytidy + easytidy.name=<name>
     /// - 网络: `Host` → `network_mode = "host"`（端口映射无意义，忽略并告警）；
     ///   `Mapped` → 不设 network_mode（podman 默认 bridge）+ ExposedPorts + PortBindings
     /// - 容器默认用户（新模型）：`User` 字段 = 配置 uid:gid（缺省 = 宿主登录用户），
     ///   server 直接以该用户运行（无 root、无 su，见 crates/server）
-    /// - keep-id（`config.params.keep_id`）：`$HOME` → `$HOME`（rw）+ 注入
-    ///   `EASYTIDY_USER_NAME`/`EASYTIDY_HOME` 身份提示 env（server 身份自发现用）
+    /// - keep-id（`config.params.keep_id`）：仅影响用户命名空间映射，**不再
+    ///   绑定挂载宿主 home**（2026-08-28 定案：家目录 = 容器默认用户的
+    ///   passwd home，容器层持久，由 `prepare_container` 的 ensure-home
+    ///   创建/chown）
+    /// - 身份提示 env：`EASYTIDY_USER_NAME`（配置用户名时注入，server
+    ///   身份自发现用）
     ///
     /// 镜像不存在则先拉取。
     pub async fn create_with_config(
         &self,
         name: &str,
         image: &str,
-        server_bin_path: &Path,
+        bins: &crate::ContainerBins,
         config: &ContainerConfig,
     ) -> Result<String> {
         use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
@@ -207,13 +214,22 @@ impl Podman {
         labels.insert("manager".to_string(), "easytidy".to_string());
         labels.insert("easytidy.name".to_string(), name.to_string());
 
-        // 构建挂载：server 二进制 + socket 目录 + 用户配置的 bind mounts
+        // 构建挂载：server 二进制 + ctool 二进制 + socket 目录 + 用户配置的 bind mounts
         let mut mounts = vec![
             // Server 二进制（只读）
             Mount {
                 typ: Some(MountTypeEnum::BIND),
-                source: Some(server_bin_path.to_string_lossy().to_string()),
+                source: Some(bins.server.to_string_lossy().to_string()),
                 target: Some("/usr/bin/easytidy-server".to_string()),
+                read_only: Some(true),
+                ..Default::default()
+            },
+            // ctool 二进制（只读）：容器内 root 一次性工具（prepare_container
+            // 的 exec 目标；musl 静态，零容器内命令依赖）
+            Mount {
+                typ: Some(MountTypeEnum::BIND),
+                source: Some(bins.ctool.to_string_lossy().to_string()),
+                target: Some(Self::CTOOL_TARGET.to_string()),
                 read_only: Some(true),
                 ..Default::default()
             },
@@ -242,30 +258,12 @@ impl Podman {
         let host = crate::userenv::host_user();
         let (user_uid, user_gid) = resolve_container_user(&config.params, host.as_ref())?;
 
+        // 身份提示 env（server 侧身份自发现的兜底输入）：
+        // EASYTIDY_USER_NAME = 配置用户名（与 prepare_container 的 useradd
+        // 命名一致；镜像无该 uid 真实条目且 useradd 尚未执行时的名字来源）。
+        // 不再注入 EASYTIDY_HOME（2026-08-28 定案：家目录跟随容器默认用户
+        // 的 passwd home、容器层持久，keep-id 不再绑定挂载宿主 home）
         let mut env = config.env.clone();
-        if let Some(host) = host {
-            // keep-id：宿主 home 补挂（容器内 server 以宿主 uid 运行，读写宿主
-            // home 属主自然一致；已挂载或目录不存在则跳过）
-            if config.params.keep_id
-                && !mount_has_target(&mounts, &host.home)
-                && Path::new(&host.home).exists()
-            {
-                mounts.push(Mount {
-                    typ: Some(MountTypeEnum::BIND),
-                    source: Some(host.home.clone()),
-                    target: Some(host.home.clone()),
-                    read_only: Some(false),
-                    ..Default::default()
-                });
-            }
-            // 身份提示 env（server 侧身份自发现的兜底输入）：
-            // - EASYTIDY_HOME：未配置用户名时 server 的 HOME 回退值（keep-id 容器
-            //   期望应用数据落宿主 home）
-            // - EASYTIDY_USER_NAME：配置用户名时传入（与 useradd 命名一致）
-            if config.params.user_name.is_none() {
-                env.push(format!("EASYTIDY_HOME={}", host.home));
-            }
-        }
         if let Some(name) = &config.params.user_name {
             env.push(format!("EASYTIDY_USER_NAME={name}"));
         }
@@ -459,10 +457,8 @@ impl Podman {
         &self,
         name: &str,
         config: &ContainerConfig,
-        server_bin_path: &Path,
+        bins: &crate::ContainerBins,
     ) -> Result<String> {
-        let server_bin = server_bin_path;
-
         // 先记下现有 socket 目录（重建会以新 hash 换代命名；成功后清理旧代孤儿。
         // config 未变时新旧同名——按新目录做白名单，见第 6 步）
         let legacy_socket_dirs = crate::resolve_socket_dirs(name);
@@ -482,7 +478,7 @@ impl Podman {
 
         // 4. create（同名；失败时旧容器已删除，错误信息附带可恢复的镜像引用）
         let id = self
-            .create_with_config(name, &image_ref, &server_bin, config)
+            .create_with_config(name, &image_ref, bins, config)
             .await
             .map_err(|e| {
                 Error::Connect(format!(
@@ -839,11 +835,6 @@ impl Podman {
         tracing::info!("镜像 {} 拉取成功", image);
         Ok(())
     }
-}
-
-/// 挂载列表是否已包含目标路径（避免与用户配置/引擎挂载重复目标）。
-fn mount_has_target(mounts: &[bollard::models::Mount], target: &str) -> bool {
-    mounts.iter().any(|m| m.target.as_deref() == Some(target))
 }
 
 /// 解析容器默认用户 uid/gid（新模型）：配置值优先，缺省取宿主登录用户。

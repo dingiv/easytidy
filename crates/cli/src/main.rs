@@ -11,25 +11,25 @@
 //! - inspect: 检查容器详情（含 mounts/网络）
 //! - run: 头less 容器内应用运行（M2 新增）
 
-use std::path::PathBuf;
+use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use anyhow::{bail, Result, Context};
-use tracing::{info, error, debug};
-use tracing_subscriber::EnvFilter;
 use crossterm::terminal;
+use futures::{SinkExt, StreamExt};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::net::UnixStream;
 use tokio::io::AsyncWriteExt;
+use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
-use futures::{StreamExt, SinkExt};
+use tracing::{debug, error, info};
+use tracing_subscriber::EnvFilter;
 
-use easytidy_core::podman::Podman;
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::models::{ContainerConfig, NetworkMode};
+use easytidy_core::podman::Podman;
+use easytidy_protocol::ops::{PtyExited, PtyOpen, PtyOpenResp, PtyResize};
+use easytidy_protocol::rc::{RcAttach, RcResize, ROOT_STREAM_ID};
 use easytidy_protocol::{Frame, FrameCodec, Message, MsgKind, PROTOCOL_VERSION};
 use easytidy_protocol::{Handshake, HandshakeAck};
-use easytidy_protocol::ops::{PtyOpen, PtyOpenResp, PtyResize, PtyExited};
-use easytidy_protocol::rc::{RcAttach, RcResize, ROOT_STREAM_ID};
 
 #[derive(Parser)]
 #[command(name = "easytidy")]
@@ -151,6 +151,18 @@ enum Commands {
         command: Vec<String>,
     },
 
+    /// 桌面快捷方式统一入口（垫片）：确保容器运行后，无命令 = 打开管理 GUI
+    /// （silent_boot 容器仅启动不弹 GUI），带命令 = 透传运行容器内应用
+    Open {
+        /// 容器名
+        #[arg(long)]
+        container: String,
+
+        /// 要运行的应用命令及参数（如：-- google-chrome）；省略 = 容器入口
+        #[arg(required = false)]
+        command: Vec<String>,
+    },
+
     /// 自启动入口（systemd user unit 登录时触发）
     Boot {
         /// 容器名
@@ -231,19 +243,27 @@ async fn main() -> Result<()> {
 
     // 初始化日志
     let log_level = if cli.verbose { "debug" } else { "info" };
-    let filter = EnvFilter::from_default_env()
-        .add_directive(log_level.parse()?);
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    let filter = EnvFilter::from_default_env().add_directive(log_level.parse()?);
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // 执行子命令（不都需要 podman 连接）
     match cli.command {
-        Commands::Run { container, root, command } => {
+        Commands::Run {
+            container,
+            root,
+            command,
+        } => {
             let code = cmd_run(container, command, root).await?;
             std::process::exit(code);
         }
-        Commands::Unexport { container, desktop_file } => {
+        Commands::Open { container, command } => {
+            let code = cmd_open(container, command, cli.config.clone()).await?;
+            std::process::exit(code);
+        }
+        Commands::Unexport {
+            container,
+            desktop_file,
+        } => {
             // 宿主侧操作，无需 podman 连接
             cmd_unexport(container, desktop_file)
         }
@@ -263,20 +283,25 @@ async fn main() -> Result<()> {
             match cli.command {
                 Commands::List => cmd_list(podman).await,
                 Commands::Pull { image } => cmd_pull(podman, image).await,
-                Commands::Create { image, name, home, volume } => {
-                    cmd_create(podman, image, name, home, volume).await
-                }
+                Commands::Create {
+                    image,
+                    name,
+                    home,
+                    volume,
+                } => cmd_create(podman, image, name, home, volume).await,
                 Commands::Start { container } => cmd_start(podman, container).await,
                 Commands::Stop { container } => cmd_stop(podman, container).await,
                 Commands::Restart { container } => cmd_restart(podman, container).await,
                 Commands::Rebuild { container } => cmd_rebuild(podman, container).await,
                 Commands::Rm { container, force } => cmd_rm(podman, container, force).await,
                 Commands::Inspect { container } => cmd_inspect(podman, container).await,
-                        Commands::Boot { container, gui } => {
-                    cmd_boot(container, gui).await
-                }
+                Commands::Boot { container, gui } => cmd_boot(container, gui).await,
                 Commands::Env { cmd } => match cmd {
-                    EnvCmd::New { name, flavor, image } => cmd_env_new(podman, name, flavor, image).await,
+                    EnvCmd::New {
+                        name,
+                        flavor,
+                        image,
+                    } => cmd_env_new(podman, name, flavor, image).await,
                     EnvCmd::Rm { name } => cmd_env_rm(podman, name).await,
                     EnvCmd::Snapshot { name, tag } => cmd_env_snapshot(podman, name, tag).await,
                     EnvCmd::Start { name } => cmd_env_start(podman, name).await,
@@ -313,14 +338,19 @@ async fn cmd_list(podman: Podman) -> Result<()> {
     }
 
     // 打印表头
-    println!("{:<30} {:<15} {:<20} {:<10}", "NAME", "ID", "IMAGE", "STATUS");
+    println!(
+        "{:<30} {:<15} {:<20} {:<10}",
+        "NAME", "ID", "IMAGE", "STATUS"
+    );
     println!("{}", "-".repeat(80));
 
     // 打印每个容器
     for c in containers {
         let managed = if c.managed { "✓" } else { "" };
-        println!("{:<30} {:<15} {:<20} {:<10} {}",
-            c.name, c.id, c.image, c.status, managed);
+        println!(
+            "{:<30} {:<15} {:<20} {:<10} {}",
+            c.name, c.id, c.image, c.status, managed
+        );
     }
 
     Ok(())
@@ -336,10 +366,8 @@ async fn cmd_create(
 ) -> Result<()> {
     info!("创建容器：{} from {}", name, image);
 
-    // M2: 使用真实的 server 二进制路径（dev→target/debug，prod→安装位，统一走 core helper）
-    let server_bin = easytidy_core::server_binary_path()?;
-
-    info!("使用 server 二进制：{}", server_bin.display());
+    // 容器内二进制（server + ctool；dev→musl 构建树，prod→安装位，统一走 core helper）
+    let bins = easytidy_core::ContainerBins::resolve()?;
 
     // 容器配置（网络默认 Host 模式，产品语义；distrobox 同款）
     let container_config = ContainerConfig {
@@ -354,9 +382,27 @@ async fn cmd_create(
     };
 
     // 创建容器（走新入口，应用完整配置）
-    match podman.create_with_config(&name, &image, &server_bin, &container_config).await {
+    match podman
+        .create_with_config(&name, &image, &bins, &container_config)
+        .await
+    {
         Ok(id) => {
             println!("容器 {} 创建成功（ID: {}）", name, id);
+
+            // 启动（对齐 GUI env_new：创建即启动）
+            podman.start(&name).await.map_err(|e| {
+                error!("启动容器失败：{}", e);
+                e
+            })?;
+
+            // 容器内准备（fontconfig / useradd / 家目录补齐）：best-effort，
+            // 失败不阻断创建（落日志，重建可重跑修复）
+            if let Err(e) = podman
+                .prepare_container(&name, &container_config.params)
+                .await
+            {
+                error!("容器内准备失败（忽略，重建可修复）：{e}");
+            }
 
             // 注册到配置文件
             let config_path = ConfigFile::default_path()?;
@@ -389,10 +435,16 @@ async fn cmd_rebuild(podman: Podman, container: String) -> Result<()> {
         bail!("容器配置不存在：{container}（请先 create，或在 config.toml 中编辑 mounts/network 配置）");
     };
 
-    // server 二进制需 bind-mount 进重建后的容器（与 create 同源，统一走 core helper）
-    let server_bin = easytidy_core::server_binary_path()?;
-    let new_id = podman.rebuild(&container, &config, &server_bin).await?;
+    // 容器内二进制需 bind-mount 进重建后的容器（与 create 同源，统一走 core helper）
+    let bins = easytidy_core::ContainerBins::resolve()?;
+    let new_id = podman.rebuild(&container, &config, &bins).await?;
     println!("容器 {} 重建成功（新 ID: {}）", container, new_id);
+
+    // 容器内准备（对齐 GUI：重建后重跑 fontconfig / useradd / 家目录补齐）：
+    // best-effort，失败不阻断（落日志）
+    if let Err(e) = podman.prepare_container(&container, &config.params).await {
+        error!("容器内准备失败（忽略，再次重建可修复）：{e}");
+    }
 
     // 回写配置（保持 configfile 与容器一致）
     config_file.register_container(config)?;
@@ -415,41 +467,27 @@ async fn cmd_start(podman: Podman, container: String) -> Result<()> {
 /// - `gui=true`（非静默模式）→ 等待 server socket 就绪后拉起 Worker GUI
 async fn cmd_boot(container: String, gui: bool) -> Result<()> {
     let podman = Podman::connect().await?;
-    let containers = podman.list_containers().await?;
-    let info = containers
-        .iter()
-        .find(|c| c.name == container)
-        .ok_or_else(|| anyhow::anyhow!("容器不存在：{container}"))?;
-    if info.status != "running" {
-        podman.start(&container).await?;
-        info!("自启动：容器 {container} 已启动");
-    } else {
-        info!("自启动：容器 {container} 已在运行");
-    }
+    ensure_running(&podman, &container).await?;
+    info!("自启动：容器 {container} 已就绪");
 
     if gui {
-        // 等待 server socket 就绪（容器刚启动，server 需初始化）
-        let socket = easytidy_core::host_socket_path(&container)?;
-        let mut ready = false;
-        for _ in 0..40 {
-            if socket.exists() {
-                ready = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-        if !ready {
-            bail!("等待容器 server 就绪超时（{}）", socket.display());
-        }
+        // 等待 server socket 就绪（容器刚启动，server 需初始化）；
+        // 仅 gui 分支等待——silent boot 今天就不等（server 启动失败
+        // 不应把 oneshot unit 打成 failed）
+        let socket = wait_socket_ready(&container).await?;
         // 拉起 Worker GUI（CLI 同目录 / 安装目录 / PATH 探测）
-        let gui_bin = gui_binary_path()
-            .ok_or_else(|| anyhow::anyhow!("找不到 easytidy-gui 可执行文件"))?;
+        let gui_bin =
+            gui_binary_path().ok_or_else(|| anyhow::anyhow!("找不到 easytidy-gui 可执行文件"))?;
         std::process::Command::new(&gui_bin)
             .arg("--container")
             .arg(&container)
             .spawn()
             .map_err(|e| anyhow::anyhow!("拉起 Worker GUI 失败：{e}"))?;
-        info!("非静默启动：已拉起 Worker GUI（{}）", gui_bin.display());
+        info!(
+            "非静默启动：已拉起 Worker GUI（{}，socket {}）",
+            gui_bin.display(),
+            socket.display()
+        );
     }
     Ok(())
 }
@@ -523,14 +561,19 @@ async fn cmd_rm(podman: Podman, container: String, force: bool) -> Result<()> {
 }
 
 /// 新环境：flavor 模板或指定镜像创建干净环境。
-async fn cmd_env_new(podman: Podman, name: String, flavor: Option<String>, image: Option<String>) -> Result<()> {
+async fn cmd_env_new(
+    podman: Podman,
+    name: String,
+    flavor: Option<String>,
+    image: Option<String>,
+) -> Result<()> {
     match flavor {
         Some(f) => cmd_flavor_apply(podman, f, Some(name)).await,
         None => {
             let Some(image) = image else {
                 bail!("env new 需要 --flavor <f> 或 --image <img>");
             };
-            let server_bin = easytidy_core::server_binary_path()?;
+            let bins = easytidy_core::ContainerBins::resolve()?;
             let config = ContainerConfig {
                 name: name.clone(),
                 params: easytidy_core::models::ContainerParams {
@@ -539,11 +582,16 @@ async fn cmd_env_new(podman: Podman, name: String, flavor: Option<String>, image
                 },
                 ..Default::default()
             };
-            let id = podman.create_with_config(&name, &image, &server_bin, &config).await?;
+            let id = podman
+                .create_with_config(&name, &image, &bins, &config)
+                .await?;
             podman.start(&name).await?;
             let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
             config_file.register_container(config)?;
-            println!("新环境 {name} 已创建并运行（ID: {}）", &id[..12.min(id.len())]);
+            println!(
+                "新环境 {name} 已创建并运行（ID: {}）",
+                &id[..12.min(id.len())]
+            );
             Ok(())
         }
     }
@@ -602,7 +650,10 @@ async fn cmd_env_list(podman: Podman) -> Result<()> {
 fn cmd_flavor_list() -> Result<()> {
     let flavors = easytidy_core::flavor::Flavor::list()?;
     if flavors.is_empty() {
-        println!("没有可用 flavor（{}）", easytidy_core::flavor::Flavor::flavors_dir()?.display());
+        println!(
+            "没有可用 flavor（{}）",
+            easytidy_core::flavor::Flavor::flavors_dir()?.display()
+        );
         return Ok(());
     }
     println!("可用 flavor：");
@@ -621,17 +672,25 @@ async fn cmd_flavor_apply(
     let flavor = easytidy_core::flavor::Flavor::load(&flavor_name)?;
     let name = container.unwrap_or_else(|| flavor_name.clone());
 
-    info!("应用 flavor {flavor_name}：镜像 {}，容器 {name}", flavor.params.image);
+    info!(
+        "应用 flavor {flavor_name}：镜像 {}，容器 {name}",
+        flavor.params.image
+    );
 
     // 展开配置（GUI 透传自动注入宿主显示环境）
     let config = flavor.build_config(&name)?;
 
-    let server_bin = easytidy_core::server_binary_path()?;
-    let id = podman.create_with_config(&name, &flavor.params.image, &server_bin, &config).await?;
+    let bins = easytidy_core::ContainerBins::resolve()?;
+    let id = podman
+        .create_with_config(&name, &flavor.params.image, &bins, &config)
+        .await?;
     println!("容器 {name} 创建成功（ID: {}）", &id[..12.min(id.len())]);
 
     podman.start(&name).await?;
-    println!("容器 {name} 已启动，开始执行 setup（{} 条命令）...", flavor.setup.len());
+    println!(
+        "容器 {name} 已启动，开始执行 setup（{} 条命令）...",
+        flavor.setup.len()
+    );
 
     // 经 server PTY 无头执行每条 setup 命令（run 在非 TTY 下自动跳过 raw mode）。
     // 无头安装必须非交互：注入 DEBIAN_FRONTEND=noninteractive 防 debconf 卡死。
@@ -640,8 +699,12 @@ async fn cmd_flavor_apply(
         let full = format!("export DEBIAN_FRONTEND=noninteractive TZ=UTC; {cmd}");
         // setup 以容器 root（uid 0）运行（= 装包身份，宿主侧 subuid 100000，
         // 容器文件系统属主；apt/装包需要）——经 root 通道 exec_oneshot
-        let code = cmd_run(name.clone(), vec!["bash".to_string(), "-c".to_string(), full.clone()], true)
-            .await?;
+        let code = cmd_run(
+            name.clone(),
+            vec!["bash".to_string(), "-c".to_string(), full.clone()],
+            true,
+        )
+        .await?;
         if code != 0 {
             bail!("setup 命令失败（退出码 {code}）：{cmd}");
         }
@@ -652,9 +715,15 @@ async fn cmd_flavor_apply(
     config_file.register_container(config)?;
 
     println!("✅ flavor {flavor_name} 已应用。启动容器内应用：");
-    println!("   easytidy run --container {name} -- {entry}{args}",
-        entry = flavor.params.entry.clone().unwrap_or_else(|| "（无 entry，可指定任意命令）".into()),
-        args = flavor.params.entry_args.join(" "));
+    println!(
+        "   easytidy run --container {name} -- {entry}{args}",
+        entry = flavor
+            .params
+            .entry
+            .clone()
+            .unwrap_or_else(|| "（无 entry，可指定任意命令）".into()),
+        args = flavor.params.entry_args.join(" ")
+    );
 
     Ok(())
 }
@@ -684,8 +753,12 @@ async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
                 println!("  (none)");
             }
             for m in &view.mounts {
-                println!("  {} -> {} ({})", m.host_path, m.container_path,
-                    if m.read_only { "ro" } else { "rw" });
+                println!(
+                    "  {} -> {} ({})",
+                    m.host_path,
+                    m.container_path,
+                    if m.read_only { "ro" } else { "rw" }
+                );
             }
 
             let mode = match view.network.mode {
@@ -718,44 +791,54 @@ async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
 /// 3. hello 握手
 /// 4. pty.open（获取 stream_id）
 /// 5. 循环：stdin → Raw 帧 → stdout，SIGWINCH → pty.resize，pty.exited → 退出
-async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Result<i32> {
-    info!("运行容器内命令：container={}, cmd={:?}", container, command);
-
-    // 1. 确保容器运行中
-    let podman = Podman::connect().await?;
+/// 确保容器运行中（未运行则 `podman.start`）。容器不存在 → Err。
+async fn ensure_running(podman: &Podman, name: &str) -> Result<()> {
     let containers = podman.list_containers().await?;
-    let container_info = containers.iter()
-        .find(|c| c.name == container)
-        .context(format!("容器不存在：{}", container))?;
-
-    if container_info.status != "running" {
-        info!("容器未运行，正在启动...");
-        podman.start(&container).await?;
-        // 等待 server 启动
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    let info = containers
+        .iter()
+        .find(|c| c.name == name)
+        .with_context(|| format!("容器不存在：{name}"))?;
+    if info.status != "running" {
+        info!("容器 {name} 未运行，正在启动...");
+        podman.start(name).await?;
     }
+    Ok(())
+}
 
-    // root 身份：容器 server 无 root（新身份模型）→ 走宿主 root 通道：
-    // 无命令 = 附接共享 root 终端（与 GUI 同屏，退出 = detach）；
-    // 带命令 = 一次性 root exec（exec_oneshot）
-    if as_root {
-        return cmd_run_root(&podman, &container, command).await;
+/// 轮询等待容器 server socket 就绪，返回 socket 路径。
+///
+/// 250ms × 40 ≈ 10s（server 先 bind 再 accept，socket 文件存在即可连；
+/// 取代旧的固定 sleep(2s)——容器刚 start 时 server 未 bind 会连接失败）。
+async fn wait_socket_ready(name: &str) -> Result<PathBuf> {
+    let socket = easytidy_core::host_socket_path(name)?;
+    for _ in 0..40 {
+        if socket.exists() {
+            return Ok(socket);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
     }
+    bail!("等待容器 server 就绪超时（{}）", socket.display())
+}
 
-    // 2. 连接到 socket
-    let socket_path = easytidy_core::host_socket_path(&container)?;
-    info!("连接到 socket：{}", socket_path.display());
+/// 确保容器运行 + 等待 server socket 就绪（[`cmd_open`] / [`cmd_run`] 共用）。
+async fn ensure_running_and_ready(podman: &Podman, name: &str) -> Result<PathBuf> {
+    ensure_running(podman, name).await?;
+    wait_socket_ready(name).await
+}
 
-    let stream = UnixStream::connect(&socket_path)
+/// 连接容器 server socket → hello → pty.open → 双向流式转发，
+/// 阻塞至应用退出，返回其退出码（server 侧有损 0/-1，见 server pty.rs）。
+///
+/// [`cmd_run`]（非 root 带命令）与 [`cmd_open`]（passthrough 快捷方式）共用。
+async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32> {
+    let stream = UnixStream::connect(socket)
         .await
-        .context(format!("连接 socket 失败（容器可能未就绪）：{}",
-            socket_path.display()))?;
+        .with_context(|| format!("连接 socket 失败（容器可能未就绪）：{}", socket.display()))?;
 
-    // 3. 握手
     let codec = FrameCodec::new();
     let mut framed = Framed::new(stream, codec);
 
-    // 发送握手
+    // 握手
     let handshake = Handshake {
         v: PROTOCOL_VERSION,
         client: "easytidy-cli".to_string(),
@@ -768,11 +851,14 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         payload: serde_json::to_value(handshake)?,
         err: None,
     };
-    framed.send(Frame::Json(handshake_msg)).await
+    framed
+        .send(Frame::Json(handshake_msg))
+        .await
         .context("发送握手失败")?;
 
-    // 接收握手确认
-    let ack_frame = framed.next().await
+    let ack_frame = framed
+        .next()
+        .await
         .context("接收握手确认失败")?
         .context("握手确认帧为空")?;
 
@@ -785,17 +871,18 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         bail!("握手响应格式错误");
     }
 
-    let ack: HandshakeAck = serde_json::from_value(ack_msg.payload)
-        .context("解析握手确认失败")?;
+    let ack: HandshakeAck = serde_json::from_value(ack_msg.payload).context("解析握手确认失败")?;
 
     debug!("握手成功：server={}, v={}", ack.server, ack.v);
 
     if ack.v != PROTOCOL_VERSION {
-        bail!("协议版本不匹配：客户端={}，服务端={}",
-            PROTOCOL_VERSION, ack.v);
+        bail!(
+            "协议版本不匹配：客户端={}，服务端={}",
+            PROTOCOL_VERSION,
+            ack.v
+        );
     }
 
-    // 4. 准备 PTY 打开
     // 获取当前终端尺寸；无 tty 场景（桌面图标/CRON 启动，ioctl 返回
     // EAGAIN——journalctl 实测）回退 80×24，不影响命令执行
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
@@ -815,7 +902,8 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
     let env: std::collections::HashMap<String, String> = std::env::vars()
         .filter(|(k, _)| {
             // 过滤掉可能干扰容器的变量
-            !matches!(k.as_str(),
+            !matches!(
+                k.as_str(),
                 "DISPLAY" | "WAYLAND_DISPLAY" | "XDG_RUNTIME_DIR" | "DBUS_SESSION_BUS_ADDRESS"
             )
         })
@@ -842,11 +930,15 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         payload: serde_json::to_value(pty_open)?,
         err: None,
     };
-    framed.send(Frame::Json(pty_open_msg)).await
+    framed
+        .send(Frame::Json(pty_open_msg))
+        .await
         .context("发送 pty.open 失败")?;
 
     // 接收 pty.open 响应
-    let open_resp_frame = framed.next().await
+    let open_resp_frame = framed
+        .next()
+        .await
         .context("接收 pty.open 响应失败")?
         .context("pty.open 响应为空")?;
 
@@ -859,13 +951,13 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         bail!("pty.open 失败：{} - {}", err.code, err.message);
     }
 
-    let open_resp: PtyOpenResp = serde_json::from_value(open_resp_msg.payload)
-        .context("解析 pty.open 响应失败")?;
+    let open_resp: PtyOpenResp =
+        serde_json::from_value(open_resp_msg.payload).context("解析 pty.open 响应失败")?;
 
     let stream_id = open_resp.stream_id;
     debug!("PTY 打开成功：stream_id={}", stream_id);
 
-    // 5. 进入主循环
+    // 进入主循环
     // 设置终端为 raw 模式（非 TTY（如管道/无头 setup）时跳过，仍可流式 I/O）
     let mut raw_enabled = false;
     match terminal::enable_raw_mode() {
@@ -887,8 +979,7 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
     std::thread::spawn(move || {
         use signal_hook::iterator::Signals;
 
-        let mut signals = Signals::new([signal_hook::consts::SIGWINCH])
-            .expect("注册信号处理失败");
+        let mut signals = Signals::new([signal_hook::consts::SIGWINCH]).expect("注册信号处理失败");
 
         while signal_running.load(Ordering::Relaxed) {
             if signals.forever().next().is_some() {
@@ -1002,23 +1093,147 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
         exit_code
     });
 
-    // stdin → PTY 输入循环（简化版：暂时不实现）
-    // 完整实现需要使用 select! 同时处理 stdin 读取和 framed 接收
-
     // 等待退出
     let code = exit_code.await?.unwrap_or(0);
     running.store(false, Ordering::Relaxed);
 
     // 清理（仅当之前成功进入 raw 模式）
     if raw_enabled {
-        terminal::disable_raw_mode()
-            .context("恢复终端模式失败")?;
+        terminal::disable_raw_mode().context("恢复终端模式失败")?;
     }
 
     // 恢复终端并打印换行
     println!();
 
     Ok(code)
+}
+
+/// 读注册表中容器的 `silent_boot`；无配置/无条目/读失败 → false（Default 语义）。
+fn silent_boot_for(config_path: Option<&Path>, name: &str) -> bool {
+    let Some(path) = config_path
+        .map(Path::to_path_buf)
+        .or_else(|| ConfigFile::default_path().ok())
+    else {
+        return false;
+    };
+    ConfigFile::with_path(path)
+        .get_container(name)
+        .ok()
+        .flatten()
+        .map(|c| c.silent_boot)
+        .unwrap_or(false)
+}
+
+/// 弹出终端窗口显示友好错误（桌面快捷点击无 TTY，stderr 用户看不到）。
+///
+/// 探测顺序：xterm → konsole → gnome-terminal → xfce4-terminal →
+/// notify-send → stderr 兜底。快捷方式拉起的 CLI 带完整会话 PATH，
+/// `spawn` 成功即视为可用（NotFound 则试下一个）。
+fn show_error_in_terminal(message: &str) {
+    // 消息自生成 + 容器名，无用户输入，单引号安全
+    let script = format!(
+        "printf '%s\\n' '{}'; read -r _",
+        message.replace('\'', r"\'")
+    );
+    let attempts: &[(&str, &[&str])] = &[
+        ("xterm", &["-hold", "-e", "sh", "-c"]),
+        ("konsole", &["-e", "sh", "-c"]),
+        ("gnome-terminal", &["--", "sh", "-c"]),
+        ("xfce4-terminal", &["-x", "sh", "-c"]),
+    ];
+    for (term, prefix) in attempts {
+        let mut cmd = std::process::Command::new(term);
+        cmd.args(*prefix).arg(&script);
+        match cmd.spawn() {
+            Ok(_) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        }
+    }
+    // 无终端 → 桌面通知兜底
+    let mut notify = std::process::Command::new("notify-send");
+    notify.args(["-u", "critical", "easytidy", message]);
+    let _ = notify.status();
+    eprintln!("{message}");
+}
+
+/// 桌面快捷方式统一入口（垫片，三段式语义）。
+///
+/// - 容器不存在/已删除 → 友好终端报错 + exit 1
+/// - 未运行 → 先拉起（auto_start 应用由容器内 server 自拉起，见
+///   server `launch_auto_start`）
+/// - 无命令（容器入口）：`silent_boot` = true 仅保活不弹 GUI；
+///   false = 等 socket 就绪后 spawn Worker GUI（detach）
+/// - 带命令（passthrough 应用）：经 server PTY 转发（[`forward_pty_command`]），
+///   阻塞至应用退出，返回退出码
+async fn cmd_open(
+    container: String,
+    command: Vec<String>,
+    config_path: Option<PathBuf>,
+) -> Result<i32> {
+    info!("打开容器：container={container}, cmd={command:?}");
+
+    let podman = Podman::connect().await?;
+
+    // ① 容器不存在（未创建/已删除）：友好终端报错
+    if !podman
+        .list_containers()
+        .await?
+        .iter()
+        .any(|c| c.name == container)
+    {
+        show_error_in_terminal(&format!(
+            "容器 {container} 不存在（可能已删除或尚未创建）。\n\n\
+             可通过 easytidy GUI（Master）或命令行创建：\n\
+             easytidy create --image <镜像> --name {container}"
+        ));
+        bail!("容器不存在：{container}");
+    }
+
+    // ② 确保运行 + 等待 server socket 就绪
+    let socket = ensure_running_and_ready(&podman, &container).await?;
+
+    // ③ 分支
+    if command.is_empty() {
+        if silent_boot_for(config_path.as_deref(), &container) {
+            // 静默：只保证容器在跑（auto_start 应用由 server 自拉起）
+            info!("silent_boot：仅确保容器 {container} 运行（不弹 GUI）");
+            return Ok(0);
+        }
+        // 非静默：拉起 Worker GUI（detached），复用 cmd_boot 的二进制探测
+        let gui_bin =
+            gui_binary_path().ok_or_else(|| anyhow::anyhow!("找不到 easytidy-gui 可执行文件"))?;
+        std::process::Command::new(&gui_bin)
+            .arg("--container")
+            .arg(&container)
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("拉起 Worker GUI 失败：{e}"))?;
+        info!("已拉起 Worker GUI（{container}）");
+        return Ok(0);
+    }
+
+    // 透传应用命令（阻塞至应用退出，退出码透传）
+    forward_pty_command(&socket, command).await
+}
+
+async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Result<i32> {
+    info!("运行容器内命令：container={}, cmd={:?}", container, command);
+
+    let podman = Podman::connect().await?;
+
+    // root 身份：容器 server 无 root（新身份模型）→ 走宿主 root 通道：
+    // 无命令 = 附接共享 root 终端（与 GUI 同屏，退出 = detach）；
+    // 带命令 = 一次性 root exec（exec_oneshot）
+    if as_root {
+        return cmd_run_root(&podman, &container, command).await;
+    }
+
+    // 确保运行 + 等 server socket 就绪（修复旧的固定 sleep(2s) 竞态）
+    let socket = ensure_running_and_ready(&podman, &container).await?;
+    info!("连接到 socket：{}", socket.display());
+
+    // 经 server PTY 转发命令（阻塞至应用退出，退出码透传）
+    forward_pty_command(&socket, command).await
 }
 
 /// 以容器 root 身份运行。
@@ -1030,17 +1245,9 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
 ///   CLI 退出 = **detach**，会话继续运行）
 /// - **带命令** = 一次性 root exec（`exec_oneshot`，拿真实退出码）
 async fn cmd_run_root(podman: &Podman, container: &str, command: Vec<String>) -> Result<i32> {
-    // 确保容器运行中
-    let containers = podman.list_containers().await?;
-    let container_info = containers
-        .iter()
-        .find(|c| c.name == container)
-        .context(format!("容器不存在：{}", container))?;
-    if container_info.status != "running" {
-        info!("容器未运行，正在启动...");
-        podman.start(container).await?;
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-    }
+    // 确保容器运行中（root 通道有自己的就绪管理——ensure_running 足够，
+    // 无需等 server socket：exec_oneshot 走 podman socket 而非容器内 server）
+    ensure_running(podman, container).await?;
 
     // 带命令 = 一次性 root exec
     if !command.is_empty() {
@@ -1130,8 +1337,7 @@ async fn cmd_run_root_attach(container: &str) -> Result<i32> {
                 if let Some(err) = msg.err {
                     bail!("rc.attach 失败：{} - {}", err.code, err.message);
                 }
-                let ack: easytidy_protocol::rc::RcAttachAck =
-                    serde_json::from_value(msg.payload)?;
+                let ack: easytidy_protocol::rc::RcAttachAck = serde_json::from_value(msg.payload)?;
                 if !ack.alive {
                     bail!("root 会话已死（容器未运行或 shell 已退出）");
                 }
@@ -1153,8 +1359,7 @@ async fn cmd_run_root_attach(container: &str) -> Result<i32> {
     let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
     std::thread::spawn(move || {
         use signal_hook::iterator::Signals;
-        let mut signals = Signals::new([signal_hook::consts::SIGWINCH])
-            .expect("注册信号处理失败");
+        let mut signals = Signals::new([signal_hook::consts::SIGWINCH]).expect("注册信号处理失败");
         for _ in signals.forever() {
             if signal_tx.send(()).is_err() {
                 break;
@@ -1245,4 +1450,39 @@ async fn cmd_run_root_attach(container: &str) -> Result<i32> {
         info!("已 detach（root 会话继续运行，GUI root 终端同屏可见）");
     }
     Ok(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_silent_boot_for_missing_file() {
+        // 无配置文件 → false（Default 语义）
+        assert!(!silent_boot_for(None, "nosuch"));
+    }
+
+    #[test]
+    fn test_silent_boot_for_reads_config() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cf = ConfigFile::with_path(path.clone());
+        cf.register_container(ContainerConfig {
+            name: "c1".to_string(),
+            params: easytidy_core::models::ContainerParams {
+                image: "alpine:latest".to_string(),
+                ..Default::default()
+            },
+            silent_boot: true,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert!(
+            silent_boot_for(Some(&path), "c1"),
+            "silent_boot=true 应读回 true"
+        );
+        assert!(!silent_boot_for(Some(&path), "c2"), "未注册容器 → false");
+    }
 }

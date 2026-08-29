@@ -4,30 +4,30 @@
 //! 指向配置 uid:gid（宿主侧 create_with_config），server 无需建号/降权。
 //! 身份来源（零 getent 依赖，server 与自身 uid 同权限）：
 //! 1. `/proc/self/status`（Uid/Gid 行）
-//! 2. `/etc/passwd`（uid 反查名字与 home；无条目 = 镜像未预置且宿主
-//!    未配置用户名，正常形态——whoami 显示 uid 数字）
+//! 2. `/etc/passwd`（uid 反查名字与 home；**名字与 HOME 同源**——
+//!    容器默认用户自身的条目，如 ubuntu 的 /home/ubuntu）
 //! 3. 宿主侧注入的提示 env：`EASYTIDY_USER_NAME`（配置用户名，与
-//!    `prepare_container` 的 useradd 命名一致）、`EASYTIDY_HOME`
-//!    （未配用户名时 server 的 HOME 回退值——keep-id 容器期望应用
-//!    数据落宿主 home）
+//!    容器内建号命名一致；镜像无该 uid 真实条目且建号尚未执行时
+//!    的名字/home 来源）
+//!
+//! 名字/HOME 解析的**单一事实源**在 `easytidy_core::incontainer::
+//! resolve_identity`——与容器内 ctool 的 ensure-home 共用同一函数，
+//! 保证 server 的 HOME 与 ctool 实际补齐的目录必然一致（2026-08-28
+//! 定案：家目录跟随容器默认用户 passwd home，容器层持久）。
 //!
 //! 旧 root 容器（User=0:0）不再支持完整功能：检测到 euid==0 仅告警，
 //! 按 uid 0 身份继续（存量测试容器能跑即可，装包走宿主 root 通道）。
 //! 容器内建号/sudoers/fontconfig 等 root 操作已全部迁到宿主侧
-//! （`core::podman::user::prepare_container`）。
+//! （`core::podman::user::prepare_container` → 容器内 easytidy-ctool）。
 
 use std::fs;
 use std::sync::OnceLock;
 
 use tracing::{info, warn};
 
-#[derive(Clone)]
-pub(crate) struct UserMap {
-    pub(crate) name: String,
-    pub(crate) uid: u32,
-    pub(crate) gid: u32,
-    pub(crate) home: String,
-}
+/// 当前身份（`easytidy_core::incontainer::Identity` 的本地别名——
+/// 名字/HOME 解析与容器内 ctool 共用 core 的单一事实源）。
+pub(crate) type UserMap = easytidy_core::incontainer::Identity;
 
 /// 自身 uid/gid（/proc/self/status 解析，零依赖）。
 pub(crate) fn self_uid_gid() -> (u32, u32) {
@@ -54,61 +54,10 @@ pub(crate) fn user_map() -> Option<&'static UserMap> {
     USER_MAP.get()
 }
 
-/// /etc/passwd 条目（name/home 提取；`name:x:uid:gid:gecos:home:shell`）。
-struct PasswdEntry {
-    name: String,
-    home: String,
-}
-
-/// 纯解析：passwd 文本中 uid 对应的条目。
-fn passwd_entry_for_uid(passwd: &str, uid: u32) -> Option<PasswdEntry> {
-    for line in passwd.lines() {
-        let f: Vec<&str> = line.split(':').collect();
-        if f.len() >= 6 && f[2].parse::<u32>().ok() == Some(uid) {
-            return Some(PasswdEntry {
-                name: f[0].to_string(),
-                home: f[5].to_string(),
-            });
-        }
-    }
-    None
-}
-
-/// 由输入构造身份（纯函数，单测点）。
-///
-/// 名字优先级：`EASYTIDY_USER_NAME` → passwd 反查 → `uid<uid>`（无 passwd
-/// 条目的正常形态）。
-///
-/// HOME 优先级：配置用户名 → `/home/<name>`（prepare_container 的
-/// useradd -m 建目录，不依赖 useradd 执行时序）；未配用户名 →
-/// `EASYTIDY_HOME`（keep-id 容器 = 宿主 home）→ passwd 条目 home → `/`。
-/// 绝不造 `/home/<uid>` 这类无意义路径。
-pub(crate) fn identity_from_inputs(
-    passwd: &str,
-    uid: u32,
-    gid: u32,
-    env_name: Option<&str>,
-    env_home: Option<&str>,
-) -> UserMap {
-    let env_name = env_name.filter(|n| !n.is_empty());
-    let env_home = env_home.filter(|h| !h.is_empty());
-    let entry = passwd_entry_for_uid(passwd, uid);
-
-    let name = match env_name {
-        Some(n) => n.to_string(),
-        None => entry.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| format!("uid{uid}")),
-    };
-    let home = match env_name {
-        Some(n) => format!("/home/{n}"),
-        None => match env_home {
-            Some(h) => h.to_string(),
-            None => entry.as_ref().map(|e| e.home.clone()).unwrap_or_else(|| "/".to_string()),
-        },
-    };
-    UserMap { name, uid, gid, home }
-}
-
 /// 启动期身份初始化（main 初始化后、listen 前调用；同步，无 IO 阻塞点）。
+///
+/// 名字/HOME 解析委托 `easytidy_core::incontainer::resolve_identity`
+/// （与容器内 ctool 的 ensure-home 同一事实源）。
 pub(crate) fn setup_user_identity() -> UserMap {
     let (uid, gid) = self_uid_gid();
     if uid == 0 {
@@ -119,9 +68,7 @@ pub(crate) fn setup_user_identity() -> UserMap {
     }
     let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
     let env_name = std::env::var("EASYTIDY_USER_NAME").ok();
-    let env_home = std::env::var("EASYTIDY_HOME").ok();
-    let identity =
-        identity_from_inputs(&passwd, uid, gid, env_name.as_deref(), env_home.as_deref());
+    let identity = easytidy_core::incontainer::resolve_identity(&passwd, uid, gid, env_name.as_deref());
     let _ = USER_MAP.set(identity.clone());
     info!("身份自发现：{}({}:{}) home={}", identity.name, identity.uid, identity.gid, identity.home);
     identity
@@ -211,57 +158,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
-                     tidy:x:1000:1000::/home/tidy:/bin/bash\n\
-                     other:x:1001:1001::/home/other:/bin/sh\n";
-
-    #[test]
-    fn test_identity_named_user() {
-        // 配置用户名：名字 = env 值，home = /home/<name>（不依赖 passwd 条目）
-        let id = identity_from_inputs(PASSWD, 1000, 1000, Some("tidy"), Some("/home/div"));
-        assert_eq!(id.name, "tidy");
-        assert_eq!(id.home, "/home/tidy");
-        // useradd 尚未执行（无 passwd 条目）也成立
-        let id = identity_from_inputs("", 1000, 1000, Some("tidy"), None);
-        assert_eq!(id.name, "tidy");
-        assert_eq!(id.home, "/home/tidy");
-    }
-
-    #[test]
-    fn test_identity_passwd_lookup() {
-        // 未配用户名 + passwd 有条目 → 反查名字与 home
-        let id = identity_from_inputs(PASSWD, 1000, 1000, None, Some("/home/div"));
-        assert_eq!(id.name, "tidy");
-        assert_eq!(id.home, "/home/div", "EASYTIDY_HOME 优先于 passwd home");
-    }
-
-    #[test]
-    fn test_identity_passwd_home_fallback() {
-        // 未配用户名 + 无 HOME 提示 → passwd 条目 home
-        let id = identity_from_inputs(PASSWD, 1000, 1000, None, None);
-        assert_eq!(id.name, "tidy");
-        assert_eq!(id.home, "/home/tidy");
-    }
-
-    #[test]
-    fn test_identity_no_passwd_entry() {
-        // 未配用户名 + 无 passwd 条目（正常形态）→ uid<uid> + EASYTIDY_HOME
-        let id = identity_from_inputs(PASSWD, 2000, 2000, None, Some("/home/div"));
-        assert_eq!(id.name, "uid2000");
-        assert_eq!(id.home, "/home/div");
-        // 连 HOME 提示都没有 → "/"
-        let id = identity_from_inputs(PASSWD, 2000, 2000, None, None);
-        assert_eq!(id.name, "uid2000");
-        assert_eq!(id.home, "/");
-    }
-
-    #[test]
-    fn test_identity_empty_env_ignored() {
-        // 空串 env 按缺失处理
-        let id = identity_from_inputs(PASSWD, 1000, 1000, Some(""), Some(""));
-        assert_eq!(id.name, "tidy");
-        assert_eq!(id.home, "/home/tidy");
-    }
+    // 身份解析（resolve_identity）的测试随单一事实源迁到
+    // easytidy_core::incontainer::tests（server 与 ctool 共用）。
 
     #[test]
     fn test_self_uid_gid_reads_proc() {

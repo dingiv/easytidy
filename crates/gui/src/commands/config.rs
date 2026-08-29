@@ -83,9 +83,9 @@ pub async fn apply_container_config(
 
     // 直接调用 core（不依赖 GuiSession）：commit → 删旧 → 同名重建（新配置）→ 启动
     let podman = Podman::connect().await.map_err(|e| e.to_string())?;
-    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
+    let bins = easytidy_core::ContainerBins::resolve().map_err(|e| e.to_string())?;
     let new_id = podman
-        .rebuild(&name, &container_config, &server_bin)
+        .rebuild(&name, &container_config, &bins)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -133,9 +133,9 @@ pub async fn config_sync_from_template(name: String) -> Result<String, String> {
     // flavor 已由 conf_template_expand 盖为 template_name,无需重复设
 
     let podman = Podman::connect().await.map_err(|e| format!("连接 podman 失败：{e}"))?;
-    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
+    let bins = easytidy_core::ContainerBins::resolve().map_err(|e| e.to_string())?;
     podman
-        .rebuild(&name, &next, &server_bin)
+        .rebuild(&name, &next, &bins)
         .await
         .map_err(|e| format!("重建容器失败：{e}"))?;
     // 容器内准备（fontconfig + 可选 useradd）：失败不阻断同步（落日志）

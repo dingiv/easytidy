@@ -279,9 +279,9 @@ pub async fn env_new(
     }
 
     let p = try_log!(podman.get().await, "连接 podman");
-    let server_bin = try_log!(easytidy_core::server_binary_path(), "定位 server 二进制");
+    let bins = try_log!(easytidy_core::ContainerBins::resolve(), "定位容器内二进制");
     try_log!(
-        p.create_with_config(&config.name, &config.params.image, &server_bin, &config)
+        p.create_with_config(&config.name, &config.params.image, &bins, &config)
             .await,
         "创建容器"
     );
@@ -298,8 +298,15 @@ pub async fn env_new(
     try_log!(config_file.register_container(config), "注册环境配置");
 
     // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可——旧
-    // create_container 路径的行为，统一入口后由此处承接）
-    if let Err(e) = desktop::install_desktop_entry(&name, None, None) {
+    // create_container 路径的行为，统一入口后由此处承接）。
+    // Exec 指向 CLI 垫片（`easytidy open --container <name>`），点击时由
+    // CLI 决定保活/弹 GUI/友好报错。
+    if let Err(e) = desktop::install_desktop_entry(
+        &name,
+        None,
+        None,
+        &crate::commands::passthrough::cli_path(),
+    ) {
         warn!("生成桌面图标失败（忽略）：{e}");
     }
 
@@ -409,8 +416,8 @@ pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) ->
         .ok_or_else(|| format!("环境 {name} 不在注册表（先创建）"))?;
 
     let p = podman.get().await.map_err(|e| e.to_string())?;
-    let server_bin = easytidy_core::server_binary_path().map_err(|e| e.to_string())?;
-    p.rebuild(&name, &config, &server_bin)
+    let bins = easytidy_core::ContainerBins::resolve().map_err(|e| e.to_string())?;
+    p.rebuild(&name, &config, &bins)
         .await
         .map_err(|e| format!("重建失败：{e}"))?;
     // 容器内准备（fontconfig + 可选 useradd）：失败不阻断重建（落日志）

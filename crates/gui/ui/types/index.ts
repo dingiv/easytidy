@@ -163,7 +163,7 @@ export interface HostUser {
 export interface ContainerConfigView {
   mounts: MountConfig[];
   network: ContainerNetworkConfig;
-  /// 当前生效环境变量（含 EASYTIDY_HOME/EASYTIDY_USER_NAME 系统注入与
+  /// 当前生效环境变量（含 EASYTIDY_USER_NAME 系统注入与
   /// podman 默认 PATH/HOSTNAME 等）
   env: string[];
   /// 容器进程用户（"<uid>:<gid>"，即容器默认用户）
