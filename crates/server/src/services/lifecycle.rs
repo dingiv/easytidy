@@ -176,6 +176,65 @@ mod tests {
         }
     }
 
+    /// fs.list 符号链接按解析后的目标类型分类（目录链接 → Dir 可导航，
+    /// 文件链接 → File 带目标大小，坏链接 → Symlink）
+    #[tokio::test]
+    async fn test_fs_list_symlinks_resolved_by_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        fs::create_dir(temp_dir.path().join("realdir")).unwrap();
+        fs::write(temp_dir.path().join("real.txt"), b"hello").unwrap();
+        symlink(temp_dir.path().join("realdir"), temp_dir.path().join("dirlink")).unwrap();
+        symlink(temp_dir.path().join("real.txt"), temp_dir.path().join("filelink")).unwrap();
+        symlink(temp_dir.path().join("missing"), temp_dir.path().join("broken")).unwrap();
+
+        let req = Message {
+            id: 1,
+            kind: MsgKind::Req,
+            op: "fs.list".to_string(),
+            payload: serde_json::to_value(FsList {
+                path: temp_dir.path().to_str().unwrap().to_string(),
+            }).unwrap(),
+            err: None,
+        };
+
+        let msg = handle_fs_list(req).await.unwrap();
+        let list_resp = if let Frame::Json(resp) = msg {
+            serde_json::from_value::<FsListResp>(resp.payload).unwrap()
+        } else {
+            panic!("Expected JSON frame");
+        };
+
+        let by_name: std::collections::HashMap<String, easytidy_protocol::ops::FsEntry> =
+            list_resp
+                .entries
+                .into_iter()
+                .map(|e| (e.name.clone(), e))
+                .collect();
+
+        assert!(
+            matches!(by_name["dirlink"].entry_type, easytidy_protocol::ops::FsEntryType::Dir),
+            "目录符号链接应分类为 Dir（GUI 可导航）"
+        );
+        assert!(by_name["dirlink"].is_symlink, "目录链接应标记 is_symlink（图标区分）");
+        assert!(
+            matches!(by_name["filelink"].entry_type, easytidy_protocol::ops::FsEntryType::File),
+            "文件符号链接应分类为 File（GUI 可打开）"
+        );
+        assert_eq!(by_name["filelink"].size, Some(5), "文件链接应显示目标大小");
+        assert!(by_name["filelink"].is_symlink, "文件链接应标记 is_symlink（图标区分）");
+        assert!(
+            matches!(by_name["broken"].entry_type, easytidy_protocol::ops::FsEntryType::Symlink),
+            "坏链接应保留 Symlink 类型"
+        );
+        assert!(by_name["broken"].is_symlink);
+        assert!(
+            matches!(by_name["realdir"].entry_type, easytidy_protocol::ops::FsEntryType::Dir)
+        );
+        assert!(!by_name["realdir"].is_symlink, "普通目录不应标记 is_symlink");
+    }
+
     /// Test FS list
     #[tokio::test]
     async fn test_fs_list() {

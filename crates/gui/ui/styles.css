@@ -293,7 +293,23 @@ button:disabled {
 }
 
 .file-icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
   font-size: 1.2rem;
+}
+
+/* 符号链接：主图标青色（区别于普通目录/文件的默认色）+ 右下角链接徽章 */
+.file-icon.symlink {
+  color: #89dceb;
+}
+
+.file-icon-link {
+  position: absolute;
+  right: -8px;
+  bottom: -2px;
+  font-size: 0.65rem;
+  color: #89dceb;
 }
 
 .file-name {

@@ -13,6 +13,7 @@ import {
   FolderOutlined,
   FileOutlined,
   ArrowLeftOutlined,
+  LinkOutlined,
 } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import type { FsEntry } from '../types';
@@ -373,8 +374,9 @@ export function FileBrowser({ onOpenFile, onPreviewImage, followTerminal, onTogg
                       }
                     }}
                   >
-                    <span className="file-icon">
+                    <span className={`file-icon${entry.is_symlink ? ' symlink' : ''}`}>
                       {entry.is_dir ? <FolderOutlined /> : <FileOutlined />}
+                      {entry.is_symlink && <LinkOutlined className="file-icon-link" />}
                     </span>
                     <span className="file-name">{entry.name}</span>
                     <span className="file-size">{entry.is_dir ? '' : formatSize(entry.size)}</span>

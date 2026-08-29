@@ -13,6 +13,7 @@ import { forwardRef, useEffect, useImperativeHandle, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
 import {
+  App as AntApp,
   Alert,
   Button,
   Card,
@@ -67,6 +68,7 @@ function ContainersPanelInner(
   { refreshTick = 0 }: ContainersPanelProps,
   ref: React.Ref<ContainerRef>,
 ) {
+  const { message } = AntApp.useApp();
   const [envs, setEnvs] = useState<EnvView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -148,7 +150,8 @@ function ContainersPanelInner(
     }
   };
 
-  /** 快照(commit 当前文件系统层为独立备份资产；标签可用于后续手动恢复/重建) */
+  /** 快照(commit 当前文件系统层为独立备份资产；标签可用于后续手动恢复/重建。
+   *  未接管容器同样适用——commit 是 podman 原生能力，不依赖 easytidy 注册配置) */
   const handleSnapshot = async (env: EnvView) => {
     const tag = (snapshotTag[env.name] ?? '').trim();
     try {
@@ -157,7 +160,7 @@ function ContainersPanelInner(
         tag: tag || null,
       });
       setSnapshotTag((prev) => ({ ...prev, [env.name]: '' }));
-      console.log(`env_snapshot ok: ${imageRef}`);
+      message.success(`快照已创建：${imageRef}（可作为基础镜像新建容器）`);
       await load();
     } catch (err: any) {
       setError(errMsg(err, `创建容器「${env.name}」快照失败`));
@@ -249,7 +252,8 @@ function ContainersPanelInner(
                         运行
                       </Button>
                     ) : null}
-                    {/* 打开/重建/快照/fork 依赖 easytidy server 或注册配置，未接管容器不适用 */}
+                    {/* 打开/重建依赖 easytidy server 或注册配置，未接管容器不适用；
+                        快照仅 podman commit，不依赖注册配置，未接管容器同样可快照 */}
                     {managed && (
                       <Button
                         size="small"
@@ -281,31 +285,29 @@ function ContainersPanelInner(
                         </Button>
                       </Popconfirm>
                     )}
-                    {managed && (
-                      <Popconfirm
-                        title="创建快照"
-                        description={
-                          <Input
-                            placeholder="快照标签(可选,默认时间戳)"
-                            value={snapshotTag[env.name] ?? ''}
-                            onChange={(e) =>
-                              setSnapshotTag((prev) => ({ ...prev, [env.name]: e.target.value }))
-                            }
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') handleSnapshot(env);
-                            }}
-                          />
-                        }
-                        okText="创建"
-                        cancelText="取消"
-                        disabled={missing}
-                        onConfirm={() => handleSnapshot(env)}
-                      >
-                        <Button size="small" icon={<CameraOutlined />} disabled={missing}>
-                          快照
-                        </Button>
-                      </Popconfirm>
-                    )}
+                    <Popconfirm
+                      title="创建快照"
+                      description={
+                        <Input
+                          placeholder="快照标签(可选,默认时间戳)"
+                          value={snapshotTag[env.name] ?? ''}
+                          onChange={(e) =>
+                            setSnapshotTag((prev) => ({ ...prev, [env.name]: e.target.value }))
+                          }
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSnapshot(env);
+                          }}
+                        />
+                      }
+                      okText="创建"
+                      cancelText="取消"
+                      disabled={missing}
+                      onConfirm={() => handleSnapshot(env)}
+                    >
+                      <Button size="small" icon={<CameraOutlined />} disabled={missing}>
+                        快照
+                      </Button>
+                    </Popconfirm>
                     <Popconfirm
                       title={`删除容器「${env.name}」?`}
                       description={

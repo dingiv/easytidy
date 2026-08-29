@@ -132,8 +132,13 @@ pub struct FsListResp {
 pub struct FsEntry {
     /// 文件名
     pub name: String,
-    /// 类型（file, dir, symlink）
+    /// 类型（file, dir, symlink）。符号链接按解析后的目标类型分类
+    /// （目录链接 → dir、文件链接 → file），坏链接才是 symlink
     pub entry_type: FsEntryType,
+    /// 是否为符号链接（与 entry_type 正交：目录/文件链接也为 true，
+    /// 前端据此区分图标）
+    #[serde(default)]
+    pub is_symlink: bool,
     /// 大小（字节，仅文件）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<u64>,
@@ -594,6 +599,7 @@ mod tests {
         let entry = FsEntry {
             name: "test.txt".to_string(),
             entry_type: FsEntryType::File,
+            is_symlink: false,
             size: Some(1024),
             mode: Some("0644".to_string()),
         };

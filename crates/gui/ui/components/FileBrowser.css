@@ -73,6 +73,13 @@
   overflow: hidden;
 }
 
+/* @uiw/react-codemirror 在 .file-editor-cm 与 .cm-editor 之间还渲染一层
+   包装 div（class cm-theme-*）；它默认 height:auto 会撑到内容高度，截断
+   百分比高度链 → .cm-editor 的 height:100% 解析失败、无滚动条、滚轮失效 */
+.file-editor-cm > div {
+  height: 100%;
+}
+
 .file-editor-cm .cm-editor {
   height: 100%;
   font-size: 0.85rem;

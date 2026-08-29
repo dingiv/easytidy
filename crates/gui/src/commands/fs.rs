@@ -19,6 +19,8 @@ use crate::state::GuiSession;
 pub struct FsEntry {
     pub name: String,
     pub is_dir: bool,
+    /// 符号链接（前端图标区分：链接目录/链接文件）
+    pub is_symlink: bool,
     pub size: Option<u64>,
     pub mtime: i64,
 }
@@ -52,6 +54,7 @@ pub async fn fs_list(
         .map(|e| FsEntry {
             name: e.name,
             is_dir: matches!(e.entry_type, easytidy_protocol::ops::FsEntryType::Dir),
+            is_symlink: e.is_symlink,
             size: e.size,
             mtime: 0, // TODO: 从 FsStatResp 获取
         })

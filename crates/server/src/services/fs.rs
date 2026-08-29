@@ -23,31 +23,34 @@ pub(crate) async fn handle_fs_list(msg: Message) -> Result<Frame> {
 
     if let Ok(iter) = fs::read_dir(path) {
         for entry in iter.flatten() {
-            let metadata = match entry.metadata() {
+            // DirEntry::metadata() 是 lstat 语义（不跟随符号链接）
+            let lstat = match entry.metadata() {
                 Ok(m) => m,
                 Err(_) => continue,
             };
 
             let name = entry.file_name().to_string_lossy().to_string();
-            let entry_type = if metadata.is_dir() {
-                FsEntryType::Dir
-            } else if metadata.is_symlink() {
-                FsEntryType::Symlink
+            // 符号链接按**解析后的目标类型**分类（与 cd/ls 语义一致）：
+            // 目录链接可进入（GUI 双击导航）、文件链接可打开（显示目标大小）、
+            // 坏链接/特殊文件保留 Symlink 类型（GUI 点击读不到目标，正常报错）
+            let (entry_type, size) = if lstat.is_dir() {
+                (FsEntryType::Dir, None)
+            } else if lstat.is_symlink() {
+                match fs::metadata(entry.path()) {
+                    Ok(target) if target.is_dir() => (FsEntryType::Dir, None),
+                    Ok(target) if target.is_file() => (FsEntryType::File, Some(target.len())),
+                    _ => (FsEntryType::Symlink, None),
+                }
             } else {
-                FsEntryType::File
+                (FsEntryType::File, Some(lstat.len()))
             };
 
-            let size = if metadata.is_file() {
-                Some(metadata.len())
-            } else {
-                None
-            };
-
-            let mode = Some(format!("{:o}", metadata.permissions().mode() & 0o777));
+            let mode = Some(format!("{:o}", lstat.permissions().mode() & 0o777));
 
             entries.push(FsEntry {
                 name,
                 entry_type,
+                is_symlink: lstat.is_symlink(),
                 size,
                 mode,
             });
@@ -72,6 +75,10 @@ pub(crate) async fn handle_fs_stat(msg: Message) -> Result<Frame> {
 
     let metadata = fs::metadata(path)
         .with_context(|| format!("Failed to stat: {}", req.path))?;
+    // 符号链接判定用 lstat（metadata 跟随链接，区分不了链接与目标）
+    let is_symlink = fs::symlink_metadata(path)
+        .map(|m| m.is_symlink())
+        .unwrap_or(false);
 
     let entry_type = if metadata.is_dir() {
         FsEntryType::Dir
@@ -111,17 +118,18 @@ pub(crate) async fn handle_fs_stat(msg: Message) -> Result<Frame> {
         id: msg.id,
         kind: MsgKind::Resp,
         op: "fs.stat".to_string(),
-        payload: serde_json::to_value(FsStatResp {
-            entry: FsEntry {
-                name: req.path.clone(),
-                entry_type,
-                size,
-                mode,
-            },
-            mtime,
-            atime,
-            ctime,
-        })?,
+            payload: serde_json::to_value(FsStatResp {
+                entry: FsEntry {
+                    name: req.path.clone(),
+                    entry_type,
+                    is_symlink,
+                    size,
+                    mode,
+                },
+                mtime,
+                atime,
+                ctime,
+            })?,
         err: None,
     }))
 }

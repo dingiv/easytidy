@@ -33,6 +33,8 @@ export interface EnvView {
 export interface FsEntry {
   name: string;
   is_dir: boolean;
+  /** 符号链接（图标区分：链接目录/链接文件） */
+  is_symlink?: boolean;
   size?: number;
   mtime?: string;
 }
