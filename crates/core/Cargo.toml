@@ -27,6 +27,7 @@ fs2 = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
 libc = { workspace = true }
+tar = { workspace = true }
 
 [build-dependencies]
 easytidy-shared = { path = "../shared" }

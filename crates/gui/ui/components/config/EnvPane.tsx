@@ -1,15 +1,18 @@
 // 环境变量面板：单一合并表（按来源分类型）+ 添加行。
 //
-// 类型（来源）：
+// 类型（来源，按去重优先级从高到低）：
 // - 用户自定义：env 配置（可增删，随「保存并重启」生效）
-// - EasyTidy 注入：EASYTIDY_USER_* 系统注入 + GUI/GPU 透传注入（只读）
+// - EasyTidy 注入：create-time 透传注入（EASYTIDY_USER_* / GUI-GPU）+
+//   容器内 server 运行时探测/修正（XAUTHORITY / XDG_DATA_DIRS 修正）——
+//   同一来源（EasyTidy），只读；运行时项带原因悬停提示
 // - Podman 注入：podman 默认注入（PATH/HOSTNAME 等，只读）
-// - 镜像默认：镜像 ENV 带入的其余变量（只读）
+// - 镜像默认：镜像 ENV 带入的其余变量（镜像作者设定，只读）
 //
-// 用户自定义行可删除（其余行带锁图标只读）；添加行固定在表下方。
+// 同一 key 只出现一次（按上述优先级），用户自定义行可删除（其余行带锁图标
+// 只读）；添加行固定在表下方。
 
 import { useState } from 'react';
-import { App as AntApp, Button, Empty, Input, Table, Typography } from 'antd';
+import { App as AntApp, Button, Empty, Input, Table, Tooltip, Typography } from 'antd';
 import type { TableProps } from 'antd';
 import { DeleteOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons';
 import {
@@ -18,12 +21,15 @@ import {
   parseEnv,
   validateEnv,
 } from './utils';
+import type { ServerEnvItem } from '../../types';
 
 interface EnvPaneProps {
   env: string[];
   /** GUI/GPU 透传开启时引擎将隐式注入的 env（只读展示；gui/gpu 开启时由
    *  passthrough_preview 计算） */
   readonlyEnv?: string[];
+  /** 容器内 server 运行时注入的 env（server.env；只读；仅单容器且容器运行时可查） */
+  serverEnv?: ServerEnvItem[];
   effectiveEnv: string[] | null; // null = 容器未创建
   onAdd(key: string, value: string): void;
   onRemove(idx: number): void;
@@ -47,36 +53,55 @@ interface EnvRow {
   removable: boolean;
   /** env 配置中的下标（仅用户自定义行，删除用） */
   idx?: number;
+  /** 注入原因（easytidy 注入行展示用，悬停提示） */
+  note?: string;
 }
 
-/** 合并三个来源（用户配置 / 引擎透传预览 / 生效环境）为单一表；
- *  同一 key 只出现一次（用户配置优先），其余按来源归类、只读 */
-function buildEnvRows(env: string[], readonlyEnv: string[], effectiveEnv: string[] | null): EnvRow[] {
+/** 合并四个来源（用户配置 / 服务器运行时注入 / 引擎透传预览 / 生效环境）为单一表；
+ *  同一 key 只出现一次，优先级：用户 > 服务器 > EasyTidy > Podman/镜像（只读） */
+function buildEnvRows(
+  env: string[],
+  readonlyEnv: string[],
+  serverEnv: ServerEnvItem[],
+  effectiveEnv: string[] | null,
+): EnvRow[] {
   const rows: EnvRow[] = [];
-  const userKeys = new Set<string>();
+  const taken = new Set<string>();
+
+  // 用户自定义（可增删，最高优先——引擎注入幂等去重，显式写的优先）
   env.forEach((kv, i) => {
     const { key, value } = parseEnv(kv);
-    userKeys.add(key);
+    taken.add(key);
     rows.push({ key, value, type: 'user', removable: true, idx: i });
   });
 
-  const easyKeys = new Set<string>();
+  // 容器内 server 运行时探测/修正的 env（XAUTHORITY / XDG_DATA_DIRS 修正）——
+  // 来源仍是 EasyTidy（与 create-time 透传注入同源），故归入 easytidy；带原因
+  // 悬停提示说明这是 server 运行时注入（配置里定义不了、宿主无法预知）。
+  for (const item of serverEnv) {
+    if (taken.has(item.key)) continue;
+    taken.add(item.key);
+    rows.push({ key: item.key, value: item.value, type: 'easytidy', removable: false, note: item.note });
+  }
+
+  // GUI/GPU 透传注入（create-time 预览）
   for (const kv of readonlyEnv) {
     const { key, value } = parseEnv(kv);
-    if (userKeys.has(key)) continue;
-    easyKeys.add(key);
+    if (taken.has(key)) continue;
+    taken.add(key);
     rows.push({ key, value, type: 'easytidy', removable: false });
   }
 
+  // 生效环境（podman inspect）：剩余按前缀/键集归类
   if (effectiveEnv) {
     for (const kv of effectiveEnv) {
       const { key, value } = parseEnv(kv);
-      if (userKeys.has(key) || easyKeys.has(key)) continue;
+      if (taken.has(key)) continue;
       let type: EnvRowType;
       if (key.startsWith(EASYTIDY_SYSTEM_ENV_PREFIX)) type = 'easytidy';
       else if (PODMAN_DEFAULT_ENV_KEYS.has(key)) type = 'podman';
       else type = 'image';
-      if (type === 'easytidy') easyKeys.add(key);
+      taken.add(key);
       rows.push({ key, value, type, removable: false });
     }
   }
@@ -87,11 +112,13 @@ function buildEnvRows(env: string[], readonlyEnv: string[], effectiveEnv: string
   });
 }
 
-export function EnvPane({ env, readonlyEnv = [], effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
+export function EnvPane({
+  env, readonlyEnv = [], serverEnv = [], effectiveEnv, onAdd, onRemove,
+}: EnvPaneProps) {
   const { message } = AntApp.useApp();
   const [newEnv, setNewEnv] = useState({ key: '', value: '' });
 
-  const rows = buildEnvRows(env, readonlyEnv, effectiveEnv);
+  const rows = buildEnvRows(env, readonlyEnv, serverEnv, effectiveEnv);
 
   const addEnv = () => {
     const key = newEnv.key.trim();
@@ -129,7 +156,10 @@ export function EnvPane({ env, readonlyEnv = [], effectiveEnv, onAdd, onRemove }
       dataIndex: 'type',
       key: 'type',
       width: 130,
-      render: (t: EnvRowType) => <span className={ENV_TYPE_META[t].cls}>{ENV_TYPE_META[t].label}</span>,
+      render: (t: EnvRowType, rec: EnvRow) => {
+        const label = <span className={ENV_TYPE_META[t].cls}>{ENV_TYPE_META[t].label}</span>;
+        return rec.note ? <Tooltip title={rec.note}>{label}</Tooltip> : label;
+      },
     },
     {
       title: '操作',
@@ -177,8 +207,8 @@ export function EnvPane({ env, readonlyEnv = [], effectiveEnv, onAdd, onRemove }
         </Button>
       </div>
       <span className="section-hint">
-        用户自定义行可增删，随「保存并重启」生效；EasyTidy 注入（EASYTIDY_USER_* 与 GUI/GPU 透传）、
-        Podman 注入与镜像默认由引擎/运行时带入，只读。
+        用户自定义行可增删，随「保存并重启」生效；EasyTidy 注入（EASYTIDY_USER_*、GUI/GPU 透传，
+        及容器内 server 运行时探测/修正如 XAUTHORITY）、Podman 注入与镜像默认由引擎/镜像带入，只读。
       </span>
     </div>
   );

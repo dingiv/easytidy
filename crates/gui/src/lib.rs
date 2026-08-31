@@ -120,6 +120,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::config::conf_template_get,
             commands::config::conf_template_expand,
             commands::config::passthrough_preview,
+            commands::config::server_injected_env,
             commands::config::conf_save_template,
             commands::config::conf_rm_template,
             commands::config::conf_duplicate_template,

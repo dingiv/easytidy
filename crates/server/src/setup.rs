@@ -54,6 +54,50 @@ pub(crate) fn user_map() -> Option<&'static UserMap> {
     USER_MAP.get()
 }
 
+/// server 运行时注入的环境变量（启动期 setup 探测/修正的 session 耦合值）。
+///
+/// 与 create-time 注入（宿主侧 flavor 展开，配置可预知）相对：这些值取决于
+/// 容器运行时环境（$XDG_RUNTIME_DIR 下随机后缀 auth 文件等），配置里定义不了、
+/// 宿主侧也无法预知最终值。宿主配置管理器经 `server.env` 查询后展示为
+/// 「easytidy 注入」只读 env 行。
+pub(crate) struct InjectedEnv {
+    pub key: &'static str,
+    pub value: String,
+    pub note: &'static str,
+}
+
+/// 启动期记录的注入项（`finalize_injected_env` 后写入，listen 前）。
+pub(crate) static INJECTED_ENV: OnceLock<Vec<InjectedEnv>> = OnceLock::new();
+
+/// 汇总 server 运行时注入的环境变量（启动期 setup 完成后、listen 前调用）。
+///
+/// `xdg_fixed`：XDG_DATA_DIRS 被修正时的新值（未修正 = None）；
+/// `xauth`：XAUTHORITY 探测到的 auth 文件路径（未探测到 = None）。
+/// 仅记录**确实发生**的注入——未修正/未探测到时不产生条目。
+pub(crate) fn finalize_injected_env(xdg_fixed: Option<String>, xauth: Option<String>) {
+    let mut items = Vec::new();
+    if let Some(v) = xdg_fixed {
+        items.push(InjectedEnv {
+            key: "XDG_DATA_DIRS",
+            value: v,
+            note: "追加系统默认数据目录（/usr/local/share、/usr/share）",
+        });
+    }
+    if let Some(v) = xauth {
+        items.push(InjectedEnv {
+            key: "XAUTHORITY",
+            value: v,
+            note: "自动探测 X11 auth 文件（$XDG_RUNTIME_DIR 下 [.]mutter-Xwaylandauth.* / xauth_*）",
+        });
+    }
+    let _ = INJECTED_ENV.set(items);
+}
+
+/// 当前记录的 server 注入项（供 `server.env` 查询；未初始化返回空）。
+pub(crate) fn injected_env() -> &'static [InjectedEnv] {
+    INJECTED_ENV.get().map(|v| v.as_slice()).unwrap_or(&[])
+}
+
 /// 启动期身份初始化（main 初始化后、listen 前调用；同步，无 IO 阻塞点）。
 ///
 /// 名字/HOME 解析委托 `easytidy_core::incontainer::resolve_identity`
@@ -94,14 +138,20 @@ pub(crate) fn fixup_xdg_data_dirs_value(v: &str) -> String {
 }
 
 /// 修正 server 进程自身的 XDG_DATA_DIRS（子进程继承）。
-pub(crate) fn fixup_xdg_data_dirs() {
+///
+/// 返回修正后的新值（**确实发生**修正时）；未修正（值已含系统默认 / 未设
+/// XDG_DATA_DIRS）返回 `None`——供 `finalize_injected_env` 记录「easytidy 注入」。
+pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
     let Ok(v) = std::env::var("XDG_DATA_DIRS") else {
-        return;
+        return None;
     };
     let merged = fixup_xdg_data_dirs_value(&v);
     if merged != v {
-        std::env::set_var("XDG_DATA_DIRS", &merged);
         info!("XDG_DATA_DIRS 已修正（追加系统默认）: {merged}");
+        std::env::set_var("XDG_DATA_DIRS", &merged);
+        Some(merged)
+    } else {
+        None
     }
 }
 
@@ -119,9 +169,10 @@ pub(crate) fn fixup_xdg_data_dirs() {
 ///   下已知模式,覆盖写进程 env。后续 pty.open / apps.launch 经 `std::env::vars()`
 ///   取到的就是 server 持有值。
 ///
-/// **探针模式**(按优先序取第一个匹配):
-///   1. `mutter-Xwaylandauth.*`(GNOME/Mutter 启动 Xwayland 时生成)
-///   2. `xauth_*`(Xorg 原生或老会话)
+/// **探针模式**(取第一个匹配,剥掉可能的首个 `.` 前缀后再判):
+///   1. `[.]mutter-Xwaylandauth.*`(GNOME/Mutter 启动 Xwayland 时生成——**实际是
+///      点前缀** `.mutter-Xwaylandauth.<rand>`)
+///   2. `[.]xauth_*`(Xorg 原生或老会话)
 ///
 /// 取不到时仅 warn——非 GUI 容器(纯 headless)不应被这条路径阻碍启动。
 pub(crate) fn ensure_xauthority() -> Option<String> {
@@ -136,7 +187,10 @@ pub(crate) fn ensure_xauthority() -> Option<String> {
     for entry in read_dir.flatten() {
         let name = entry.file_name();
         let Some(n) = name.to_str() else { continue };
-        if n.starts_with("mutter-Xwaylandauth.") || n.starts_with("xauth_") {
+        // GNOME/Mutter 实际生成**点前缀**文件（`.mutter-Xwaylandauth.<rand>`），
+        // 剥掉可能的首个 `.` 后匹配，兼容有无点前缀两种形态；`xauth_*` 同理。
+        let stripped = n.strip_prefix('.').unwrap_or(n);
+        if stripped.starts_with("mutter-Xwaylandauth.") || stripped.starts_with("xauth_") {
             let path = format!("{runtime}/{n}");
             tracing::info!("server 自动注入 XAUTHORITY={path} (覆盖 podman create 时可能注入的旧值)");
             // 覆盖进程 env——后续 pty.open 经 std::env::vars() 取到的就是这个值。
@@ -147,7 +201,7 @@ pub(crate) fn ensure_xauthority() -> Option<String> {
         }
     }
     tracing::warn!(
-        "未在 {runtime} 找到 X11 auth 文件(mutter-Xwaylandauth.* 或 xauth_*);\
+        "未在 {runtime} 找到 X11 auth 文件([.]mutter-Xwaylandauth.* 或 xauth_*);\
          X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
     );
     None
@@ -221,6 +275,27 @@ mod tests {
         );
     }
 
+    /// 回归:GNOME/Mutter 实际生成**点前缀**文件 `.mutter-Xwaylandauth.<rand>`
+    /// (2026-08-31 实测,Chrome "Authorization required" 根因——旧探针只匹配
+    /// 无前缀 `mutter-Xwaylandauth.*`,漏了点前缀形态)。
+    #[test]
+    fn test_ensure_xauthority_discovers_dot_prefixed_mutter() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+
+        let auth_path = tmp.path().join(".mutter-Xwaylandauth.DE23U3");
+        std::fs::write(&auth_path, b"mock-cookie").unwrap();
+
+        let result = ensure_xauthority();
+        assert_eq!(result.as_deref(), Some(auth_path.to_str().unwrap()));
+        assert_eq!(
+            std::env::var("XAUTHORITY").ok().as_deref(),
+            Some(auth_path.to_str().unwrap()),
+            "点前缀 .mutter-Xwaylandauth.* 必须被探测到"
+        );
+    }
+
     #[test]
     fn test_ensure_xauthority_discovers_xauth_prefix() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -276,5 +351,19 @@ mod tests {
         let _g = RuntimeDirGuard::new(tmp.path());
         // 空目录:无 auth 文件,headless 容器场景
         assert_eq!(ensure_xauthority(), None);
+    }
+
+    /// 记录逻辑：只记录**确实发生**的注入——XAUTHORITY 探测到 → 记录；
+    /// XDG_DATA_DIRS 未修正(None) → 不记录。`server.env` 据此返回。
+    #[test]
+    fn test_finalize_injected_env_records_only_actual() {
+        // 注意：INJECTED_ENV 是全局 OnceLock，进程内 set 一次后不可再 set——
+        // 其它测试未调用 finalize_injected_env，故此测试独占该 static。
+        finalize_injected_env(None, Some("/run/user/1000/.mutter-Xwaylandauth.DE23U3".to_string()));
+        let items = injected_env();
+        assert_eq!(items.len(), 1, "未修正的 XDG_DATA_DIRS 不应产生条目");
+        assert_eq!(items[0].key, "XAUTHORITY");
+        assert_eq!(items[0].value, "/run/user/1000/.mutter-Xwaylandauth.DE23U3");
+        assert!(!items[0].note.is_empty());
     }
 }

@@ -220,6 +220,18 @@ export interface PassthroughPreview {
   mounts: MountConfig[];
 }
 
+/// 服务器运行时注入的环境变量（server.env）：容器内 server 启动时探测/修正的
+/// session 耦合值（XAUTHORITY 自动探测 / XDG_DATA_DIRS 系统默认修正）——配置里
+/// 定义不了、宿主侧也无法预知最终值。配置管理器展示为「easytidy 注入」只读行。
+export interface ServerEnvItem {
+  /** 环境变量名 */
+  key: string;
+  /** 注入的值（当前生效） */
+  value: string;
+  /** 注入原因（展示用） */
+  note: string;
+}
+
 /// conf 启动配置模板（conf_templates / conf_template_get / conf_save_template；
 /// GUI 全面切 YAML 后取代 flavor TOML 模板——见 `commands::config::conf_templates`）。
 ///

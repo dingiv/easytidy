@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { App as AntApp, Dropdown, Radio, Tooltip } from 'antd';
+import { App as AntApp, Dropdown, Radio, Switch, Tooltip } from 'antd';
 import {
   DownOutlined,
   PictureOutlined,
@@ -27,7 +27,6 @@ export function PassthroughManager() {
   const { message } = AntApp.useApp();
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [state, setState] = useState<PassthroughState | null>(null);
-  const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // 正在启动的应用 id（按钮加载态 + 防重复点击；null = 无进行中）
@@ -76,7 +75,6 @@ export function PassthroughManager() {
       ]);
       setApps(appsResult);
       setState(stateResult);
-      setSelectedApps(new Set(stateResult.exported.map((e) => e.desktop_file)));
       // 收藏列表同步到 store（工具栏订阅展示）
       useFavoritesStore.getState().setPinned(stateResult.pinned ?? []);
     } catch (err: any) {
@@ -90,16 +88,6 @@ export function PassthroughManager() {
   /** 扫描应用的 auto-start 状态（查配置条目;未配置 = false） */
   const autoStartOf = (id: string): boolean =>
     state?.configured_apps.find((a) => a.id === id)?.auto_start ?? false;
-
-  const handleAppToggle = (desktopFile: string) => {
-    const newSelected = new Set(selectedApps);
-    if (newSelected.has(desktopFile)) {
-      newSelected.delete(desktopFile);
-    } else {
-      newSelected.add(desktopFile);
-    }
-    setSelectedApps(newSelected);
-  };
 
   /** 设置某应用的 auto-start（容器启动时自动拉起） */
   const handleAutoStart = async (id: string, name: string, cmd: string, enabled: boolean) => {
@@ -158,17 +146,14 @@ export function PassthroughManager() {
     }
   };
 
-  const handleExport = async () => {
+  /** 导出单个扫描应用（逐行导出，取代多选批量导出） */
+  const handleExportOne = async (app: AppInfo) => {
     setError(null);
     try {
-      for (const desktopFile of selectedApps) {
-        const app = apps.find((a) => a.desktop_file === desktopFile);
-        if (!app) continue;
-        await invoke('passthrough_export', { app });
-      }
+      await invoke('passthrough_export', { app });
       await loadData();
     } catch (err: any) {
-      setError(errMsg(err, 'Failed to export apps'));
+      setError(errMsg(err, 'Failed to export app'));
       console.error('passthrough_export failed:', err);
     }
   };
@@ -298,13 +283,6 @@ export function PassthroughManager() {
           >
             {exportingGui ? '导出中…' : '导出桌面图标'}
           </button>
-          <button
-            className="primary-button"
-            onClick={handleExport}
-            disabled={selectedApps.size === 0}
-          >
-            Export Selected ({selectedApps.size})
-          </button>
         </div>
       </div>
 
@@ -343,21 +321,13 @@ export function PassthroughManager() {
         {apps.map((app) => {
           const isExported =
             state?.exported.some((e) => e.desktop_file === app.desktop_file) ?? false;
-          const isSelected = selectedApps.has(app.desktop_file);
           const autoStart = autoStartOf(app.desktop_file);
 
           return (
             <div
               key={app.desktop_file}
-              className={`app-item ${isExported ? 'exported' : ''} ${isSelected ? 'selected' : ''}`}
+              className={`app-item ${isExported ? 'exported' : ''}`}
             >
-              <div className="app-checkbox">
-                <input
-                  type="checkbox"
-                  checked={isSelected}
-                  onChange={() => handleAppToggle(app.desktop_file)}
-                />
-              </div>
               <div className="app-icon">
                 {/* 容器内图标：经 server（socket）拉取显示，不走宿主文件系统 */}
                 <AppIcon path={app.icon_path} />
@@ -368,16 +338,6 @@ export function PassthroughManager() {
                   <div className="app-comment">{app.comment}</div>
                 )}
                 <div className="app-desktop-file">{app.desktop_file}</div>
-                <label className="app-toggle">
-                  <input
-                    type="checkbox"
-                    checked={autoStart}
-                    onChange={(e) =>
-                      handleAutoStart(app.desktop_file, app.name, app.exec, e.target.checked)
-                    }
-                  />
-                  <span>容器启动时自动拉起</span>
-                </label>
               </div>
               <div className="app-actions">
                 <Tooltip title="立即启动">
@@ -402,7 +362,7 @@ export function PassthroughManager() {
                     {isPinned(app.desktop_file) ? <PushpinFilled /> : <PushpinOutlined />}
                   </button>
                 </Tooltip>
-                {isExported && (
+                {isExported ? (
                   <>
                     <button
                       className="secondary-button"
@@ -416,10 +376,23 @@ export function PassthroughManager() {
                       className="secondary-button"
                       onClick={() => handleRevoke(app.desktop_file)}
                     >
-                      Revoke
+                      撤销
                     </button>
                   </>
+                ) : (
+                  <button className="secondary-button" onClick={() => handleExportOne(app)}>
+                    导出
+                  </button>
                 )}
+                <span className="app-autostart">
+                  <Tooltip title="容器启动时自动拉起">
+                    <Switch
+                      checked={autoStart}
+                      onChange={(v) => handleAutoStart(app.desktop_file, app.name, app.exec, v)}
+                    />
+                  </Tooltip>
+                  <span className="app-autostart-label">自启</span>
+                </span>
               </div>
             </div>
           );
@@ -505,16 +478,6 @@ export function PassthroughManager() {
               <div className="app-info">
                 <div className="app-name">{custom.name}</div>
                 <div className="app-desktop-file">{custom.cmd}</div>
-                <label className="app-toggle">
-                  <input
-                    type="checkbox"
-                    checked={custom.auto_start}
-                    onChange={(e) =>
-                      handleAutoStart(custom.id, custom.name, custom.cmd, e.target.checked)
-                    }
-                  />
-                  <span>容器启动时自动拉起</span>
-                </label>
               </div>
               <div className="app-actions">
                 <Tooltip title="立即启动">
@@ -541,12 +504,12 @@ export function PassthroughManager() {
                 </Tooltip>
                 {!isExported && (
                   <button className="secondary-button" onClick={() => handleExportCustom(custom)}>
-                    Export
+                    导出
                   </button>
                 )}
                 {isExported && (
                   <button className="secondary-button" onClick={() => handleRevoke(custom.id)}>
-                    Revoke
+                    撤销
                   </button>
                 )}
                 <Tooltip title="更换图标（宿主机/容器）">
@@ -557,9 +520,21 @@ export function PassthroughManager() {
                     <PictureOutlined />
                   </button>
                 </Tooltip>
-                <button className="secondary-button danger" onClick={() => handleRemoveCustom(custom.id)}>
-                  Remove
+                <button
+                  className="secondary-button danger"
+                  onClick={() => handleRemoveCustom(custom.id)}
+                >
+                  删除
                 </button>
+                <span className="app-autostart">
+                  <Tooltip title="容器启动时自动拉起">
+                    <Switch
+                      checked={custom.auto_start}
+                      onChange={(v) => handleAutoStart(custom.id, custom.name, custom.cmd, v)}
+                    />
+                  </Tooltip>
+                  <span className="app-autostart-label">自启</span>
+                </span>
               </div>
             </div>
           );

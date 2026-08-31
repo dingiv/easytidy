@@ -37,6 +37,7 @@ import type {
   NetworkMode,
   PassthroughPreview,
   PortMapping,
+  ServerEnvItem,
 } from '../../types';
 import { ContainerPane } from './ContainerPane';
 import { EnvPane } from './EnvPane';
@@ -101,6 +102,8 @@ export function ContainerConfigEditor({
   const [busy, setBusy] = useState(false);
   // GUI + GPU 透传注入预览（gui/gpu 开启时由 passthrough_preview 计算；null = 未开启/未算出）
   const [preview, setPreview] = useState<PassthroughPreview | null>(null);
+  // 服务器运行时注入的 env（server.env：XAUTHORITY 探测 / XDG_DATA_DIRS 修正）
+  const [serverEnv, setServerEnv] = useState<ServerEnvItem[]>([]);
 
   // 挂载即拉内置示例模板（conf/*.yaml 编译期打进二进制的三件套）
   useEffect(() => {
@@ -135,6 +138,29 @@ export function ContainerConfigEditor({
     // 增量取决于 gui/gpu 开关与用户声明的 mounts/env
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [value.gui, value.gpu, value.mounts, value.env]);
+
+  // 服务器运行时注入的 env（server.env）：仅 edit 模式（单容器 GUI、容器在运行）
+  // 可查——create/模板模式无容器。effective 变化（容器启动/重启/刷新）触发重查。
+  // 失败（非单容器模式 / 容器未运行）→ 空，不显示此类行。
+  useEffect(() => {
+    if (mode !== 'edit') {
+      setServerEnv([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<ServerEnvItem[]>('server_injected_env')
+      .then((res) => {
+        if (!cancelled) setServerEnv(res ?? []);
+      })
+      .catch((err) => {
+        console.error('server_injected_env failed:', err);
+        if (!cancelled) setServerEnv([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, effective]);
 
   const update = (patch: Partial<ContainerConfig>) => onChange({ ...value, ...patch });
   const updateNetwork = (patch: Partial<ContainerConfig['network']>) =>
@@ -296,6 +322,7 @@ export function ContainerConfigEditor({
         <EnvPane
           env={value.env}
           readonlyEnv={preview?.env ?? []}
+          serverEnv={serverEnv}
           effectiveEnv={effective?.env ?? null}
           onAdd={(key, v) => update({ env: [...value.env, `${key}=${v}`] })}
           onRemove={(idx: number) =>

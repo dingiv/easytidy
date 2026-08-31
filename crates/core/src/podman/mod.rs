@@ -242,7 +242,28 @@ impl Podman {
                 ..Default::default()
             },
         ];
-        for m in &config.params.mounts {
+        // 容器默认用户解析（新模型）：配置值优先，缺省取宿主登录用户；
+        // 均不可得 → 报错（不再静默回退 root——root 模型已移除）。
+        // 上移到挂载展开前——容器侧 ${HOME}/${USER} 展开需容器 uid/gid/user_name。
+        let host = crate::userenv::host_user();
+        let (user_uid, user_gid) = resolve_container_user(&config.params, host.as_ref())?;
+
+        // 挂载路径变量展开（${HOME}/${USER}/${UID}/${GID}，宿主侧/容器侧上下文
+        // 相关）：占位符 → 具体路径，随后 validate_mount 校验。容器侧 HOME/USER
+        // 且未配 user_name 时探测镜像 /etc/passwd（缓存）解析容器用户 home/name。
+        // 无 ${} 的挂载走快速路径（零探测零成本）。
+        let user_mounts = self
+            .expand_user_mounts(
+                image,
+                &config.params.mounts,
+                host.as_ref(),
+                user_uid,
+                user_gid,
+                config.params.user_name.as_deref(),
+            )
+            .await?;
+
+        for m in &user_mounts {
             validate_mount(m)?;
             mounts.push(Mount {
                 typ: Some(MountTypeEnum::BIND),
@@ -252,11 +273,6 @@ impl Podman {
                 ..Default::default()
             });
         }
-
-        // 容器默认用户解析（新模型）：配置值优先，缺省取宿主登录用户；
-        // 均不可得 → 报错（不再静默回退 root——root 模型已移除）
-        let host = crate::userenv::host_user();
-        let (user_uid, user_gid) = resolve_container_user(&config.params, host.as_ref())?;
 
         // 身份提示 env（server 侧身份自发现的兜底输入）：
         // EASYTIDY_USER_NAME = 配置用户名（与 prepare_container 的 useradd
@@ -418,6 +434,121 @@ impl Podman {
         let id = libpod.create_container(name, body).await?;
         tracing::info!("容器 {} 创建成功（ID: {}，libpod）", name, id);
         Ok(id)
+    }
+
+    /// 展开用户配置的挂载路径变量（`${HOME}`/`${USER}`/`${UID}`/`${GID}`）。
+    ///
+    /// 宿主侧/容器侧上下文相关：同一变量名在 `host_path` 取宿主值、在
+    /// `container_path` 取容器值。无 `${}` 的挂载走快速路径（零探测零成本）。
+    /// 容器侧 HOME/USER 且未配 user_name 时探测镜像 /etc/passwd 解析容器用户
+    /// home/name（与容器内运行时 `$HOME` 精确一致）；探测失败退化为 uid 默认
+    /// （告警，不阻断创建）。
+    async fn expand_user_mounts(
+        &self,
+        image: &str,
+        mounts: &[MountConfig],
+        host: Option<&crate::userenv::HostUser>,
+        uid: u32,
+        gid: u32,
+        user_name: Option<&str>,
+    ) -> Result<Vec<MountConfig>> {
+        use crate::pathvars::{
+            container_path_vars, expand_mounts, host_path_vars, needs_image_passwd, PathVars,
+        };
+
+        // 快速路径：无任何 ${} → 原样返回（绝大多数容器，零成本）
+        if !mounts
+            .iter()
+            .any(|m| m.host_path.contains("${") || m.container_path.contains("${"))
+        {
+            return Ok(mounts.to_vec());
+        }
+
+        // 宿主侧：仅当 host_path 实际用到变量时才需要宿主用户（否则空占位，
+        // expand 不会触碰宿主侧值）。
+        let host_pv = if mounts.iter().any(|m| m.host_path.contains("${")) {
+            host.map(host_path_vars).ok_or_else(|| {
+                Error::Config(
+                    "挂载 host_path 用了路径变量（${HOME}/${USER}/${UID}/${GID}），但宿主用户探测失败（host_user()=None），无法展开".to_string(),
+                )
+            })?
+        } else {
+            host.map(host_path_vars).unwrap_or_else(PathVars::empty)
+        };
+
+        // 容器侧：HOME/USER 且未配 user_name → 探测镜像 /etc/passwd（缓存）
+        let image_passwd = if needs_image_passwd(mounts, user_name) {
+            match self.image_passwd(image).await {
+                Ok(pw) => Some(pw),
+                Err(e) => {
+                    tracing::warn!(
+                        "探测镜像 {image} 的 /etc/passwd 失败，容器侧 ${{HOME}}/${{USER}} 退化为 uid 默认：{e}"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let container_pv = container_path_vars(uid, gid, user_name, image_passwd.as_deref());
+
+        expand_mounts(mounts, &host_pv, &container_pv)
+    }
+
+    /// 探测镜像的 /etc/passwd（建一次性普通容器 → 读 archive → 删除）。
+    ///
+    /// 用于挂载路径容器侧 `${HOME}`/`${USER}` 展开（未配 user_name 时）。
+    /// 进程内按 image 名缓存（镜像 passwd 会话内视为不可变）。纯 bollard/libpod
+    /// API，不依赖 podman CLI（铁律：零 podman CLI 调用）。
+    async fn image_passwd(&self, image: &str) -> Result<String> {
+        // 缓存命中 → 直接返回
+        if let Some(pw) = crate::pathvars::cached_image_passwd(image) {
+            return Ok(pw);
+        }
+
+        let probe_name = format!("easytidy-probe-{}", uuid::Uuid::new_v4().simple());
+        let options = bollard::container::CreateContainerOptions {
+            name: probe_name,
+            platform: None,
+        };
+        let config = bollard::container::Config {
+            image: Some(image.to_string()),
+            ..Default::default()
+        };
+
+        let created = self
+            .docker
+            .create_container(Some(options), config)
+            .await
+            .map_err(|e| Error::Connect(format!("探测容器创建失败（{image}）：{e}")))?;
+
+        // 读 /etc/passwd（archive）；无论读成功与否都清理探测容器
+        let read = self.read_container_file(&created.id, "/etc/passwd").await;
+        if let Err(e) = self.docker.remove_container(&created.id, None).await {
+            tracing::warn!("探测容器清理失败（忽略）：{e}");
+        }
+
+        let passwd = read
+            .map_err(|e| Error::Connect(format!("读取镜像 {image} 的 /etc/passwd 失败：{e}")))?;
+        crate::pathvars::store_image_passwd(image, passwd.clone());
+        Ok(passwd)
+    }
+
+    /// 从已创建（未启动）容器读取单个文件（archive GET → tar → 解出）。
+    async fn read_container_file(&self, id: &str, path: &str) -> Result<String> {
+        use bollard::container::DownloadFromContainerOptions;
+        use futures::StreamExt;
+
+        let options = DownloadFromContainerOptions {
+            path: path.to_string(),
+        };
+        let mut stream = self.docker.download_from_container(id, Some(options));
+        let mut buf: Vec<u8> = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| Error::Connect(format!("读取 {path} 失败：{e}")))?;
+            buf.extend_from_slice(&chunk);
+        }
+        parse_passwd_from_tar(&buf)
     }
 
     /// 环境快照:以 `commit --squash` 把运行中容器打成扁平镜像
@@ -912,6 +1043,36 @@ impl Podman {
     }
 }
 
+/// 从 archive tar（docker/podman `download_from_container` 返回）解出 passwd 文本。
+///
+/// 条目名可能是 `passwd` 或 `etc/passwd`（按 Docker API 行为），都识别。
+fn parse_passwd_from_tar(buf: &[u8]) -> Result<String> {
+    use std::io::Read;
+
+    let mut archive = tar::Archive::new(buf);
+    for entry in archive
+        .entries()
+        .map_err(|e| Error::Config(format!("解析 passwd tar 失败：{e}")))?
+    {
+        let mut entry = entry.map_err(|e| Error::Config(format!("解析 passwd tar 条目失败：{e}")))?;
+        let name = entry
+            .path()
+            .map_err(|e| Error::Config(format!("tar 条目路径非法：{e}")))?
+            .to_string_lossy()
+            .to_string();
+        if name == "passwd" || name == "etc/passwd" || name.ends_with("/passwd") {
+            let mut content = Vec::new();
+            entry
+                .read_to_end(&mut content)
+                .map_err(|e| Error::Config(format!("读 passwd 内容失败：{e}")))?;
+            return String::from_utf8(content).map_err(|e| Error::Config(format!("passwd 非 UTF-8：{e}")));
+        }
+    }
+    Err(Error::Config(
+        "镜像 /etc/passwd tar 中未找到 passwd 文件".to_string(),
+    ))
+}
+
 /// 解析容器默认用户 uid/gid（新模型）：配置值优先，缺省取宿主登录用户。
 ///
 /// 两者均不可得（未配置 + `host_user()` 探测失败）→ `Error::Config`——
@@ -1168,5 +1329,72 @@ mod tests {
         let body = make(Vec::new(), None, None, to_vec(&["mask=/foo", "nonsense"]));
         assert!(body.get("apparmor_profile").is_none());
         assert!(body.get("selinux_opts").is_none());
+    }
+
+    /// 真机端到端：探测镜像 /etc/passwd → 容器侧 `${HOME}` 展开为镜像默认用户
+    /// home（chrome 场景：ubuntu 镜像 uid 1000 → `/home/ubuntu`），宿主侧 `${HOME}`
+    /// 展开为宿主 home。需 rootless podman socket + ubuntu 镜像，缺失则跳过。
+    #[tokio::test]
+    async fn test_container_home_expansion_via_image_probe() {
+        let socket = match std::env::var("XDG_RUNTIME_DIR") {
+            Ok(rd) => std::path::PathBuf::from(rd).join("podman/podman.sock"),
+            Err(_) => return,
+        };
+        if !socket.exists() {
+            eprintln!("skip: podman socket 不存在");
+            return;
+        }
+        let Ok(podman) = Podman::connect().await else {
+            eprintln!("skip: 无法连接 podman");
+            return;
+        };
+        let image = "docker.io/library/ubuntu:24.04";
+        if !podman.image_exists(image).await.unwrap_or(false) {
+            eprintln!("skip: {image} 镜像不存在");
+            return;
+        }
+
+        // 探测镜像 passwd（ubuntu 镜像 uid 1000 home = /home/ubuntu）
+        let passwd = podman
+            .image_passwd(image)
+            .await
+            .expect("探测镜像 /etc/passwd 应成功");
+        assert!(
+            passwd.contains("ubuntu:x:1000:1000:Ubuntu:/home/ubuntu"),
+            "ubuntu 镜像 uid 1000 home 应为 /home/ubuntu：{passwd}"
+        );
+
+        let host = HostUser {
+            name: "div".into(),
+            uid: 1000,
+            gid: 1000,
+            home: "/home/div".into(),
+        };
+
+        // 容器侧 ${HOME}（chrome 场景：无 user_name，uid 1000）→ /home/ubuntu
+        let mounts = vec![MountConfig {
+            host_path: "/tmp/.X11-unix".into(),
+            container_path: "${HOME}/workspace".into(),
+            read_only: false,
+        }];
+        let out = podman
+            .expand_user_mounts(image, &mounts, Some(&host), 1000, 1000, None)
+            .await
+            .expect("展开应成功");
+        assert_eq!(out[0].container_path, "/home/ubuntu/workspace");
+        assert_eq!(out[0].host_path, "/tmp/.X11-unix");
+
+        // 宿主侧 ${HOME} → 宿主 home（容器侧无变量 → 不触发探测）
+        let mounts2 = vec![MountConfig {
+            host_path: "${HOME}/workspace".into(),
+            container_path: "/workspace".into(),
+            read_only: false,
+        }];
+        let out2 = podman
+            .expand_user_mounts(image, &mounts2, Some(&host), 1000, 1000, None)
+            .await
+            .expect("展开应成功");
+        assert_eq!(out2[0].host_path, "/home/div/workspace");
+        assert_eq!(out2[0].container_path, "/workspace");
     }
 }

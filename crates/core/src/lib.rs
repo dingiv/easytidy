@@ -28,6 +28,7 @@ pub mod events;
 pub mod flavor;
 pub mod libpod;
 pub mod models;
+pub mod pathvars;
 pub mod podman;
 pub mod root_channel;
 pub mod systemd;

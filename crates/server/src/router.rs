@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use easytidy_protocol::{
     Frame,
-    Handshake, HandshakeAck, Message, MsgKind, ServerInfoResp,
+    Handshake, HandshakeAck, Message, MsgKind, ServerEnvItem, ServerEnvResp, ServerInfoResp,
     PROTOCOL_VERSION, RpcError,
 };
 use serde_json::json;
@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use crate::http::HTTP_PORT;
+use crate::setup::injected_env;
 use crate::state::ServerState;
 use crate::services::apps::{handle_apps_get_icon, handle_apps_kill, handle_apps_launch, handle_apps_list, handle_apps_logs, handle_apps_ps};
 use crate::services::config::{handle_config_get, handle_config_set};
@@ -147,6 +148,9 @@ pub(crate) async fn dispatch(
         (MsgKind::Req, "server.info") => {
             Ok(Some(handle_server_info(msg).await?))
         }
+        (MsgKind::Req, "server.env") => {
+            Ok(Some(handle_server_env(msg).await?))
+        }
         (MsgKind::Req, "config.get") => {
             Ok(Some(handle_config_get(msg).await?))
         }
@@ -256,6 +260,26 @@ pub(crate) async fn handle_server_info(msg: Message) -> Result<Frame> {
         payload: serde_json::to_value(ServerInfoResp {
             http_port: HTTP_PORT.load(std::sync::atomic::Ordering::SeqCst),
         })?,
+        err: None,
+    }))
+}
+
+/// Handle server.env（server 运行时注入的环境变量：XAUTHORITY 探测 /
+/// XDG_DATA_DIRS 修正——配置定义不了、宿主无法预知，配置管理器展示为只读行）。
+pub(crate) async fn handle_server_env(msg: Message) -> Result<Frame> {
+    let env = injected_env()
+        .iter()
+        .map(|e| ServerEnvItem {
+            key: e.key.to_string(),
+            value: e.value.clone(),
+            note: e.note.to_string(),
+        })
+        .collect::<Vec<_>>();
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "server.env".to_string(),
+        payload: serde_json::to_value(ServerEnvResp { env })?,
         err: None,
     }))
 }

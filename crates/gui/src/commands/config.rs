@@ -9,6 +9,10 @@ use easytidy_core::configfile::ConfigFile;
 use easytidy_core::flavor::inject_passthrough;
 use easytidy_core::models::{ContainerConfig, MountConfig};
 use easytidy_core::podman::Podman;
+use easytidy_protocol::{ServerEnv, ServerEnvItem, ServerEnvResp};
+
+use crate::commands::socket::send_json_request;
+use crate::state::GuiSession;
 
 // ============================================================================
 // 配置管理器命令（M4 前置：mount 管理 + 网络映射管理；改配置 = 重建容器）
@@ -373,6 +377,36 @@ pub fn passthrough_preview(config: ContainerConfig) -> Result<PassthroughPreview
         .cloned()
         .collect();
     Ok(PassthroughPreview { env, mounts })
+}
+
+/// 查询容器内 server 运行时注入的环境变量（`server.env`）。
+///
+/// 与 [`passthrough_preview`] 相对：preview 是**宿主侧**按 gui/gpu 开关可预知的
+/// create-time 注入；本命令是**容器内 server** 启动时探测/修正的 session 耦合值
+/// （XAUTHORITY 自动探测、XDG_DATA_DIRS 系统默认修正）——配置里定义不了、宿主
+/// 侧也无法预知最终值。配置管理器据此展示「easytidy 注入」只读 env 行。
+///
+/// 非单容器模式 / 容器未运行 → 返回空列表（前端据此不显示此类行）。
+#[tauri::command]
+pub async fn server_injected_env(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<Vec<ServerEnvItem>, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    let resp = send_json_request(
+        sess,
+        "server.env".to_string(),
+        serde_json::to_value(ServerEnv).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let body: ServerEnvResp = serde_json::from_value(resp.payload)
+        .map_err(|e| format!("解析 server.env 响应失败：{e}"))?;
+    Ok(body.env)
 }
 
 /// 写回 conf 模板（编辑 / 复制保存）。

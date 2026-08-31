@@ -86,7 +86,7 @@ use connection::handle_connection;
 use http::start_http_server;
 use services::apps::child_prune_task;
 use services::lifecycle::perform_graceful_shutdown;
-use setup::{ensure_xauthority, fixup_xdg_data_dirs, setup_user_identity};
+use setup::{ensure_xauthority, finalize_injected_env, fixup_xdg_data_dirs, setup_user_identity};
 use state::ServerState;
 
 #[derive(Parser, Debug)]
@@ -131,21 +131,14 @@ async fn main() -> Result<()> {
         }
     }
 
-    // XDG_DATA_DIRS 防御性修正：旧版 flavor 注入纯覆盖值 /usr/share/easytidy-host，
-    // 容器内 gdk-pixbuf 找不到系统 loaders.cache → PNG 图标解码失败 → GTK 断言
-    // 崩溃（2026-08-07 Chrome 保存图片实测）。对 env 已固化的旧容器追加系统
-    // 默认目录（/usr/local/share:/usr/share，glib 默认；缺失路径无害）。
-    fixup_xdg_data_dirs();
-
-    // XAUTHORITY server 内置自动注入：路径含随机后缀,每次会话都变,不让用户配——
-    // 自动探 /run/user/$uid 下 mutter-Xwaylandauth.* 或 xauth_*,覆盖进程 env
-    // (忽略 podman create 时可能注入的旧值)。
-    ensure_xauthority();
-
     // Initialize tracing — 双份日志，统一格式 `[LEVEL] easytidy-server(容器名): message`：
     // 1) stderr（已被 dup2 到 server.log，保留原文件）
     // 2) stdout → 容器 stdout → podman journald 驱动 → 宿主 systemd journal
     //    （用户环境 podman 默认 log driver 即 journald，实测；无需改容器配置）
+    //
+    // 必须在 fixup_xdg_data_dirs / ensure_xauthority **之前**初始化:这两步都会
+    // tracing! 记录诊断(尤其 ensure_xauthority 的 X11 auth 文件探测成败),subscriber
+    // 未就绪时这些事件被静默丢弃——GUI 透传排障反成盲区。
     let env_filter = EnvFilter::from_default_env()
         .add_directive(tracing::Level::INFO.into())
         .add_directive("easytidy_server=debug".parse()?);
@@ -157,6 +150,21 @@ async fn main() -> Result<()> {
         .with(fmt::layer().event_format(format.clone()).with_writer(std::io::stderr))
         .with(fmt::layer().event_format(format).with_writer(std::io::stdout))
         .init();
+
+    // XDG_DATA_DIRS 防御性修正：旧版 flavor 注入纯覆盖值 /usr/share/easytidy-host，
+    // 容器内 gdk-pixbuf 找不到系统 loaders.cache → PNG 图标解码失败 → GTK 断言
+    // 崩溃（2026-08-07 Chrome 保存图片实测）。对 env 已固化的旧容器追加系统
+    // 默认目录（/usr/local/share:/usr/share，glib 默认；缺失路径无害）。
+    let xdg_fixed = fixup_xdg_data_dirs();
+
+    // XAUTHORITY server 内置自动注入：路径含随机后缀,每次会话都变,不让用户配——
+    // 自动探 /run/user/$uid 下 mutter-Xwaylandauth.* 或 xauth_*,覆盖进程 env
+    // (忽略 podman create 时可能注入的旧值)。
+    let xauth = ensure_xauthority();
+
+    // 汇总 server 运行时注入的 env（配置管理器「easytidy 注入」行来源）——记录
+    // 确实发生的修正/注入，供 `server.env` 查询。
+    finalize_injected_env(xdg_fixed, xauth);
 
     info!("easytidy-server starting (protocol v{})", PROTOCOL_VERSION);
     info!("socket path: {}", args.socket.display());

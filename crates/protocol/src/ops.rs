@@ -574,6 +574,36 @@ pub struct EntryStarted {
 pub struct ShutdownAck;
 
 // ============================================================================
+// server: 服务器自信息族
+// ============================================================================
+
+/// 查询 server 运行时注入的环境变量（server.env）。
+///
+/// server 启动时探测/修正的 session 耦合值——**配置里定义不了、宿主侧也无法
+/// 预知最终值**（路径含随机后缀 / 取决于容器运行时环境）：如 `XAUTHORITY`
+/// （自动探测 $XDG_RUNTIME_DIR 下 X11 auth 文件）、`XDG_DATA_DIRS`（追加系统
+/// 默认数据目录）。宿主配置管理器据此展示「easytidy 注入」只读 env 行。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerEnv;
+
+/// 单个 server 运行时注入项
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerEnvItem {
+    /// 环境变量名
+    pub key: String,
+    /// 注入的值（当前生效）
+    pub value: String,
+    /// 注入原因（展示用）
+    pub note: String,
+}
+
+/// ServerEnv 响应
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerEnvResp {
+    pub env: Vec<ServerEnvItem>,
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
 
@@ -738,6 +768,27 @@ mod tests {
         let decoded: FsWrite = serde_json::from_str(&json).unwrap();
         assert_eq!(op, decoded);
         assert_eq!(decoded.offset, Some(4096));
+    }
+
+    #[test]
+    fn test_server_env_serde() {
+        let resp = ServerEnvResp {
+            env: vec![
+                ServerEnvItem {
+                    key: "XAUTHORITY".to_string(),
+                    value: "/run/user/1000/.mutter-Xwaylandauth.DE23U3".to_string(),
+                    note: "自动探测 X11 auth 文件".to_string(),
+                },
+                ServerEnvItem {
+                    key: "XDG_DATA_DIRS".to_string(),
+                    value: "/usr/local/share:/usr/share".to_string(),
+                    note: "追加系统默认数据目录".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: ServerEnvResp = serde_json::from_str(&json).unwrap();
+        assert_eq!(resp, decoded);
     }
 
     #[test]
