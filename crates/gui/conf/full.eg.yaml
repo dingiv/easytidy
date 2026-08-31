@@ -11,7 +11,7 @@
 # 字段命名严格与 ContainerConfig 一致（snake_case）—— 序列化/反序列化直接走
 # serde(rename_all = "snake_case")。
 
-name: full-example                       # 必填：容器名（registry 唯一）
+name: full.eg                            # 必填：容器名（registry 唯一）；= 文件名 stem（模板身份）
 image: docker.io/library/ubuntu:24.04    # 必填：镜像（需已拉取，未拉取请到「镜像」面板）
 
 # 容器入口应用（容器创建后由 server 链式拉起；留空 = 不拉起应用）

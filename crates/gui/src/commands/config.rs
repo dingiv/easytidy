@@ -462,23 +462,15 @@ struct ConfSeed {
     yaml: &'static str,
 }
 
-const CONF_SEEDS: [ConfSeed; 4] = [
+const CONF_SEEDS: [ConfSeed; 2] = [
     ConfSeed {
-        name: "dev",
-        yaml: include_str!("../../conf/dev.yaml"),
+        name: "full.eg",
+        yaml: include_str!("../../conf/full.eg.yaml"),
     },
+    // 经典 Chrome 容器模板示例（展开自内置 flavor chrome）
     ConfSeed {
-        name: "full",
-        yaml: include_str!("../../conf/full.yaml"),
-    },
-    ConfSeed {
-        name: "media",
-        yaml: include_str!("../../conf/media.yaml"),
-    },
-    // 经典 Chrome 容器模板（展开自内置 flavor chrome）
-    ConfSeed {
-        name: "chrome",
-        yaml: include_str!("../../conf/chrome.yaml"),
+        name: "chrome.eg",
+        yaml: include_str!("../../conf/chrome.eg.yaml"),
     },
 ];
 
@@ -830,7 +822,7 @@ mod tests {
 
     #[test]
     fn test_conf_seeds_parse() {
-        // 三个内置模板都解析成功 + 结构性不变量
+        // 全部内置种子都解析成功 + 结构性不变量（数量随 CONF_SEEDS 变化）
         for seed in CONF_SEEDS.iter() {
             let config = parse_seed(seed);
             assert!(!config.name.trim().is_empty(), "{} 应含 name", seed.name);
