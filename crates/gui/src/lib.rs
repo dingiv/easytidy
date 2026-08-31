@@ -116,6 +116,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::config::conf_examples,
             commands::config::mount_pick_host_dir,
             commands::config::list_host_path_suggestions,
+            commands::config::list_user_resource_dirs,
             commands::config::conf_templates,
             commands::config::conf_template_get,
             commands::config::conf_template_expand,

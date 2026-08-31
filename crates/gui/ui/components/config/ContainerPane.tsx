@@ -4,10 +4,11 @@
 // 入口应用（entry/entry_args）已移入容器内由 server 管理（见 docs），
 // 不再作为宿主侧容器配置暴露，故此处不再渲染 entry 字段。
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Input, Select, Space, Switch, Tag, Typography } from 'antd';
+import { Input, Space, Switch, Tag, Typography } from 'antd';
 import type { ContainerConfig, ImageSummary } from '../../types';
+import { ImageSelect } from './ImageSelect';
 
 interface ContainerPaneProps {
   edit: ContainerConfig;
@@ -38,25 +39,6 @@ export function ContainerPane({
       .catch((err) => console.error('images_list failed:', err));
   }, [mode]);
 
-  // 把 ImageSummary[] 摊平为 tag 字符串数组（去重 + 排序），同时保留 image 引用以便渲染次要信息
-  const tagOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const opts: { value: string; label: string; meta: string }[] = [];
-    for (const img of images) {
-      for (const tag of img.repo_tags) {
-        if (tag === '' || seen.has(tag)) continue;
-        seen.add(tag);
-        opts.push({
-          value: tag,
-          label: tag,
-          meta: `${formatSize(img.size)} · ${formatAge(img.created)}`,
-        });
-      }
-    }
-    opts.sort((a, b) => a.label.localeCompare(b.label));
-    return opts;
-  }, [images]);
-
   return (
     <div className="config-fields">
       {mode === 'create' && (
@@ -73,32 +55,13 @@ export function ContainerPane({
       <div className="config-field">
         <label>镜像{mode === 'create' ? '（需已拉取，可搜索本地已有）' : ''}</label>
         {mode === 'create' ? (
-          // antd Select 内部用 rc-virtual-list,`virtual` prop + `listHeight` 把下拉
-          // 限制为定高虚拟滚动面板(20-30 个可见)。showSearch 启用过滤,
-          // filterOption 收敛到前缀匹配(不区分大小写)。空查询返回 true,
-          // 配合 virtual 让面板仍可见 ~IMAGE_PANEL_DEFAULT_VISIBLE 个。
-          <Select
-            showSearch
-            virtual
-            listHeight={256}
+          // 自定义渲染下拉（不用 antd Select 的虚拟列表——WebKitGTK 下其自定义
+          // wheel 处理滚动过慢）。原生可滚动 <div>，搜索 + 键盘导航见 ImageSelect。
+          <ImageSelect
+            images={images}
+            value={edit.image}
+            onChange={(v) => onImageChange(v)}
             placeholder="如：docker.io/library/ubuntu:24.04（输入关键字筛选本地镜像）"
-            value={edit.image || undefined}
-            onChange={(v) => onImageChange(String(v ?? ''))}
-            options={tagOptions.map((o) => ({
-              value: o.value,
-              label: (
-                <div className="image-option">
-                  <div className="image-option-tag">{o.label}</div>
-                  <div className="image-option-meta">{o.meta}</div>
-                </div>
-              ),
-            }))}
-            defaultActiveFirstOption
-            allowClear
-            notFoundContent="无匹配镜像（先到「镜像」面板拉取）"
-            popupMatchSelectWidth={false}
-            optionFilterProp="value"
-            listItemHeight={36}
           />
         ) : (
           <Typography.Text code>{edit.image}</Typography.Text>
@@ -179,28 +142,4 @@ export function ContainerPane({
       )}
     </div>
   );
-}
-
-/** 字节数 → 人读 ("1.4 GB") */
-function formatSize(bytes: number): string {
-  if (bytes <= 0) return '-';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0;
-  let n = bytes;
-  while (n >= 1024 && i < units.length - 1) {
-    n /= 1024;
-    i++;
-  }
-  return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
-}
-
-/** Unix epoch 秒 → "3d ago" / "2h ago" */
-function formatAge(created: number): string {
-  if (!created) return '-';
-  const now = Math.floor(Date.now() / 1000);
-  const diff = Math.max(0, now - created);
-  if (diff < 60) return `${diff}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
 }

@@ -41,6 +41,19 @@ pub struct ConfTemplate {
     pub setup: Vec<String>,
 }
 
+/// 模板列表项：[`ConfTemplate`] + 磁盘路径。
+///
+/// `#[serde(flatten)]` 平铺模板字段（与 `ConfTemplate` JSON 形状一致）,另加
+/// `path`——仅运行时填充,供 GUI 展示文件位置;`ConfTemplate` 本身保持纯
+/// YAML 形状（路径不入文件,避免 `conf_save_template` 序列化时污染）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfTemplateInfo {
+    #[serde(flatten)]
+    pub template: ConfTemplate,
+    /// 模板在磁盘上的绝对路径（`<conf_dir>/<name>.yaml`）
+    pub path: String,
+}
+
 impl ConfTemplate {
     /// 模板展开为可创建的 [`ContainerConfig`]。
     ///

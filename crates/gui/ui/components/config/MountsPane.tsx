@@ -1,7 +1,7 @@
 // 挂载（路径映射）面板：表格 + 添加行（宿主路径/容器路径/只读）。
 
 import { useEffect, useState } from 'react';
-import { App as AntApp, AutoComplete, Button, Empty, Input, Space, Switch, Table, Typography } from 'antd';
+import { App as AntApp, AutoComplete, Button, Empty, Input, Space, Switch, Table, Tooltip, Typography } from 'antd';
 import type { TableProps } from 'antd';
 import { DeleteOutlined, FolderOpenOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
@@ -14,6 +14,27 @@ interface HostEntry {
   full_path: string;
   is_dir: boolean;
 }
+
+/** 宿主常用用户资源目录（list_user_resource_dirs） */
+interface UserResourceDir {
+  key: string;
+  folder: string;
+  /** 宿主真实绝对路径（展示 / Tooltip 用） */
+  host_path: string;
+  /** 宿主可移植表达（家目录下 = `${HOME}/<rel>`）——写入挂载行,避免硬编 /home/<user> */
+  host_path_expr: string;
+  exists: boolean;
+}
+
+/** 各目录的中文显示标签（key → 标签） */
+const DIR_LABELS: Record<string, string> = {
+  downloads: '下载',
+  documents: '文档',
+  desktop: '桌面',
+  music: '音乐',
+  pictures: '图片',
+  videos: '视频',
+};
 
 interface MountsPaneProps {
   mounts: MountConfig[];
@@ -38,6 +59,22 @@ export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: Mou
   // 控制下拉打开态——antd AutoComplete 默认在 onSelect 后关闭,选中目录后
   // 需强制 open=true 才能看到下一级子项,否则用户必须再点输入框 + 重新键入。
   const [hostOpen, setHostOpen] = useState(false);
+  // 快捷添加:宿主常用用户资源目录（下载/文档/桌面/图片/音乐/视频）
+  const [resDirs, setResDirs] = useState<UserResourceDir[]>([]);
+
+  useEffect(() => {
+    invoke<UserResourceDir[]>('list_user_resource_dirs')
+      .then(setResDirs)
+      .catch((err) => console.error('list_user_resource_dirs failed:', err));
+  }, []);
+
+  /** 「快捷添加」:点击某目录按钮 → 加一条 `宿主目录 → ${HOME}/<folder>` 的挂载。
+   *  两侧都用 `${HOME}` 占位符（宿主侧展开为宿主 home、容器侧展开为容器用户
+   *  home,复用 core 路径变量能力）——不把 /home/<user> 硬编进配置,跨用户可移植。 */
+  const addResourceDir = (d: UserResourceDir) => {
+    onAdd({ host_path: d.host_path_expr, container_path: `${'$'}{HOME}/${d.folder}`, read_only: false });
+    message.success(`已添加：${d.host_path_expr} → ${'$'}{HOME}/${d.folder}`);
+  };
 
   /** 「浏览」按钮：调用 mount_pick_host_dir 命令打开宿主目录选择对话框。
    *  返回空字符串 = 用户取消(此时不更新输入框)。 */
@@ -180,6 +217,33 @@ export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: Mou
         pagination={false}
         locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无路径映射" /> }}
       />
+
+      {resDirs.length > 0 && (
+        <div className="mount-quick">
+          <span className="mount-quick-label">快捷添加（宿主常用目录）</span>
+          <Space size="small" wrap>
+            {resDirs.map((d) => (
+              <Tooltip
+                key={d.key}
+                title={
+                  d.exists
+                    ? `宿主：${d.host_path}`
+                    : `宿主：${d.host_path}（目录未检测到）`
+                }
+              >
+                <Button
+                  size="small"
+                  type={d.exists ? 'default' : 'dashed'}
+                  onClick={() => addResourceDir(d)}
+                >
+                  {DIR_LABELS[d.key] ?? d.folder}
+                </Button>
+              </Tooltip>
+            ))}
+          </Space>
+        </div>
+      )}
+
       <div className="add-row">
         <Space.Compact style={{ flex: 1, minWidth: 240 }}>
           <AutoComplete

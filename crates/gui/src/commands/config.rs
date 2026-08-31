@@ -4,7 +4,7 @@
 use serde::Serialize;
 use tracing::warn;
 
-use easytidy_core::conf_template::ConfTemplate;
+use easytidy_core::conf_template::{ConfTemplate, ConfTemplateInfo};
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::flavor::inject_passthrough;
 use easytidy_core::models::{ContainerConfig, MountConfig};
@@ -260,16 +260,18 @@ impl ConfTemplateStore {
     }
 }
 
-/// 列出全部 conf 模板（解析为 ConfTemplate）。
+/// 列出全部 conf 模板（解析为 ConfTemplate + 磁盘路径）。
 ///
 /// 双目录语义：先 ensure_conf_examples()（首跑播种内置示例），再读
 /// 「conf 目录」（双轨制：dev = `crates/gui/conf`，prod = `~/.easytidy/conf`）下的
 /// `*.yaml` —— 用户新增/修改的模板一并出现（播种不覆盖用户改动）。
+///
+/// 返回 [`ConfTemplateInfo`]（模板字段 + `path`），GUI 据此展示每个模板的文件位置。
 #[tauri::command]
-pub fn conf_templates() -> Result<Vec<ConfTemplate>, String> {
+pub fn conf_templates() -> Result<Vec<ConfTemplateInfo>, String> {
     ensure_conf_examples();
     let dir = conf_dir().map_err(|e| e.to_string())?;
-    let mut out = Vec::new();
+    let mut out: Vec<ConfTemplateInfo> = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| format!("读取模板目录失败：{e}"))?;
     for entry in entries.flatten() {
@@ -283,11 +285,14 @@ pub fn conf_templates() -> Result<Vec<ConfTemplate>, String> {
         }
         let Ok(yaml) = std::fs::read_to_string(&p) else { continue };
         match serde_yaml::from_str::<ConfTemplate>(&yaml) {
-            Ok(t) => out.push(t),
+            Ok(t) => out.push(ConfTemplateInfo {
+                template: t,
+                path: p.to_string_lossy().into_owned(),
+            }),
             Err(e) => warn!("模板 {:?} 解析失败：{e}", p.file_name()),
         }
     }
-    out.sort_by(|a, b| a.config.name.cmp(&b.config.name));
+    out.sort_by(|a, b| a.template.config.name.cmp(&b.template.config.name));
     Ok(out)
 }
 
@@ -454,23 +459,26 @@ pub struct ExampleConf {
     pub yaml: String,
 }
 
-/// 内置示例模板 —— `crates/gui/conf/*.yaml`，`include_str!` 编译期打进
-/// 二进制（免 tauri bundle resources 配置与安装路径问题）。仅作播种来源：
-/// 首跑写入 `~/.easytidy/conf/`，此后运行时目录为权威（用户可改/增）。
+/// 内置示例模板 —— `crates/gui/assets/*.eg.yaml`，`include_str!` 编译期打进
+/// 二进制（免 tauri bundle resources 配置与安装路径问题）。**仅作播种来源**：
+/// 首跑写入运行时 conf 目录（dev = `crates/gui/conf`，prod = `~/.easytidy/conf`），
+/// 播种时**去掉 `.eg` 标志**（`chrome.eg.yaml` → `chrome.yaml`），此后运行时
+/// 目录为权威（用户可改/增，播种不覆盖）。
 struct ConfSeed {
+    /// 播种后的文件名 stem（= 模板身份；不含 `.eg`）
     name: &'static str,
     yaml: &'static str,
 }
 
 const CONF_SEEDS: [ConfSeed; 2] = [
     ConfSeed {
-        name: "full.eg",
-        yaml: include_str!("../../conf/full.eg.yaml"),
+        name: "full",
+        yaml: include_str!("../../assets/full.eg.yaml"),
     },
     // 经典 Chrome 容器模板示例（展开自内置 flavor chrome）
     ConfSeed {
-        name: "chrome.eg",
-        yaml: include_str!("../../conf/chrome.eg.yaml"),
+        name: "chrome",
+        yaml: include_str!("../../assets/chrome.eg.yaml"),
     },
 ];
 
@@ -724,6 +732,19 @@ pub async fn mount_pick_host_dir(initial: Option<String>) -> Result<String, Stri
     .await
     .map_err(|e| format!("打开目录选择对话框失败：{e}"))?;
     Ok(picked.unwrap_or_default())
+}
+
+/// 宿主常用用户资源目录（下载/文档/桌面/图片/音乐/视频）。
+///
+/// 经 `xdg-user-dir` 探测真实路径（兼容本地化命名）。GUI 挂载面板「快捷添加」
+/// 据此渲染每目录一个按钮：点击 → `onAdd({ host_path, container_path:
+/// "${HOME}/<folder>", read_only: false })`（容器侧 `${HOME}` 运行时展开为容器
+/// 用户 home，复用 core 路径变量能力）。
+#[tauri::command]
+pub async fn list_user_resource_dirs() -> Result<Vec<easytidy_core::desktop::XdgUserDir>, String> {
+    tokio::task::spawn_blocking(easytidy_core::desktop::host_user_resource_dirs)
+        .await
+        .map_err(|e| format!("探测宿主用户资源目录失败：{e}"))
 }
 
 /// 内置示例模板列表（「示例模板」下拉数据源）。

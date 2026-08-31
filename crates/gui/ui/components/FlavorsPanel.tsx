@@ -318,6 +318,11 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                     )}
                   </div>
                   <div className="flavor-image">{t.image}</div>
+                  {t.path && (
+                    <Tooltip title={t.path}>
+                      <div className="flavor-path">{t.path}</div>
+                    </Tooltip>
+                  )}
                 </div>
                 <div className="flavor-actions">
                   <Tooltip title="使用模板创建容器（打开配置编辑器并预填，可继续修改）">

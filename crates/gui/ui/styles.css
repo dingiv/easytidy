@@ -1314,6 +1314,17 @@ button:disabled {
   margin-top: 0.2rem;
 }
 
+/* 模板文件路径（conf 目录下；过长省略，Tooltip 显示全路径） */
+.flavor-path {
+  color: #585b70;
+  font-family: monospace;
+  font-size: 0.72rem;
+  margin-top: 0.2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .flavor-actions {
   display: flex;
   gap: 0.4rem;
@@ -1496,6 +1507,21 @@ button:disabled {
   min-width: 120px;
 }
 
+/* 快捷添加（宿主常用目录）按钮行 */
+.mount-quick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+  border-top: 1px dashed #2a2d3e;
+}
+
+.mount-quick-label {
+  color: #585b70;
+  font-size: 0.75rem;
+}
+
 /* 路径 / 端口单元格等宽字体 */
 .path-cell,
 .port-cell {
@@ -1587,6 +1613,131 @@ button:disabled {
 .image-option-meta {
   font-size: 0.75rem;
   color: #6c7086;
+}
+
+/* 镜像选择下拉（自定义渲染，替代 antd Select 虚拟列表——WebKitGTK 下原生滚动更顺） */
+.image-select {
+  position: relative;
+  width: 100%;
+  max-width: 480px;
+}
+
+.image-select-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 11px;
+  background: #181825;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.image-select-control:hover,
+.image-select-control.open {
+  border-color: #89b4fa;
+}
+
+.image-select-value-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+.image-select-value {
+  font-family: "JetBrains Mono", "Fira Code", "Noto Sans Mono CJK SC", monospace;
+  font-size: 0.85rem;
+  color: #cdd6f4;
+  word-break: break-all;
+}
+.image-select-value.placeholder {
+  color: #6c7086;
+}
+.image-select-meta {
+  font-size: 0.72rem;
+  color: #6c7086;
+}
+.image-select-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.image-select-clear {
+  border: none;
+  background: transparent;
+  color: #6c7086;
+  font-size: 1rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.image-select-clear:hover {
+  color: #cdd6f4;
+  background: rgba(255, 255, 255, 0.06);
+}
+.image-select-caret {
+  width: 0;
+  height: 0;
+  border-left: 4px solid transparent;
+  border-right: 4px solid transparent;
+  border-top: 5px solid #6c7086;
+  transition: transform 0.15s;
+}
+.image-select-control.open .image-select-caret {
+  transform: rotate(180deg);
+}
+
+.image-select-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 100%;
+  min-width: 320px;
+  max-width: 560px;
+  background: #181825;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
+  z-index: 1080;
+  overflow: hidden;
+}
+.image-select-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 11px;
+  background: #11111b;
+  border: none;
+  border-bottom: 1px solid #313244;
+  color: #cdd6f4;
+  font-size: 0.85rem;
+  outline: none;
+}
+.image-select-search::placeholder {
+  color: #6c7086;
+}
+/* 原生可滚动容器——WebKitGTK 下滚动正常（不走虚拟列表的自定义 wheel 逻辑） */
+.image-select-list {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.image-select-list .image-option {
+  padding: 4px 11px;
+  cursor: pointer;
+}
+.image-select-list .image-option.active {
+  background: rgba(137, 180, 250, 0.12);
+}
+.image-select-empty {
+  padding: 14px 11px;
+  color: #6c7086;
+  font-size: 0.85rem;
+  text-align: center;
 }
 
 /* 宿主路径 AutoComplete 选项(MountsPane) */

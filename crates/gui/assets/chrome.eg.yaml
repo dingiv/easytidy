@@ -12,7 +12,7 @@
 # 加载路径:MasterView「配置编辑器」→ 顶部模板选 "chrome" → 预填表单 →
 # 提交创建容器（env 在创建时由 Rust 注入,模板里不写死）。
 
-name: chrome.eg
+name: chrome
 image: docker.io/library/ubuntu:24.04
 gui: true
 entry: google-chrome-stable

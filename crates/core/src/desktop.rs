@@ -145,6 +145,209 @@ pub fn desktop_dir() -> Option<PathBuf> {
         .find(|cand| cand.is_dir())
 }
 
+/// XDG 标准用户资源目录（宿主侧探测结果 + 容器侧标准名）。
+///
+/// GUI 快捷映射「宿主常用目录 → 容器 `${HOME}/<folder>`」的数据源：
+/// - `host_path`：宿主真实绝对路径（GUI 展示 / Tooltip）
+/// - `host_path_expr`：可移植的 `${HOME}/<rel>` 表达（GUI 写入挂载行——避免把
+///   `/home/<user>` 硬编进配置,换用户 / 换 home 仍可用；运行时经
+///   [`crate::pathvars`] 两侧分别展开）
+/// - 容器侧路径由 GUI 拼 `${HOME}/<folder>`（运行时展开为容器用户 home）
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct XdgUserDir {
+    /// 稳定标识（文件夹名小写，如 `downloads`）
+    pub key: String,
+    /// 容器侧标准文件夹名（XDG 标准，如 `Downloads`；GUI 拼 `${HOME}/<folder>`）
+    pub folder: String,
+    /// 宿主侧探测到的真实绝对路径（展示用）
+    pub host_path: String,
+    /// 宿主侧可移植表达（家目录下 → `${HOME}/<rel>`；非家目录自定义绝对路径 → 原样）。
+    /// GUI 写入挂载行的 `host_path` 用它,而非 `host_path` 绝对路径。
+    pub host_path_expr: String,
+    /// 宿主路径是否为目录（false → GUI 置灰提示）
+    pub exists: bool,
+}
+
+/// 探测宿主常用用户资源目录（下载/文档/桌面/图片/音乐/视频）。
+///
+/// 经 `xdg-user-dir <KEY>` 动态获取真实路径（兼容中文系统本地化目录名 /
+/// 用户自定义 XDG 位置），探测退化或失败回退 `$HOME/<folder>`（XDG 默认位置）。
+/// `exists` 标记宿主路径是否存在——不存在时 GUI 仍可添加（用户可后建目录），
+/// 但按钮置灰提示。
+pub fn host_user_resource_dirs() -> Vec<XdgUserDir> {
+    // (xdg-user-dir 键, 容器侧标准文件夹名)
+    const DIRS: [(&str, &str); 6] = [
+        ("DOWNLOAD", "Downloads"),
+        ("DOCUMENTS", "Documents"),
+        ("DESKTOP", "Desktop"),
+        ("MUSIC", "Music"),
+        ("PICTURES", "Pictures"),
+        ("VIDEO", "Videos"),
+    ];
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+    DIRS
+        .into_iter()
+        .map(|(xdg_key, folder)| {
+            let host_path = resolve_host_resource_dir(xdg_user_dir(xdg_key), &home, folder);
+            let host_path_str = host_path.to_string_lossy().into_owned();
+            XdgUserDir {
+                key: folder.to_lowercase(),
+                folder: folder.to_string(),
+                exists: host_path.is_dir(),
+                host_path: host_path_str.clone(),
+                host_path_expr: home_expr(&host_path, &home),
+            }
+        })
+        .collect()
+}
+
+/// 将宿主绝对路径改写为可移植的 `${HOME}/<rel>` 表达。
+///
+/// 路径在 home 下 → `${HOME}/<rel>`（跨用户可移植,不硬编 `/home/<user>`）；
+/// 非 home 下的自定义绝对路径（如 `/data/Dl`）→ 原样保留（无法用 `${HOME}` 表达）。
+/// 前缀匹配须落在**路径组件边界**（余量为空或以 `/` 开头）,避免 `/home/divx`
+/// 被 `/home/div` 误吞。
+fn home_expr(path: &Path, home: &Path) -> String {
+    let home_norm = home.to_string_lossy().trim_end_matches('/').to_string();
+    let path_norm = path.to_string_lossy().into_owned();
+    let is_under = path_norm.starts_with(&home_norm)
+        && {
+            let rest = &path_norm[home_norm.len()..];
+            rest.is_empty() || rest.starts_with('/')
+        };
+    if is_under {
+        let rel = &path_norm[home_norm.len()..];
+        // rel 形如 "" / "/Videos" / "/视频"
+        format!("${{HOME}}{rel}")
+    } else {
+        path_norm
+    }
+}
+
+/// 解析单个宿主资源目录的真实路径。
+///
+/// 优先用 `xdg-user-dir` 探测结果（支持中文本地化目录名 / 用户自定义 XDG
+/// 位置）；但 `xdg-user-dir` 在目录**未配置或配置畸形**（如 `XDG_TEMPLATES_DIR=
+/// "$HOME/"` 这种值为裸 `$HOME/` 的行）时会**退化为家目录本身**——此时若照搬
+/// 会把整个 home 挂进容器（危险且错误）。故：探测结果为空或 = 家目录 → 回退
+/// 标准位置 `$HOME/<folder>`。
+fn resolve_host_resource_dir(xdg: Option<PathBuf>, home: &Path, folder: &str) -> PathBuf {
+    match xdg {
+        Some(p) if !is_bare_home(&p, home) => p,
+        _ => home.join(folder),
+    }
+}
+
+/// 路径是否为「家目录本身」（忽略尾随 `/`）——`xdg-user-dir` 退化的标志。
+fn is_bare_home(p: &Path, home: &Path) -> bool {
+    let norm = |b: &Path| b.to_string_lossy().trim_end_matches('/').to_string();
+    !norm(p).is_empty() && norm(p) == norm(home)
+}
+
+/// `xdg-user-dir <KEY>`：动态获取宿主用户目录真实路径（兼容本地化命名）。
+/// 命令缺失 / 失败 / 空输出 → `None`（调用方回退 `$HOME/<folder>`）。
+fn xdg_user_dir(key: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new("xdg-user-dir")
+        .arg(key)
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() {
+            return Some(PathBuf::from(s));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod resource_dir_tests {
+    use super::*;
+
+    #[test]
+    fn bare_home_degenerates_to_standard_folder() {
+        // xdg-user-dir 退化为 home 本身 → 回退 $HOME/<folder>（不挂整 home）
+        let home = PathBuf::from("/home/div");
+        assert_eq!(
+            resolve_host_resource_dir(Some(home.clone()), &home, "Videos"),
+            PathBuf::from("/home/div/Videos")
+        );
+    }
+
+    #[test]
+    fn bare_home_with_trailing_slash() {
+        let home = PathBuf::from("/home/div");
+        assert_eq!(
+            resolve_host_resource_dir(Some(PathBuf::from("/home/div/")), &home, "Videos"),
+            PathBuf::from("/home/div/Videos")
+        );
+    }
+
+    #[test]
+    fn empty_result_falls_back() {
+        let home = PathBuf::from("/home/div");
+        assert_eq!(
+            resolve_host_resource_dir(None, &home, "Downloads"),
+            PathBuf::from("/home/div/Downloads")
+        );
+    }
+
+    #[test]
+    fn real_subdir_is_respected() {
+        let home = PathBuf::from("/home/div");
+        assert_eq!(
+            resolve_host_resource_dir(Some(PathBuf::from("/home/div/Downloads")), &home, "Downloads"),
+            PathBuf::from("/home/div/Downloads")
+        );
+    }
+
+    #[test]
+    fn localized_or_custom_dir_is_respected() {
+        // 中文本地化 / 用户自定义位置（非裸 home）→ 照搬
+        let home = PathBuf::from("/home/div");
+        assert_eq!(
+            resolve_host_resource_dir(Some(PathBuf::from("/home/div/文档")), &home, "Documents"),
+            PathBuf::from("/home/div/文档")
+        );
+        assert_eq!(
+            resolve_host_resource_dir(Some(PathBuf::from("/data/Dl")), &home, "Downloads"),
+            PathBuf::from("/data/Dl")
+        );
+    }
+
+    #[test]
+    fn is_bare_home_detection() {
+        let home = PathBuf::from("/home/div");
+        assert!(is_bare_home(&home, &home));
+        assert!(is_bare_home(&PathBuf::from("/home/div/"), &home));
+        assert!(!is_bare_home(&PathBuf::from("/home/div/Videos"), &home));
+        assert!(!is_bare_home(&PathBuf::from("/"), &home));
+        assert!(!is_bare_home(&PathBuf::from(""), &home));
+    }
+
+    #[test]
+    fn home_expr_under_home() {
+        let home = PathBuf::from("/home/div");
+        assert_eq!(home_expr(&PathBuf::from("/home/div/Videos"), &home), "${HOME}/Videos");
+        assert_eq!(home_expr(&PathBuf::from("/home/div/视频"), &home), "${HOME}/视频");
+    }
+
+    #[test]
+    fn home_expr_outside_home_kept_absolute() {
+        // 非 home 下的自定义绝对路径 → 原样（无法用 ${HOME} 表达）
+        let home = PathBuf::from("/home/div");
+        assert_eq!(home_expr(&PathBuf::from("/data/Dl"), &home), "/data/Dl");
+        assert_eq!(home_expr(&PathBuf::from("/"), &home), "/");
+    }
+
+    #[test]
+    fn home_expr_prefix_not_misread() {
+        // /home/divx 不应被 /home/div 前缀误吞（ends_with 边界）
+        let home = PathBuf::from("/home/div");
+        assert_eq!(home_expr(&PathBuf::from("/home/divx/Videos"), &home), "/home/divx/Videos");
+    }
+}
+
 /// 标记 GNOME 桌面 .desktop 为已信任（允许双击启动；仅桌面路径需要，
 /// 应用菜单无需。非 GNOME 环境 gio 缺失时静默忽略）。
 pub fn mark_desktop_trusted(path: &Path) {
