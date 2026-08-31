@@ -210,9 +210,9 @@ enum EnvCmd {
     Snapshot {
         /// 环境名
         name: String,
-        /// 快照标签（默认=时间戳）
+        /// 快照名（最终镜像 = easytidy/snapshot/<快照名>；默认=<容器名>-<YYYYmmdd-HHMM>）
         #[arg(long)]
-        tag: Option<String>,
+        snapshot: Option<String>,
     },
     /// 运行环境（细粒度控制，与创建/销毁分离）
     Start { name: String },
@@ -303,7 +303,9 @@ async fn main() -> Result<()> {
                         image,
                     } => cmd_env_new(podman, name, flavor, image).await,
                     EnvCmd::Rm { name } => cmd_env_rm(podman, name).await,
-                    EnvCmd::Snapshot { name, tag } => cmd_env_snapshot(podman, name, tag).await,
+                    EnvCmd::Snapshot { name, snapshot } => {
+                        cmd_env_snapshot(podman, name, snapshot).await
+                    }
                     EnvCmd::Start { name } => cmd_env_start(podman, name).await,
                     EnvCmd::Stop { name } => cmd_env_stop(podman, name).await,
                     EnvCmd::List => cmd_env_list(podman).await,
@@ -610,19 +612,14 @@ async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
     // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
     let _ = easytidy_core::remove_socket_dirs(&name);
     println!("环境 {name} 已删除（无残留）");
-    println!("  提示：该环境的快照（easytidy/snapshot/{name}-*）为独立镜像资产，已保留");
+    println!("  提示：该环境的快照（easytidy/snapshot/* 下按你命名的镜像）为独立资产，已保留");
     Ok(())
 }
 
 /// 快照：commit 当前容器层（仅文件系统层，bind mount 不入快照）。
-async fn cmd_env_snapshot(podman: Podman, name: String, tag: Option<String>) -> Result<()> {
-    let tag = tag.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|_| "now".to_string())
-    });
-    let image_ref = podman.snapshot(&name, &tag).await?;
+/// 未提供 --snapshot 时 core 兜底为可读默认名 <容器名>-<YYYYmmdd-HHMM>。
+async fn cmd_env_snapshot(podman: Podman, name: String, snapshot: Option<String>) -> Result<()> {
+    let image_ref = podman.snapshot(&name, snapshot.as_deref()).await?;
     println!("环境 {name} 快照完成：{image_ref}");
     Ok(())
 }

@@ -552,7 +552,9 @@ impl Podman {
     }
 
     /// 环境快照:以 `commit --squash` 把运行中容器打成扁平镜像
-    /// `easytidy/snapshot/<name>-<tag>`。
+    /// `easytidy/snapshot/<snapshot_name>`（`snapshot_name` 即用户输入的全名，
+    /// 不再拼环境名前缀——命名即用户意图，容器来源由 commit 决定；
+    /// 未提供时兜底为可读默认名 `<容器名>-<YYYYmmdd-HHMM>`）。
     ///
     /// 实现:走 libpod 直连(`libpod::commit_squash`),与项目既有的 keep-id
     /// 创建路径走同一条 podman socket 直连栈。
@@ -569,8 +571,13 @@ impl Podman {
     ///
     /// 快照是独立资产,删除环境不删快照(可被 fork 复用)。
     /// 见 docs/13-mutable-env-paradigm.md。
-    pub async fn snapshot(&self, name: &str, tag: &str) -> Result<String> {
-        let image_ref = format!("easytidy/snapshot/{name}-{tag}");
+    pub async fn snapshot(&self, name: &str, snapshot_name: Option<&str>) -> Result<String> {
+        // 未提供（或空白）→ 可读默认名 <容器名>-<YYYYmmdd-HHMM>（本地时间）
+        let snapshot_name = match snapshot_name {
+            Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+            _ => default_snapshot_name(name),
+        };
+        let image_ref = format!("easytidy/snapshot/{snapshot_name}");
         let libpod = crate::libpod::Libpod::new().await?;
         libpod
             .commit_squash(name, &image_ref, "easytidy snapshot via commit --squash")
@@ -1043,6 +1050,15 @@ impl Podman {
     }
 }
 
+/// 默认快照名：`<容器名>-<YYYYmmdd-HHMM>`（本地时间）。
+///
+/// 用户未输入快照名时的兜底——可读、能看出来源容器（纯 Unix 时间戳难读
+/// 且无法区分容器）。
+fn default_snapshot_name(container: &str) -> String {
+    use chrono::Local;
+    format!("{container}-{}", Local::now().format("%Y%m%d-%H%M"))
+}
+
 /// 从 archive tar（docker/podman `download_from_container` 返回）解出 passwd 文本。
 ///
 /// 条目名可能是 `passwd` 或 `etc/passwd`（按 Docker API 行为），都识别。
@@ -1170,6 +1186,19 @@ mod tests {
         let err = resolve_container_user(&params, None).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
         assert!(err.to_string().contains("无法确定容器默认用户"));
+    }
+
+    #[test]
+    fn test_default_snapshot_name_shape() {
+        // <容器名>-<YYYYmmdd-HHMM>：容器名前缀 + 13 位数字时间（4 连 2 连 2 连 2 连 4）
+        let name = default_snapshot_name("chrome");
+        let rest = name.strip_prefix("chrome-").expect("应以容器名开头");
+        assert_eq!(rest.len(), 13, "时间部分应为 YYYYmmdd-HHMM：{name}");
+        let (date, time) = rest.split_once('-').expect("日期与时间以 - 分隔");
+        assert_eq!(date.len(), 8);
+        assert_eq!(time.len(), 4);
+        assert!(date.bytes().all(|b| b.is_ascii_digit()));
+        assert!(time.bytes().all(|b| b.is_ascii_digit()));
     }
 
     #[test]

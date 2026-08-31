@@ -389,24 +389,22 @@ pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Resu
     Ok(())
 }
 
-/// 快照：commit 当前容器文件系统层为快照镜像 `easytidy/snapshot/<name>-<tag>`。
+/// 快照：commit 当前容器文件系统层为快照镜像 `easytidy/snapshot/<snapshot_name>`。
 ///
-/// 默认标签 = 时间戳；返回快照镜像名（前端展示/复用）。
+/// `snapshot_name` = 用户输入的快照名（最终镜像全名 = `easytidy/snapshot/<snapshot_name>`）；
+/// 缺省 = 可读默认名 `<容器名>-<YYYYmmdd-HHMM>`（core 统一兜底）。
+/// 返回快照镜像名（前端展示/复用）。
 #[tauri::command]
 pub async fn env_snapshot(
     podman: tauri::State<'_, PodmanState>,
     name: String,
-    tag: Option<String>,
+    snapshot_name: Option<String>,
 ) -> Result<String, String> {
-    let tag = tag.unwrap_or_else(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs().to_string())
-            .unwrap_or_else(|_| "now".to_string())
-    });
-
     let p = podman.get().await.map_err(|e| e.to_string())?;
-    let image_ref = p.snapshot(&name, &tag).await.map_err(|e| e.to_string())?;
+    let image_ref = p
+        .snapshot(&name, snapshot_name.as_deref())
+        .await
+        .map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
 
     info!("环境 {} 快照完成：{}", name, image_ref);
