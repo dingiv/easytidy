@@ -6,8 +6,14 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { Dropdown, Radio, Tooltip } from 'antd';
-import { DownOutlined, PictureOutlined, PushpinFilled, PushpinOutlined } from '@ant-design/icons';
+import { App as AntApp, Dropdown, Radio, Tooltip } from 'antd';
+import {
+  DownOutlined,
+  PictureOutlined,
+  PlayCircleOutlined,
+  PushpinFilled,
+  PushpinOutlined,
+} from '@ant-design/icons';
 import { AppIcon } from './AppIcon';
 import { IconPickerModal } from './IconPickerModal';
 import { useFavoritesStore } from '../stores/favoritesStore';
@@ -18,11 +24,14 @@ import type {
 } from '../types';
 
 export function PassthroughManager() {
+  const { message } = AntApp.useApp();
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [state, setState] = useState<PassthroughState | null>(null);
   const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // 正在启动的应用 id（按钮加载态 + 防重复点击；null = 无进行中）
+  const [launchingId, setLaunchingId] = useState<string | null>(null);
   // 展开查看 .desktop 内容的条目
   const [expandedContent, setExpandedContent] = useState<string | null>(null);
   // 自定义应用表单
@@ -172,6 +181,23 @@ export function PassthroughManager() {
     } catch (err: any) {
       setError(errMsg(err, 'Failed to revoke app'));
       console.error('passthrough_revoke failed:', err);
+    }
+  };
+
+  /** 立即启动容器内应用（经 server apps.launch 拉起，server 保活、独立于连接存活）。
+   *  列表里点一下即拉起某个扫描到的 / 自定义应用，无需先收藏。返回 pid，
+   *  命令即时退出（如未安装 → 127）时后端已回报错误。 */
+  const handleLaunch = async (id: string, name: string, cmd: string) => {
+    setError(null);
+    setLaunchingId(id);
+    try {
+      const pid = await invoke<number>('passthrough_launch_app', { id, name, cmd });
+      message.success(`${name} 已启动 (pid=${pid})`);
+    } catch (err: any) {
+      setError(errMsg(err, `启动 ${name} 失败`));
+      console.error('passthrough_launch_app failed:', err);
+    } finally {
+      setLaunchingId(null);
     }
   };
 
@@ -354,6 +380,15 @@ export function PassthroughManager() {
                 </label>
               </div>
               <div className="app-actions">
+                <Tooltip title="立即启动">
+                  <button
+                    className="secondary-button icon-only"
+                    onClick={() => handleLaunch(app.desktop_file, app.name, app.exec)}
+                    disabled={launchingId === app.desktop_file}
+                  >
+                    <PlayCircleOutlined />
+                  </button>
+                </Tooltip>
                 <Tooltip title={isPinned(app.desktop_file) ? '取消收藏' : '收藏到工具栏'}>
                   <button
                     className={`secondary-button icon-only ${isPinned(app.desktop_file) ? 'pinned' : ''}`}
@@ -482,6 +517,15 @@ export function PassthroughManager() {
                 </label>
               </div>
               <div className="app-actions">
+                <Tooltip title="立即启动">
+                  <button
+                    className="secondary-button icon-only"
+                    onClick={() => handleLaunch(custom.id, custom.name, custom.cmd)}
+                    disabled={launchingId === custom.id}
+                  >
+                    <PlayCircleOutlined />
+                  </button>
+                </Tooltip>
                 <Tooltip title={isPinned(custom.id) ? '取消收藏' : '收藏到工具栏'}>
                   <button
                     className={`secondary-button icon-only ${isPinned(custom.id) ? 'pinned' : ''}`}

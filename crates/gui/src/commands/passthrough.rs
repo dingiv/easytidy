@@ -298,6 +298,56 @@ pub async fn passthrough_launch(
     }
 }
 
+/// 立即拉起容器内应用（Passthrough 管理器列表里任意应用，无需先收藏）。
+///
+/// 与 [`passthrough_launch`]（拉起**收藏**应用）的区别：这里按调用方传入的
+/// name/cmd 即时构造应用拉起，用于「列表里点一下就启动某个被扫描到的应用」。
+/// 经 server apps.launch 拉起（server 保活、子进程独立于连接存活）；返回进程 pid。
+#[tauri::command]
+pub async fn passthrough_launch_app(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+    name: String,
+    cmd: String,
+) -> Result<u32, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+
+    // 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数，与 export 一致）
+    let cmd = clean_exec(&cmd);
+    if cmd.trim().is_empty() {
+        return Err("应用命令为空，无法启动".to_string());
+    }
+
+    let app = easytidy_core::passthrough::PassthroughApp {
+        id: id.clone(),
+        name,
+        cmd,
+        desktop_file: None,
+        auto_start: false,
+        icon: None,
+    };
+
+    let results = easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&app))
+        .await
+        .map_err(|e| e.to_string())?;
+    match results.first() {
+        Some(r) => match r.pid {
+            Some(pid) => {
+                info!("应用已拉起：{id} (pid={pid})");
+                // 拉起后检测即时退出（命令不存在 → 127 等，避免误报「启动成功」）
+                detect_early_exit(container, pid).await?;
+                Ok(pid)
+            }
+            None => Err(r.error.clone().unwrap_or_else(|| "拉起失败".to_string())),
+        },
+        None => Err("server 无响应".to_string()),
+    }
+}
+
 /// 拉起后短暂轮询 server 进程表，检测命令是否立即退出（非 0 码）。
 ///
 /// 命令不存在（如 google-chrome-stable 未安装）时 spawn 成功但 `su -c` 立即

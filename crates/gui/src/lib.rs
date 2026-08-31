@@ -164,6 +164,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             // 收藏（pin 到工具栏）
             commands::passthrough::passthrough_set_pinned,
             commands::passthrough::passthrough_launch,
+            // 立即拉起容器内任意应用（Passthrough 管理器列表，无需先收藏）
+            commands::passthrough::passthrough_launch_app,
             // 容器自启动（systemd user unit）
             commands::passthrough::passthrough_set_boot_mode,
             // 配置（容器内 server 配置读写）
