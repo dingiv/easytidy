@@ -1,9 +1,9 @@
 // 挂载（路径映射）面板：表格 + 添加行（宿主路径/容器路径/只读）。
 
 import { useEffect, useState } from 'react';
-import { App as AntApp, AutoComplete, Button, Empty, Input, Space, Switch, Table } from 'antd';
+import { App as AntApp, AutoComplete, Button, Empty, Input, Space, Switch, Table, Typography } from 'antd';
 import type { TableProps } from 'antd';
-import { DeleteOutlined, FolderOpenOutlined, PlusOutlined } from '@ant-design/icons';
+import { DeleteOutlined, FolderOpenOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../../lib/errors';
 import type { MountConfig } from '../../types';
@@ -17,11 +17,14 @@ interface HostEntry {
 
 interface MountsPaneProps {
   mounts: MountConfig[];
+  /** GUI 透传开启时引擎将隐式注入的挂载（只读展示；模板编辑器 gui=true 时由
+   *  passthrough_preview 计算） */
+  readonlyMounts?: MountConfig[];
   onAdd(m: MountConfig): void;
   onRemove(idx: number): void;
 }
 
-export function MountsPane({ mounts, onAdd, onRemove }: MountsPaneProps) {
+export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: MountsPaneProps) {
   const { message } = AntApp.useApp();
   const [newMount, setNewMount] = useState({
     host_path: '',
@@ -222,6 +225,46 @@ export function MountsPane({ mounts, onAdd, onRemove }: MountsPaneProps) {
           添加
         </Button>
       </div>
+
+      {readonlyMounts.length > 0 && (
+        <div className="config-subsection">
+          <Typography.Text strong>
+            <LockOutlined className="readonly-badge-icon" /> GUI 透传注入（只读）
+          </Typography.Text>
+          <Table
+            size="small"
+            rowKey={(_rec: MountConfig, i) => `gui-mount-${i}`}
+            columns={[
+              {
+                title: '宿主路径',
+                dataIndex: 'host_path',
+                key: 'host_path',
+                ellipsis: true,
+                render: (v: string) => <span className="path-cell">{v}</span>,
+              },
+              {
+                title: '容器路径',
+                dataIndex: 'container_path',
+                key: 'container_path',
+                ellipsis: true,
+                render: (v: string) => <span className="path-cell">{v}</span>,
+              },
+              {
+                title: '只读',
+                dataIndex: 'read_only',
+                key: 'read_only',
+                width: 90,
+                render: (ro: boolean) => <Switch size="small" checked={ro} disabled />,
+              },
+            ]}
+            dataSource={readonlyMounts}
+            pagination={false}
+          />
+          <span className="section-hint">
+            GUI 透传开启时由引擎按宿主实时环境注入（X11/Wayland socket、$XDG_RUNTIME_DIR、字体图标），不可手动修改。
+          </span>
+        </div>
+      )}
     </div>
   );
 }

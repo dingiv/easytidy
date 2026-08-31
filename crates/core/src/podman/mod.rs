@@ -378,6 +378,10 @@ impl Podman {
                 None,
                 Some(user_spec.as_str()),
                 true,
+                config.params.devices.clone(),
+                config.params.gpu.as_deref(),
+                config.params.pid.as_deref(),
+                config.params.security_opts.clone(),
             );
             let id = libpod.create_container(name, body).await?;
             tracing::info!("容器 {} 创建成功（ID: {}，keep-id）", name, id);
@@ -406,6 +410,10 @@ impl Podman {
             None,
             Some(user_spec.as_str()),
             false,
+            config.params.devices.clone(),
+            config.params.gpu.as_deref(),
+            config.params.pid.as_deref(),
+            config.params.security_opts.clone(),
         );
         let id = libpod.create_container(name, body).await?;
         tracing::info!("容器 {} 创建成功（ID: {}，libpod）", name, id);
@@ -952,6 +960,10 @@ mod tests {
             None,
             Some("1000:1000"),
             true,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
         assert_eq!(body["user"], "1000:1000");
         assert_eq!(body["userns"]["nsmode"], "keep-id");
@@ -970,6 +982,10 @@ mod tests {
             None,
             None,
             false,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
         assert_eq!(body["user"], "0:0");
         assert!(body.get("userns").is_none());
@@ -1000,11 +1016,90 @@ mod tests {
             None,
             Some("1000:1000"),
             false,
+            Vec::new(),
+            None,
+            None,
+            Vec::new(),
         );
         let pm = &body["portmappings"][0];
         assert_eq!(pm["container_port"], 80);
         assert_eq!(pm["protocol"], "tcp");
         assert_eq!(pm["host_port"], 18080); // 数字（uint16），非字符串
         assert!(body.get("port_bindings").is_none());
+    }
+
+    #[test]
+    fn test_libpod_body_device_fields() {
+        let make = |devices: Vec<String>, gpu: Option<&str>, pid: Option<&str>, security: Vec<String>| {
+            crate::libpod::keep_id_create_body(
+                "c1",
+                "alpine:latest",
+                vec!["/bin/sh".into()],
+                Vec::new(),
+                std::collections::HashMap::new(),
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
+                Some("1000:1000"),
+                true,
+                devices,
+                gpu,
+                pid,
+                security,
+            )
+        };
+
+        let to_vec = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        // 全部为空（旧行为）：不出现 devices/pidns/security 字段，init 保持 true
+        let body = make(Vec::new(), None, None, Vec::new());
+        assert!(body.get("devices").is_none());
+        assert!(body.get("pidns").is_none());
+        assert!(body.get("apparmor_profile").is_none());
+        assert!(body.get("selinux_opts").is_none());
+        assert!(body.get("seccomp_profile_path").is_none());
+        assert_eq!(body["init"], true);
+
+        // gpu = "all" → nvidia.com/gpu=all CDI 引用（与 podman --gpus all 等价）
+        let body = make(Vec::new(), Some("all"), None, Vec::new());
+        assert_eq!(body["devices"][0]["path"], "nvidia.com/gpu=all");
+
+        // 裸设备直通
+        let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), None, None, Vec::new());
+        assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
+
+        // gpu + 裸设备共存
+        let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), Some("0"), None, Vec::new());
+        assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
+        assert_eq!(body["devices"][1]["path"], "nvidia.com/gpu=0");
+
+        // pid = host → pidns.nsmode = host 且 init 禁用（catatonit 无法进 host PID ns）
+        let body = make(Vec::new(), None, Some("host"), Vec::new());
+        assert_eq!(body["pidns"]["nsmode"], "host");
+        assert_eq!(body["init"], false);
+
+        // pid = private（显式）→ 无 pidns 字段，init 保持
+        let body = make(Vec::new(), None, Some("private"), Vec::new());
+        assert!(body.get("pidns").is_none());
+        assert_eq!(body["init"], true);
+
+        // security_opts 解析：label → selinux_opts，apparmor → apparmor_profile，
+        // seccomp → seccomp_profile_path（与 podman CLI --security-opt 映射一致）
+        let body = make(
+            Vec::new(),
+            None,
+            None,
+            to_vec(&["label=disable", "apparmor=unconfined", "seccomp=unconfined"]),
+        );
+        assert_eq!(body["selinux_opts"][0], "disable");
+        assert_eq!(body["apparmor_profile"], "unconfined");
+        assert_eq!(body["seccomp_profile_path"], "unconfined");
+
+        // 未知 key 忽略，无 '=' 的串忽略（不 panic、不产生字段）
+        let body = make(Vec::new(), None, None, to_vec(&["mask=/foo", "nonsense"]));
+        assert!(body.get("apparmor_profile").is_none());
+        assert!(body.get("selinux_opts").is_none());
     }
 }

@@ -14,26 +14,27 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::flavor::inject_gui_passthrough;
+use crate::flavor::inject_passthrough;
 use crate::models::ContainerConfig;
 
-/// conf YAML 模板：容器关键参数 + 可选安装命令(setup) + GUI 透传开关。
+/// conf YAML 模板：容器关键参数 + 可选安装命令(setup)。
 ///
 /// `#[serde(flatten)]` 平铺 [`ContainerConfig`] 字段——YAML 形状与实例容器
-/// 配置一致(旧 conf/*.yaml 文件直接兼容,setup/gui 默认空/false)。
+/// 配置一致(旧 conf/*.yaml 文件直接兼容,setup 默认空)。
 ///
-/// 设计意图:YAML 存静态意图(镜像/entry/挂载/网络/用户映射 + 可选 setup),
+/// GUI / GPU 透传意图(`gui` / `gpu`)在 [`ContainerConfig`] 共享基座内
+/// (见 `crate::models::ContainerParams`)——模板与实例共用同一份意图字段,
+/// 故模板与实例的「容器」配置区都能编辑这两个开关。
+///
+/// 设计意图:YAML 存静态意图(镜像/entry/挂载/网络/用户映射 + gui/gpu + 可选 setup),
 /// 宿主耦合的运行时数据(DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR)留到
 /// [`ConfTemplate::build_config`] 实时探测注入——避免模板硬编 session 特有值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfTemplate {
-    /// 容器关键参数(flatten 平铺;name 即执行容器名,与 data 目录按名绑定)
+    /// 容器关键参数(flatten 平铺;name 即执行容器名,与 data 目录按名绑定;
+    /// 含 `gui` / `gpu` 透传意图)
     #[serde(flatten)]
     pub config: ContainerConfig,
-    /// GUI 透传(展开时注入宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR
-    /// + /tmp/.X11-unix 与 $XDG_RUNTIME_DIR 挂载 + 字体图标只读挂载 + keep_id=true)
-    #[serde(default)]
-    pub gui: bool,
     /// 创建后按序执行的安装命令(本轮只存不执行;执行链路与 data 启动脚本
     /// 一起在下一步接入)
     #[serde(default)]
@@ -53,9 +54,8 @@ impl ConfTemplate {
     pub fn build_config(&self, name: &str) -> ContainerConfig {
         let mut config = self.config.clone();
         config.name = name.to_string();
-        if self.gui {
-            inject_gui_passthrough(&mut config.params, &mut config.env);
-        }
+        // 按 config 内的 gui/gpu 意图注入宿主透传(与实例 apply/重建路径共用)
+        inject_passthrough(&mut config);
         // 血缘盖章 = 模板名(若模板作者没填则使用文件 stem 命名约定;
         // 调用方负责在 conf_template_expand 同步盖章)
         if config.flavor.is_none() {
@@ -103,7 +103,6 @@ mod tests {
                 },
                 ..ContainerConfig::default()
             },
-            gui: false,
             setup: Vec::new(),
         };
         let v = serde_json::to_value(&t).unwrap();
@@ -111,6 +110,7 @@ mod tests {
         assert_eq!(obj.get("name").unwrap(), "dev");
         assert_eq!(obj.get("image").unwrap(), "docker.io/library/ubuntu:24.04");
         assert!(obj.contains_key("setup"));
+        // gui 在共享基座内,经 flatten 平铺到最外层(缺省 false)
         assert_eq!(obj.get("gui").unwrap(), false);
         // 不嵌套 config 键
         assert!(!obj.contains_key("config"));
@@ -127,7 +127,7 @@ mod tests {
             "env":[],"silent_boot":false,"persistent":true
         }"#;
         let t_old: ConfTemplate = serde_json::from_str(json_old).unwrap();
-        assert!(!t_old.gui, "旧文件缺 gui 字段应默认 false");
+        assert!(!t_old.config.params.gui, "旧文件缺 gui 字段应默认 false");
 
         let json_new = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
@@ -137,6 +137,42 @@ mod tests {
             "gui":true
         }"#;
         let t_new: ConfTemplate = serde_json::from_str(json_new).unwrap();
-        assert!(t_new.gui, "新文件含 gui:true 应生效");
+        assert!(t_new.config.params.gui, "新文件含 gui:true 应生效");
+    }
+
+    #[test]
+    fn test_conf_template_gpu_expand() {
+        // gpu: all → 展开后 params.gpu = "all" + 注入 NVIDIA_* env（仅设备+env,
+        // 不隐式加 security_opts）
+        let json = r#"{
+            "name":"chrome","image":"docker.io/library/ubuntu:24.04",
+            "entry":"google-chrome-stable","entry_args":[],
+            "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
+            "env":[],"silent_boot":false,"persistent":true,
+            "gpu":"all"
+        }"#;
+        let t: ConfTemplate = serde_json::from_str(json).unwrap();
+        assert_eq!(t.config.params.gpu.as_deref(), Some("all"));
+        let cfg = t.build_config("c1");
+        assert_eq!(cfg.params.gpu.as_deref(), Some("all"));
+        assert!(cfg.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+        assert!(cfg.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
+        // 仅设备+env:不隐式注入 security_opts
+        assert!(cfg.params.security_opts.is_empty(), "gpu 不应隐式加 security_opts");
+
+        // 未设 gpu → 不透传,不注入 NVIDIA env
+        let json2 = r#"{
+            "name":"c2","image":"alpine","entry_args":[],
+            "mounts":[],"network":{"mode":"host","ports":[]},
+            "env":[],"silent_boot":false,"persistent":true
+        }"#;
+        let t2: ConfTemplate = serde_json::from_str(json2).unwrap();
+        assert!(t2.config.params.gpu.is_none());
+        let cfg2 = t2.build_config("c2");
+        assert!(cfg2.params.gpu.is_none());
+        assert!(
+            !cfg2.env.iter().any(|e| e.starts_with("NVIDIA_")),
+            "无 gpu 时不应注入 NVIDIA env"
+        );
     }
 }

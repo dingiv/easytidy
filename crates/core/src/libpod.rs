@@ -271,6 +271,16 @@ pub fn keep_id_create_body(
     default_user: Option<&str>,
     // keep-id 用户命名空间；false = 无 userns（容器内 uid 落宿主 subuid 段）
     keep_id: bool,
+    // 设备直通：裸设备 "host:container[:perms]" 列表（SpecGenerator devices 的 Path）
+    devices: Vec<String>,
+    // GPU 透传："all" 或设备名 / "device=<uuid>"；经 nvidia.com/gpu=<值> CDI 引用注入
+    // 设备节点。None = 无 GPU
+    gpu: Option<&str>,
+    // PID 命名空间模式（"host" 等）；None = private。非 private 时禁用 init
+    pid: Option<&str>,
+    // 安全选项（"label=disable" / "apparmor=unconfined" / "seccomp=..." 原始串）；
+    // 解析进 SpecGenerator 对应字段
+    security_opts: Vec<String>,
 ) -> Value {
     // libpod SpecGenerator 的 env 是 map[string]string（Docker compat 才是数组）
     let mut env_map = serde_json::Map::new();
@@ -332,6 +342,47 @@ pub fn keep_id_create_body(
         None => Vec::new(),
     };
 
+    // 设备直通：SpecGenerator 的 devices 字段是 []spec.LinuxDevice，其 Path 既能是
+    // 裸设备串（"host:container[:perms]"）也能是 CDI 引用（"nvidia.com/gpu=all"）——
+    // podman CLI 的 --device 与 --gpus 都归一化成此（见 FillOutSpecGen：
+    // --gpus 逐值拼 "nvidia.com/gpu=<值>" 追加进 devices）。GPU 由此经 CDI 注入设备节点。
+    let mut device_list: Vec<Value> = Vec::new();
+    for d in &devices {
+        if !d.trim().is_empty() {
+            device_list.push(json!({ "path": d.trim() }));
+        }
+    }
+    if let Some(gpu) = gpu.map(str::trim).filter(|g| !g.is_empty()) {
+        device_list.push(json!({ "path": format!("nvidia.com/gpu={gpu}") }));
+    }
+
+    // PID 命名空间：SpecGenerator 的 pidns.nsmode。默认即 private（省略该字段），
+    // 非 private（host 等）时 PID 1 是宿主 init，无法再注入 catatonit——init 必须关闭。
+    let pid_mode = pid
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && *p != "private")
+        .map(str::to_string);
+    let init_enabled = pid_mode.is_none();
+
+    // 安全选项：解析 "key=value" 串进 SpecGenerator 对应字段（对齐 podman CLI
+    // --security-opt 的映射）：apparmor→apparmor_profile、label→selinux_opts、
+    // seccomp→seccomp_profile_path。其余（mask/unmask 等）暂忽略。
+    let mut apparmor_profile: Option<String> = None;
+    let mut selinux_opts: Vec<String> = Vec::new();
+    let mut seccomp_profile_path: Option<String> = None;
+    for opt in &security_opts {
+        let (key, val) = match opt.split_once('=') {
+            Some(kv) => kv,
+            None => continue,
+        };
+        match key {
+            "apparmor" => apparmor_profile = Some(val.to_string()),
+            "label" => selinux_opts.push(val.to_string()),
+            "seccomp" => seccomp_profile_path = Some(val.to_string()),
+            _ => {}
+        }
+    }
+
     let mut body = json!({
         "name": name,
         "image": image,
@@ -343,7 +394,8 @@ pub fn keep_id_create_body(
         "env": env_map,
         "labels": labels,
         "hostname": name,
-        "init": true,                       // catatonit = PID 1（与 bollard 路径一致）
+        // catatonit = PID 1；PID 命名空间非 private 时禁用（无法注入 init）
+        "init": init_enabled,
         "mounts": podman_mounts,
         "network_mode": network_mode,       // Some("host") 或 null（bridge 默认）
         "exposed_ports": exposed_ports,
@@ -358,6 +410,24 @@ pub fn keep_id_create_body(
     // **不是宿主默认用户**——root 写宿主 home 属主呈现 100000）
     if keep_id {
         body["userns"] = json!({ "nsmode": "keep-id" });
+    }
+    // 设备直通（裸设备 + GPU CDI 引用）；空则省略
+    if !device_list.is_empty() {
+        body["devices"] = json!(device_list);
+    }
+    // PID 命名空间（pid=host 等）
+    if let Some(mode) = &pid_mode {
+        body["pidns"] = json!({ "nsmode": mode });
+    }
+    // 安全选项（解析后的 SpecGenerator 字段）
+    if let Some(profile) = &apparmor_profile {
+        body["apparmor_profile"] = json!(profile);
+    }
+    if !selinux_opts.is_empty() {
+        body["selinux_opts"] = json!(selinux_opts);
+    }
+    if let Some(path) = &seccomp_profile_path {
+        body["seccomp_profile_path"] = json!(path);
     }
     body
 }

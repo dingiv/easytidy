@@ -137,6 +137,10 @@ export interface ContainerConfig {
   user_gid?: number | null;
   /// 容器内用户名（可选；有值时首次创建经 root exec useradd 建号）
   user_name?: string | null;
+  /// GUI 透传（意图）：开启时引擎展开/重建注入宿主显示 env + X11/Wayland/字体图标挂载
+  gui?: boolean;
+  /// GPU 透传（意图）：值为 "all" / 设备名 / "device=<uuid>"；null/缺省 = 不透传
+  gpu?: string | null;
   /// 血缘：来源 flavor 模板名（展开时盖章；null = 自由创建，不参与模板同步）
   flavor?: string | null;
 }
@@ -206,16 +210,23 @@ export interface ImageSummary {
   created: number;
 }
 
+/// GUI + GPU 透传预览（passthrough_preview）：`gui`/`gpu` 开启时引擎会隐式注入的
+/// 增量 env / mounts（模板里已声明的同 destination / 同 key 项不重复）。
+/// 模板编辑器开启对应开关时以只读行展示，让用户看见引擎将注入什么。
+export interface PassthroughPreview {
+  /// 展开时注入的环境变量（"KEY=VALUE"）
+  env: string[];
+  /// 展开时注入的挂载（仅 gui 产生）
+  mounts: MountConfig[];
+}
+
 /// conf 启动配置模板（conf_templates / conf_template_get / conf_save_template；
 /// GUI 全面切 YAML 后取代 flavor TOML 模板——见 `commands::config::conf_templates`）。
 ///
 /// 后端 `ConfTemplate` 用 `#[serde(flatten)]` 平铺 `ContainerConfig` 字段,
-/// YAML 序列化形状 = 容器关键参数 + `setup` + `gui`。前端用 `extends ContainerConfig`
-/// 直接继承平铺字段。
+/// YAML 序列化形状 = 容器关键参数 + `setup`。`gui` / `gpu` 透传意图在
+/// `ContainerConfig` 共享基座内（模板与实例共用），故前端直接继承、不再重复声明。
 export interface ConfTemplate extends ContainerConfig {
-  /// GUI 透传开关（后端 `gui: bool`）：`true` 时宿主实时 env + 字体图标挂载
-  /// 在 `conf_template_expand` 展开时注入，避免模板硬编 session 特有值
-  gui: boolean;
   /// 创建后按序执行的安装命令（本轮只存不执行；执行链路下一步接入）
   setup: string[];
 }

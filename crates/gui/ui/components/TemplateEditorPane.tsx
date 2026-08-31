@@ -9,17 +9,17 @@
 
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { App as AntApp, Button, Input, Space, Switch, Typography } from 'antd';
+import { App as AntApp, Button, Input, Space, Typography } from 'antd';
 import { CloseOutlined, SaveOutlined } from '@ant-design/icons';
 import { errMsg } from '../lib/errors';
 import type { ConfTemplate, ContainerConfig } from '../types';
 import { BLANK_CONTAINER_CONFIG, ContainerConfigEditor } from './config/ContainerConfigEditor';
 
-/** 空白 conf 模板（新建表单初始值；keep_id 默认 true 与 Rust 共享基座对齐） */
+/** 空白 conf 模板（新建表单初始值；keep_id 默认 true 与 Rust 共享基座对齐。
+ *  gui/gpu 透传意图在 BLANK_CONTAINER_CONFIG 共享基座内，随 spread 带出） */
 function emptyConfTemplate(): ConfTemplate {
   return {
     ...BLANK_CONTAINER_CONFIG,
-    gui: false,
     setup: [],
   } as ConfTemplate;
 }
@@ -42,10 +42,15 @@ function TemplateEditorPaneInner({ initial, onSaved, onCancel }: TemplateEditorP
   const [saving, setSaving] = useState(false);
 
   /** 编辑器 onChange：ContainerConfig 载荷 → ConfTemplate；
-   *  加载 YAML/示例若缺 gui/setup（它们不在 ContainerConfig 五 section 里），保留现值 */
+   *  加载 YAML/示例若缺 gui/gpu/setup（它们不在 ContainerConfig 五 section 里），保留现值 */
   const handleChange = (next: ContainerConfig) => {
     const t = next as ConfTemplate;
-    setConfig((prev) => ({ ...t, gui: t.gui ?? prev.gui, setup: t.setup ?? prev.setup }));
+    setConfig((prev) => ({
+      ...t,
+      gui: t.gui ?? prev.gui,
+      gpu: t.gpu ?? prev.gpu,
+      setup: t.setup ?? prev.setup,
+    }));
   };
 
   const handleSave = async () => {
@@ -96,22 +101,10 @@ function TemplateEditorPaneInner({ initial, onSaved, onCancel }: TemplateEditorP
           nameLocked={!isNew}
         />
 
-        {/* 模板独有字段：GUI 透传 + setup 安装命令 */}
+        {/* 模板独有字段：setup 安装命令（GUI/GPU 透传已并入「容器」区一等项） */}
         <section className="config-section template-extra-section">
           <h3 className="config-section-title">模板选项</h3>
           <div className="config-fields">
-            <div className="config-field">
-              <label>GUI 透传</label>
-              <Space>
-                <Switch
-                  checked={config.gui}
-                  onChange={(v) => setConfig({ ...config, gui: v })}
-                />
-                <Typography.Text type="secondary">
-                  展开时按宿主实时 env 注入 DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR + 字体图标挂载
-                </Typography.Text>
-              </Space>
-            </div>
             <div className="config-field">
               <label>安装命令（setup）</label>
               <Input.TextArea

@@ -140,10 +140,34 @@ pub struct ContainerParams {
     /// 建号，否则容器仅按 uid/gid 运行、可能无 passwd 条目）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name: Option<String>,
+    /// GUI 透传（意图字段）：展开/重建时自动注入宿主显示环境
+    /// （DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/XDG_DATA_DIRS）+ X11/Wayland
+    /// socket、$XDG_RUNTIME_DIR、字体图标只读挂载，并强制 keep_id。存意图，按宿主
+    /// 实时探测注入（见 `inject_gui_passthrough`）。旧配置缺省 false。
+    #[serde(default)]
+    pub gui: bool,
+    /// GPU 透传（意图字段）：值为 "all" / 设备名 / "device=<uuid>"；展开/重建时经
+    /// `nvidia.com/gpu=<值>` CDI 引用注入设备节点 + NVIDIA_VISIBLE_DEVICES/
+    /// NVIDIA_DRIVER_CAPABILITIES env。需宿主 NVIDIA Container Toolkit 已生成 CDI
+    /// spec。None = 不透传。通用能力，具体值由配置/flavor 声明。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<String>,
+    /// 设备直通（podman `--device` 列表；裸设备 "host:container[:perms]"，
+    /// 或 CDI 引用如 "nvidia.com/gpu=all"）
+    #[serde(default)]
+    pub devices: Vec<String>,
+    /// 安全选项（podman `--security-opt` 列表；如 "label=disable" /
+    /// "apparmor=unconfined" / "seccomp=unconfined"。防 SELinux/AppArmor 拦截设备节点）
+    #[serde(default)]
+    pub security_opts: Vec<String>,
+    /// PID 命名空间模式（如 "host"；默认 private。与 init 互斥——设为非 private
+    /// 时不注入 init/catatonit）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<String>,
 }
 
 impl Default for ContainerParams {
-    /// 与 serde 默认保持一致：`keep_id` 默认 true；用户字段缺省 None（宿主值）。
+    /// 与 serde 默认保持一致：`keep_id` 默认 true；用户/设备字段缺省 None/空。
     fn default() -> Self {
         Self {
             image: String::new(),
@@ -155,6 +179,11 @@ impl Default for ContainerParams {
             user_uid: None,
             user_gid: None,
             user_name: None,
+            gui: false,
+            gpu: None,
+            devices: Vec::new(),
+            security_opts: Vec::new(),
+            pid: None,
         }
     }
 }
@@ -250,6 +279,45 @@ persistent = true
         assert_eq!(config.params.image, "alpine:latest");
         assert_eq!(config.params.entry.as_deref(), Some("/bin/sh"));
         assert_eq!(config.flavor, None);
+        // 设备/安全/PID/GUI/GPU 新字段：旧配置无 → 缺省（None/空/false）
+        assert!(!config.params.gui);
+        assert!(config.params.gpu.is_none());
+        assert!(config.params.devices.is_empty());
+        assert!(config.params.security_opts.is_empty());
+        assert!(config.params.pid.is_none());
+    }
+
+    #[test]
+    fn test_device_fields_roundtrip() {
+        // 设备/安全/PID/GUI/GPU 字段：TOML 平铺形状读写（与 conf YAML 同走 serde 数据模型）
+        let toml_str = r#"
+name = "chrome"
+image = "ubuntu:24.04"
+gui = true
+gpu = "all"
+devices = ["/dev/uinput:/dev/uinput"]
+security_opts = ["label=disable", "apparmor=unconfined"]
+pid = "host"
+silent_boot = false
+persistent = true
+"#;
+        let config: ContainerConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.params.gui);
+        assert_eq!(config.params.gpu.as_deref(), Some("all"));
+        assert_eq!(config.params.devices, vec!["/dev/uinput:/dev/uinput".to_string()]);
+        assert_eq!(
+            config.params.security_opts,
+            vec!["label=disable".to_string(), "apparmor=unconfined".to_string()]
+        );
+        assert_eq!(config.params.pid.as_deref(), Some("host"));
+
+        // 序列化形状：gpu/pid 为 None 时省略（skip_serializing_if），devices/security 空时保留
+        let v = serde_json::to_value(&config).unwrap();
+        assert_eq!(v["gpu"], "all");
+        assert_eq!(v["gui"], true);
+        assert_eq!(v["pid"], "host");
+        assert_eq!(v["devices"][0], "/dev/uinput:/dev/uinput");
+        assert_eq!(v["security_opts"][1], "apparmor=unconfined");
     }
 
     #[test]
@@ -379,6 +447,11 @@ user_name = "tidy"
                 user_uid: Some(1000),
                 user_gid: Some(1000),
                 user_name: Some("tidy".to_string()),
+                gui: true,
+                gpu: Some("all".to_string()),
+                devices: vec!["/dev/uinput:/dev/uinput".to_string()],
+                security_opts: vec!["label=disable".to_string(), "apparmor=unconfined".to_string()],
+                pid: Some("host".to_string()),
             },
             env: vec!["DISPLAY=:0".to_string()],
             silent_boot: true,

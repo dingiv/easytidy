@@ -35,6 +35,7 @@ import type {
   HostUser,
   MountConfig,
   NetworkMode,
+  PassthroughPreview,
   PortMapping,
 } from '../../types';
 import { ContainerPane } from './ContainerPane';
@@ -59,6 +60,8 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   user_uid: null,
   user_gid: null,
   user_name: null,
+  gui: false,
+  gpu: null,
   flavor: null,
 };
 
@@ -96,6 +99,8 @@ export function ContainerConfigEditor({
   const [examples, setExamples] = useState<ExampleConf[]>([]);
   const [exampleSel, setExampleSel] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
+  // GUI + GPU 透传注入预览（gui/gpu 开启时由 passthrough_preview 计算；null = 未开启/未算出）
+  const [preview, setPreview] = useState<PassthroughPreview | null>(null);
 
   // 挂载即拉内置示例模板（conf/*.yaml 编译期打进二进制的三件套）
   useEffect(() => {
@@ -103,6 +108,33 @@ export function ContainerConfigEditor({
       .then(setExamples)
       .catch((err) => console.error('conf_examples failed:', err));
   }, []);
+
+  // 透传预览：value.gui 或 value.gpu 开启时按当前 mounts/env 计算引擎将隐式注入的
+  // 增量（防抖 200ms 合并连击；mounts/env/gui/gpu 变化 → 增量随之变化，需重算）。
+  // gui/gpu 是 ContainerConfig 一等字段，随 value 传入，故预览入参只传 config。
+  useEffect(() => {
+    if (!value.gui && !value.gpu) {
+      setPreview(null);
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const p = await invoke<PassthroughPreview>('passthrough_preview', {
+          config: value,
+        });
+        if (!cancelled) setPreview(p);
+      } catch (err) {
+        console.error('passthrough_preview failed:', err);
+      }
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+    // 增量取决于 gui/gpu 开关与用户声明的 mounts/env
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value.gui, value.gpu, value.mounts, value.env]);
 
   const update = (patch: Partial<ContainerConfig>) => onChange({ ...value, ...patch });
   const updateNetwork = (patch: Partial<ContainerConfig['network']>) =>
@@ -222,6 +254,8 @@ export function ContainerConfigEditor({
           onImageChange={(image) => update({ image })}
           onSilentBootChange={(silent_boot) => update({ silent_boot })}
           onPersistentChange={(persistent) => update({ persistent })}
+          onGuiChange={(gui) => update({ gui })}
+          onGpuChange={(gpu) => update({ gpu })}
         />
       </section>
 
@@ -231,6 +265,7 @@ export function ContainerConfigEditor({
         </h3>
         <MountsPane
           mounts={value.mounts}
+          readonlyMounts={preview?.mounts ?? []}
           onAdd={(m: MountConfig) => update({ mounts: [...value.mounts, m] })}
           onRemove={(idx: number) =>
             update({ mounts: value.mounts.filter((_, i) => i !== idx) })
@@ -260,6 +295,7 @@ export function ContainerConfigEditor({
         </h3>
         <EnvPane
           env={value.env}
+          readonlyEnv={preview?.env ?? []}
           effectiveEnv={effective?.env ?? null}
           onAdd={(key, v) => update({ env: [...value.env, `${key}=${v}`] })}
           onRemove={(idx: number) =>

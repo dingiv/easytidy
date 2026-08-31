@@ -1553,6 +1553,12 @@ button:disabled {
   gap: 8px;
 }
 
+/* GUI 透传注入（只读）标题前的锁图标 */
+.readonly-badge-icon {
+  margin-right: 6px;
+  color: #6c7086;
+}
+
 /* 镜像搜索下拉（ContainerPane — image Select） */
 .image-option {
   display: flex;

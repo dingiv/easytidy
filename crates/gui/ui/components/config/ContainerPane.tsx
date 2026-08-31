@@ -19,11 +19,15 @@ interface ContainerPaneProps {
   onImageChange(v: string): void;
   onSilentBootChange(v: boolean): void;
   onPersistentChange(v: boolean): void;
+  /** GUI 透传开关（实例一等项；存意图，展开/重建时按宿主实时注入） */
+  onGuiChange(v: boolean): void;
+  /** GPU 透传值（null = 关；开时默认 "all"，可改为设备名 / device=<uuid>） */
+  onGpuChange(v: string | null): void;
 }
 
 export function ContainerPane({
   edit, mode, nameLocked = false, onNameChange, onImageChange,
-  onSilentBootChange, onPersistentChange,
+  onSilentBootChange, onPersistentChange, onGuiChange, onGpuChange,
 }: ContainerPaneProps) {
   // 镜像下拉数据：仅 create 模式需要拉（edit 模式镜像只读，渲染 Typography.Text）。
   const [images, setImages] = useState<ImageSummary[]>([]);
@@ -125,6 +129,42 @@ export function ContainerPane({
           />
           <Typography.Text type="secondary">catatonit + server 生命周期托管</Typography.Text>
         </Space>
+      </div>
+      <div className="config-field">
+        <label>GUI 透传</label>
+        <Space>
+          <Switch
+            checked={!!edit.gui}
+            onChange={onGuiChange}
+            checkedChildren="开"
+            unCheckedChildren="关"
+          />
+          <Typography.Text type="secondary">
+            展开/重建时按宿主实时 env 注入 DISPLAY/WAYLAND/XDG_RUNTIME_DIR + X11/Wayland/字体图标挂载
+          </Typography.Text>
+        </Space>
+      </div>
+      <div className="config-field">
+        <label>GPU 透传</label>
+        <Space>
+          <Switch
+            checked={!!edit.gpu}
+            onChange={(v) => onGpuChange(v ? 'all' : null)}
+            checkedChildren="开"
+            unCheckedChildren="关"
+          />
+          {edit.gpu && (
+            <Input
+              style={{ width: 200 }}
+              value={edit.gpu}
+              onChange={(e) => onGpuChange(e.target.value.trim() || 'all')}
+              placeholder="all / 0 / device=<uuid>"
+            />
+          )}
+        </Space>
+        <Typography.Text type="secondary" className="section-hint">
+          经 nvidia.com/gpu=&lt;值&gt; 注入设备节点 + NVIDIA_* env（见「环境变量」页只读项）；需宿主已装 NVIDIA Container Toolkit 并生成 CDI spec
+        </Typography.Text>
       </div>
       {edit.flavor && (
         <div className="config-field">

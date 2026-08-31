@@ -6,7 +6,8 @@ use tracing::warn;
 
 use easytidy_core::conf_template::ConfTemplate;
 use easytidy_core::configfile::ConfigFile;
-use easytidy_core::models::ContainerConfig;
+use easytidy_core::flavor::inject_passthrough;
+use easytidy_core::models::{ContainerConfig, MountConfig};
 use easytidy_core::podman::Podman;
 
 // ============================================================================
@@ -80,6 +81,10 @@ pub async fn apply_container_config(
     let mut container_config: ContainerConfig =
         serde_json::from_value(config).map_err(|e| format!("解析容器配置失败：{}", e))?;
     container_config.name = name.clone();
+
+    // 按 gui/gpu 意图注入宿主透传（幂等；已展开过的配置重复调用安全）——
+    // 让实例配置区里切换「GUI 透传 / GPU 透传」开关后,重建即生效。
+    inject_passthrough(&mut container_config);
 
     // 直接调用 core（不依赖 GuiSession）：commit → 删旧 → 同名重建（新配置）→ 启动
     let podman = Podman::connect().await.map_err(|e| e.to_string())?;
@@ -291,9 +296,9 @@ pub fn conf_template_get(name: String) -> Result<ConfTemplate, String> {
 
 /// 模板展开 → 完整 ContainerConfig（创建表单预填 / 从模板同步共用）。
 ///
-/// 与 [`conf_template_get`] 的区别:`get` 返回原始 ConfTemplate（含 `setup`/`gui` 标记）,
-/// `expand` 返回可直接提交的 [`ContainerConfig`]——已按宿主实时 env 注入 GUI 透传
-/// (`gui: true` 时),并盖 `flavor` 字段为模板名(血缘追溯)。
+/// 与 [`conf_template_get`] 的区别:`get` 返回原始 ConfTemplate（含 `setup` 等模板字段）,
+/// `expand` 返回可直接提交的 [`ContainerConfig`]——已按宿主实时 env 注入 GUI/GPU 透传
+/// (config 内 `gui`/`gpu` 意图开启时),并盖 `flavor` 字段为模板名(血缘追溯)。
 ///
 /// - `name`:模板文件名 stem(如 `chrome`)
 /// - `container_name`:执行容器名(覆盖模板内 `config.name` 默认值)
@@ -308,6 +313,66 @@ pub fn conf_template_expand(name: String, container_name: String) -> Result<Cont
         config.flavor = Some(name);
     }
     Ok(config)
+}
+
+/// GUI + GPU 透传预览：给定配置（含 `gui`/`gpu` 意图与当前 mounts/env），返回
+/// 展开/重建时引擎会**新增**的环境变量与挂载（隐式注入的透明化展示）。
+///
+/// 前端「容器」配置区「GUI 透传」/「GPU 透传」开启时调用（模板编辑器与实例配置
+/// 管理器共用）：把返回项以只读行展示在挂载/环境变量面板，让用户看见引擎将
+/// 隐式注入什么：
+/// - gui：X11/Wayland socket、$XDG_RUNTIME_DIR、字体图标挂载 +
+///   DISPLAY/WAYLAND/XDG_RUNTIME_DIR/XDG_DATA_DIRS env
+/// - gpu：NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES env（设备节点经
+///   `nvidia.com/gpu=<值>` CDI 引用，由 `params.gpu` 驱动）
+///
+/// 返回的是**增量**：配置里已声明的同 destination 挂载 / 同 key 环境变量不重复出现
+/// （与两个 inject 函数的幂等去重一致——显式写的优先，引擎不再覆盖）。
+/// 宿主耦合值（DISPLAY 等）实时探测，与 `conf_template_expand` 展开结果完全一致。
+#[derive(Debug, Clone, Serialize)]
+pub struct PassthroughPreview {
+    /// 展开时注入的环境变量（"KEY=VALUE"；宿主实时探测值）
+    pub env: Vec<String>,
+    /// 展开时注入的挂载（仅 gui 产生）
+    pub mounts: Vec<MountConfig>,
+}
+
+#[tauri::command]
+pub fn passthrough_preview(config: ContainerConfig) -> Result<PassthroughPreview, String> {
+    let mut container = config;
+    // 展开前的去重键（挂载按 container_path、env 按 key——与 inject 函数一致）
+    let before_mount_targets: std::collections::HashSet<String> = container
+        .params
+        .mounts
+        .iter()
+        .map(|m| m.container_path.clone())
+        .collect();
+    let before_env_keys: std::collections::HashSet<String> = container
+        .env
+        .iter()
+        .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
+        .collect();
+
+    // gui/gpu 意图在 config 基座内（与实例 apply 路径共用 inject_passthrough）
+    inject_passthrough(&mut container);
+
+    let mounts = container
+        .params
+        .mounts
+        .iter()
+        .filter(|m| !before_mount_targets.contains(&m.container_path))
+        .cloned()
+        .collect();
+    let env = container
+        .env
+        .iter()
+        .filter(|kv| match kv.split_once('=') {
+            Some((k, _)) => !before_env_keys.contains(k),
+            None => true,
+        })
+        .cloned()
+        .collect();
+    Ok(PassthroughPreview { env, mounts })
 }
 
 /// 写回 conf 模板（编辑 / 复制保存）。
@@ -656,6 +721,64 @@ mod tests {
     fn parse_seed(seed: &ConfSeed) -> ContainerConfig {
         serde_yaml::from_str(seed.yaml)
             .unwrap_or_else(|e| panic!("内置示例 {} 应可解析为 ContainerConfig：{e}", seed.name))
+    }
+
+    /// 透传预览的增量语义（确定性，不依赖宿主 DISPLAY 等）：
+    /// - 已声明的挂载（同 container_path）→ 引擎幂等去重，预览不再重复
+    /// - 未声明的 → 引擎注入（gui 开时 /tmp/.X11-unix 恒注入），预览应含
+    /// - gpu → NVIDIA_* env 增量（宿主无关）
+    #[test]
+    fn test_passthrough_preview_delta() {
+        // gui 开 + 已声明 /tmp/.X11-unix → 不应出现在注入增量
+        let declared: ContainerConfig = serde_json::from_value(serde_json::json!({
+            "name": "t", "image": "alpine", "gui": true,
+            "mounts": [{"host_path":"/tmp/.X11-unix","container_path":"/tmp/.X11-unix","read_only":false}],
+            "network": {"mode":"host","ports":[]},
+            "silent_boot": false, "persistent": true
+        }))
+        .unwrap();
+        let p = passthrough_preview(declared).unwrap();
+        assert!(
+            !p.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
+            "已声明的 /tmp/.X11-unix 不应重复出现在注入增量：{:?}",
+            p.mounts
+        );
+
+        // gui 开 + 未声明 → 引擎恒注入 /tmp/.X11-unix，预览应含
+        let bare: ContainerConfig = serde_json::from_value(serde_json::json!({
+            "name": "t2", "image": "alpine", "gui": true,
+            "mounts": [], "network": {"mode":"host","ports":[]},
+            "silent_boot": false, "persistent": true
+        }))
+        .unwrap();
+        let p2 = passthrough_preview(bare.clone()).unwrap();
+        assert!(
+            p2.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
+            "未声明时应注入 /tmp/.X11-unix：{:?}",
+            p2.mounts
+        );
+
+        // gpu=all → NVIDIA_* env 增量（确定性，不依赖宿主）
+        let gpu_cfg: ContainerConfig = serde_json::from_value(serde_json::json!({
+            "name": "t3", "image": "alpine", "gpu": "all",
+            "mounts": [], "network": {"mode":"host","ports":[]},
+            "silent_boot": false, "persistent": true
+        }))
+        .unwrap();
+        let p3 = passthrough_preview(gpu_cfg).unwrap();
+        assert!(p3.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+        assert!(p3.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
+
+        // gui + gpu 同开 → 两类注入都在（mounts 来自 gui，NVIDIA env 来自 gpu）
+        let both: ContainerConfig = serde_json::from_value(serde_json::json!({
+            "name": "t4", "image": "alpine", "gui": true, "gpu": "all",
+            "mounts": [], "network": {"mode":"host","ports":[]},
+            "silent_boot": false, "persistent": true
+        }))
+        .unwrap();
+        let p4 = passthrough_preview(both).unwrap();
+        assert!(p4.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"));
+        assert!(p4.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
     }
 
     #[test]
