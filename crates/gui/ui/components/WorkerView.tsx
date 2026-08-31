@@ -27,7 +27,7 @@ import { useTerminalStore } from '../stores/terminalStore';
 import { useUiStore } from '../stores/uiStore';
 import type { PassthroughState, PinnedApp, TerminalInfo } from '../types';
 import logo from '../assets/logo.png';
-import { AppIcon } from './AppIcon';
+import { PinnedAppIcon } from './PinnedAppIcon';
 import { Terminal } from './Terminal';
 import { RootTerminal } from './RootTerminal';
 import { FileBrowser } from './FileBrowser';
@@ -435,15 +435,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                   {pinnedApps.map((p) => (
                     <Tooltip key={p.id} title={p.name} mouseEnterDelay={4}>
                       <div className="favorite-item" onClick={() => launchPinned(p)}>
-                        {p.id.startsWith('custom:') ? (
-                          p.icon ? (
-                            <img src={`file://${p.icon}`} alt="" />
-                          ) : (
-                            <span className="favorite-fallback">⚙️</span>
-                          )
-                        ) : (
-                          <AppIcon path={p.icon} size={22} />
-                        )}
+                        <PinnedAppIcon id={p.id} icon={p.icon} size={22} />
                         <CloseOutlined
                           className="favorite-unpin"
                           onClick={(e) => {

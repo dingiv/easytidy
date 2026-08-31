@@ -1,18 +1,13 @@
-//! Passthrough 配置与 auto-start 拉起（宿主侧）。
+//! Passthrough 应用拉起（宿主侧经容器 server socket）。
 //!
-//! - 配置：独立文件 `$XDG_CONFIG_HOME/easytidy/passthrough.toml`
-//!   （不塞进 config.toml——其 settings 是 JSON Value，嵌套结构序列化
-//!   TOML 会报错），记录按容器分组的应用列表（含 auto-start 标记）
-//! - 拉起：容器启动后（`Podman::start`/`restart` 挂点）宿主侧经容器
-//!   server socket 发 `apps.launch`——**由 server 拉起并保活**（宿主
-//!   一次性 CLI 连接断开即杀 PTY 会话，实测；server spawn 的子进程
-//!   独立于连接存活）
-
-use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::Read;
-use std::path::PathBuf;
-use std::sync::Mutex;
+//! 配置（应用列表 + auto-start + 收藏 pinned）**存容器内**
+//! `/home/easytidy/.config/easytidy/passthrough.toml`，由容器内 server 自读自管，
+//! 容器自包含——容器删除/同名重建即随之清空。宿主侧不再持有 per-container
+//! 配置（修复「新建容器继承旧容器收藏」bug）。
+//!
+//! 宿主侧仅负责经容器 server socket 发 `apps.launch`——**由 server 拉起并保活**
+//! （宿主一次性 CLI 连接断开即杀 PTY 会话，实测；server spawn 的子进程
+//! 独立于连接存活）。
 
 use easytidy_protocol::ops::{
     AppLogs, AppLogsResp, AppsLaunch, AppsLaunchItem, AppsLaunchResp, AppsLaunchResult, AppsPsResp,
@@ -50,127 +45,6 @@ pub struct PassthroughApp {
 impl PassthroughApp {
     pub fn is_custom(&self) -> bool {
         self.id.starts_with("custom:")
-    }
-}
-
-/// 宿主侧 passthrough 配置（只留**收藏** pinned；每容器应用列表 + auto-start
-/// 已随「配置入容器」迁到容器内 `/home/easytidy/.config/easytidy/passthrough.toml`，
-/// 由 server 自读拉起）。
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct PassthroughConfig {
-    pub schema_version: u32,
-    /// 收藏（pin 到 GUI 工具栏）：按容器分组的应用列表，顺序 = 显示顺序
-    #[serde(default)]
-    pub pinned: HashMap<String, Vec<PassthroughApp>>,
-}
-
-impl PassthroughConfig {
-    pub fn new() -> Self {
-        Self {
-            schema_version: 1,
-            pinned: HashMap::new(),
-        }
-    }
-}
-
-/// passthrough 配置文件（仿 configfile.rs：flock + 原子写）。
-pub struct PassthroughConfigFile {
-    path: PathBuf,
-    cache: Mutex<Option<PassthroughConfig>>,
-}
-
-impl PassthroughConfigFile {
-    /// 默认路径：~/.easytidy/passthrough.toml
-    /// （首次使用自动迁移旧 $XDG_CONFIG_HOME/easytidy/passthrough.toml）
-    pub fn default_path() -> Result<PathBuf> {
-        crate::appdata::migrate_legacy_configs();
-        crate::appdata::passthrough_config_path()
-    }
-
-    pub fn with_path(path: PathBuf) -> Self {
-        Self {
-            path,
-            cache: Mutex::new(None),
-        }
-    }
-
-    /// 加载配置（flock shared lock；文件缺失返回默认空配置）
-    pub fn load(&self) -> Result<PassthroughConfig> {
-        if !self.path.exists() {
-            return Ok(PassthroughConfig::new());
-        }
-        let file = File::open(&self.path)
-            .map_err(|e| Error::Config(format!("打开 passthrough 配置失败：{e}")))?;
-        file.lock_shared()
-            .map_err(|e| Error::Config(format!("获取 passthrough 配置锁失败：{e}")))?;
-        let mut content = String::new();
-        {
-            let mut reader = file;
-            reader
-                .read_to_string(&mut content)
-                .map_err(|e| Error::Config(format!("读取 passthrough 配置失败：{e}")))?;
-        }
-        let config: PassthroughConfig = toml::from_str(&content)
-            .map_err(|e| Error::Config(format!("解析 passthrough 配置失败：{e}")))?;
-        *self.cache.lock().unwrap() = Some(config.clone());
-        Ok(config)
-    }
-
-    /// 保存配置（flock exclusive + 临时文件 + rename 原子写）
-    pub fn save(&self, config: &PassthroughConfig) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| Error::Config(format!("创建配置目录失败：{e}")))?;
-        }
-        // 承载 flock 的句柄：不截断现有文件（并发 load 可能读到半截）
-        let file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&self.path)
-            .map_err(|e| Error::Config(format!("创建 passthrough 配置文件失败：{e}")))?;
-        file.lock()
-            .map_err(|e| Error::Config(format!("获取 passthrough 配置锁失败：{e}")))?;
-        let content = toml::to_string_pretty(config)
-            .map_err(|e| Error::Config(format!("序列化 passthrough 配置失败：{e}")))?;
-        let tmp = self.path.with_extension("toml.tmp");
-        std::fs::write(&tmp, &content)
-            .map_err(|e| Error::Config(format!("写入临时配置失败：{e}")))?;
-        std::fs::rename(&tmp, &self.path)
-            .map_err(|e| Error::Config(format!("替换配置文件失败：{e}")))?;
-        *self.cache.lock().unwrap() = Some(config.clone());
-        Ok(())
-    }
-
-    /// 读取某容器的收藏（pin）列表（无条目返回空；顺序 = pin 顺序）
-    pub fn pinned(&self, container: &str) -> Result<Vec<PassthroughApp>> {
-        let config = self.load()?;
-        Ok(config.pinned.get(container).cloned().unwrap_or_default())
-    }
-
-    /// 收藏（pin）应用：按 id upsert（保持顺序），容器条目空则移除键。
-    pub fn pin_app(&self, container: &str, app: PassthroughApp) -> Result<()> {
-        let mut config = self.load()?;
-        let pinned = config.pinned.entry(container.to_string()).or_default();
-        if let Some(existing) = pinned.iter_mut().find(|a| a.id == app.id) {
-            *existing = app;
-        } else {
-            pinned.push(app);
-        }
-        self.save(&config)
-    }
-
-    /// 取消收藏（unpin）：移除指定应用；条目空则移除键。
-    pub fn unpin_app(&self, container: &str, id: &str) -> Result<()> {
-        let mut config = self.load()?;
-        let Some(pinned) = config.pinned.get_mut(container) else {
-            return Ok(());
-        };
-        pinned.retain(|a| a.id != id);
-        if pinned.is_empty() {
-            config.pinned.remove(container);
-        }
-        self.save(&config)
     }
 }
 
@@ -316,67 +190,4 @@ pub async fn fetch_process_logs(container: &str, pid: u32) -> Result<String> {
         }
         _ => Err(Error::Connect("apps.logs 响应异常".to_string())),
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    fn test_file(dir: &TempDir) -> PassthroughConfigFile {
-        PassthroughConfigFile::with_path(dir.path().join("passthrough.toml"))
-    }
-
-    fn app(id: &str, name: &str, auto_start: bool) -> PassthroughApp {
-        PassthroughApp {
-            id: id.to_string(),
-            name: name.to_string(),
-            cmd: "echo hi".to_string(),
-            desktop_file: None,
-            auto_start,
-            icon: None,
-        }
-    }
-
-    #[test]
-    fn test_pinned_roundtrip() {
-        // 宿主配置只存收藏(pinned)；每容器应用列表+auto-start 已迁容器内
-        let dir = TempDir::new().unwrap();
-        let f = test_file(&dir);
-        let scanned = PassthroughApp {
-            id: "/usr/share/applications/google-chrome.desktop".to_string(),
-            name: "Chrome".to_string(),
-            cmd: "google-chrome-stable --disable-dev-shm-usage".to_string(),
-            desktop_file: Some("/usr/share/applications/google-chrome.desktop".to_string()),
-            auto_start: true,
-            icon: None,
-        };
-        f.pin_app("chrome", scanned.clone()).unwrap();
-        let pinned = f.pinned("chrome").unwrap();
-        assert_eq!(pinned.len(), 1);
-        assert_eq!(pinned[0], scanned);
-    }
-
-    #[test]
-    fn test_pin_unpin() {
-        let dir = TempDir::new().unwrap();
-        let f = test_file(&dir);
-        let a = app("chrome", "Chrome", false);
-
-        // pin：按 id upsert 保持顺序
-        f.pin_app("c", a.clone()).unwrap();
-        f.pin_app("c", a.clone()).unwrap(); // 重复 pin = upsert
-        let pinned = f.pinned("c").unwrap();
-        assert_eq!(pinned.len(), 1);
-        assert_eq!(pinned[0].id, "chrome");
-
-        // 多容器隔离
-        f.pin_app("other", a.clone()).unwrap();
-        assert_eq!(f.pinned("c").unwrap().len(), 1);
-
-        // unpin：移除；条目空则移除键
-        f.unpin_app("c", "chrome").unwrap();
-        assert!(f.pinned("c").unwrap().is_empty());
-    }
-
 }

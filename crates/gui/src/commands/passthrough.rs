@@ -13,13 +13,24 @@ use crate::commands::socket::send_json_request;
 use crate::state::GuiSession;
 
 // ============================================================================
-// 容器内 passthrough 配置（每容器应用列表 + auto-start）读写 —— 经 server
+// 容器内 passthrough 配置（应用列表 + 收藏）读写 —— 经 server
 // `passthrough.list` / `passthrough.set`（配置在容器内，容器自包含；server 启动
-// 自读拉起 auto-start 应用）。宿主侧只留收藏(pinned)与导出元数据。
+// 自读拉起 auto-start 应用）。宿主侧不再持有 per-container 配置。
 // ============================================================================
 
-/// 读容器内配置的应用列表
-async fn read_container_apps(sess: &GuiSession) -> Result<Vec<PtConfiguredApp>, String> {
+/// 容器内 passthrough 配置（应用列表 + 收藏），经 server 读写。
+/// 两类条目同存一文件（容器自包含），改任一项须整份读-改-写（pinned 不可被
+/// apps 的整份覆盖冲掉）。
+#[derive(Default, Clone)]
+struct ContainerPtConfig {
+    /// 有状态条目（auto-start 应用 + 自定义应用）
+    apps: Vec<PtConfiguredApp>,
+    /// 收藏（pin 到 GUI 工具栏），顺序 = 显示顺序
+    pinned: Vec<PtConfiguredApp>,
+}
+
+/// 读容器内配置（apps + pinned）
+async fn read_container_config(sess: &GuiSession) -> Result<ContainerPtConfig, String> {
     let resp = send_json_request(
         sess,
         "passthrough.list".to_string(),
@@ -32,15 +43,22 @@ async fn read_container_apps(sess: &GuiSession) -> Result<Vec<PtConfiguredApp>, 
     }
     let list: PassthroughListResp =
         serde_json::from_value(resp.payload).map_err(|e| format!("解析 passthrough.list 失败：{e}"))?;
-    Ok(list.apps)
+    Ok(ContainerPtConfig {
+        apps: list.apps,
+        pinned: list.pinned,
+    })
 }
 
-/// 写容器内配置的应用列表（整份覆盖）
-async fn save_container_apps(sess: &GuiSession, apps: Vec<PtConfiguredApp>) -> Result<(), String> {
+/// 写容器内配置（apps + pinned 整份覆盖）
+async fn save_container_config(sess: &GuiSession, cfg: &ContainerPtConfig) -> Result<(), String> {
     let resp = send_json_request(
         sess,
         "passthrough.set".to_string(),
-        serde_json::to_value(PassthroughSet { apps }).map_err(|e| e.to_string())?,
+        serde_json::to_value(PassthroughSet {
+            apps: cfg.apps.clone(),
+            pinned: cfg.pinned.clone(),
+        })
+        .map_err(|e| e.to_string())?,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -117,9 +135,10 @@ pub async fn passthrough_state(
         .map(|e| serde_json::json!({ "desktop_file": e.desktop_file, "content": e.content }))
         .collect();
 
-    // 容器内配置（经 server 读）
-    let apps = read_container_apps(sess).await?;
-    let apps_json: Vec<_> = apps
+    // 容器内配置（经 server 读；apps + pinned 同存容器，容器自包含）
+    let cfg = read_container_config(sess).await?;
+    let apps_json: Vec<_> = cfg
+        .apps
         .into_iter()
         .map(|a| {
             serde_json::json!({
@@ -133,10 +152,9 @@ pub async fn passthrough_state(
         })
         .collect();
 
-    // 收藏（pin 到工具栏，宿主侧）：顺序 = pin 顺序
-    let config_file = passthrough_config_file()?;
-    let pinned = config_file.pinned(container).map_err(|e| e.to_string())?;
-    let pinned_json: Vec<_> = pinned
+    // 收藏（pin 到工具栏）：顺序 = pin 顺序
+    let pinned_json: Vec<_> = cfg
+        .pinned
         .into_iter()
         .map(|a| {
             serde_json::json!({
@@ -235,10 +253,11 @@ pub async fn passthrough_set_pinned(
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
-    let config_file = passthrough_config_file()?;
 
+    // 收藏存**容器内**配置（容器自包含）：读-改-写整份（apps 不可被冲掉）
+    let mut cfg = read_container_config(sess).await?;
     if pinned {
-        let app = easytidy_core::passthrough::PassthroughApp {
+        let app = PtConfiguredApp {
             id: id.clone(),
             name,
             cmd: clean_exec(&cmd),
@@ -246,15 +265,17 @@ pub async fn passthrough_set_pinned(
             auto_start: false,
             icon: icon_path,
         };
-        config_file
-            .pin_app(container, app)
-            .map_err(|e| e.to_string())?;
+        // 按 id upsert（保持顺序）
+        if let Some(existing) = cfg.pinned.iter_mut().find(|a| a.id == id) {
+            *existing = app;
+        } else {
+            cfg.pinned.push(app);
+        }
     } else {
-        config_file
-            .unpin_app(container, &id)
-            .map_err(|e| e.to_string())?;
+        cfg.pinned.retain(|a| a.id != id);
     }
-    info!("passthrough 收藏已更新：{container} {id} pinned={pinned}");
+    save_container_config(sess, &cfg).await?;
+    info!("passthrough 收藏已更新（容器内）：{container} {id} pinned={pinned}");
     Ok(())
 }
 
@@ -271,15 +292,23 @@ pub async fn passthrough_launch(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let config_file = passthrough_config_file()?;
-    let app = config_file
-        .pinned(container)
-        .map_err(|e| e.to_string())?
+    // 收藏存容器内配置（容器自包含）
+    let cfg = read_container_config(sess).await?;
+    let app = cfg
+        .pinned
         .into_iter()
         .find(|a| a.id == id)
         .ok_or_else(|| format!("收藏的应用不存在：{id}"))?;
+    let launch_app = easytidy_core::passthrough::PassthroughApp {
+        id: app.id.clone(),
+        name: app.name.clone(),
+        cmd: app.cmd.clone(),
+        desktop_file: app.desktop_file.clone(),
+        auto_start: false,
+        icon: app.icon.clone(),
+    };
 
-    let results = easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&app))
+    let results = easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&launch_app))
         .await
         .map_err(|e| e.to_string())?;
     match results.first() {
@@ -395,11 +424,14 @@ async fn detect_early_exit(container: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// passthrough 配置文件（默认路径）
-fn passthrough_config_file() -> Result<easytidy_core::passthrough::PassthroughConfigFile, String> {
-    let path = easytidy_core::passthrough::PassthroughConfigFile::default_path()
-        .map_err(|e| e.to_string())?;
-    Ok(easytidy_core::passthrough::PassthroughConfigFile::with_path(path))
+/// 宿主侧文件是否存在（收藏自定义应用图标探测用）。
+///
+/// 收藏应用的图标引用存容器内配置：自定义应用 = 宿主 `~/.easytidy/icons` 路径。
+/// GUI 展示时探测该宿主路径是否存在——存在则正常显示，缺失（容器迁移/图标被清理）
+/// 则显示「图标异常」。纯宿主本地操作，不依赖容器会话。
+#[tauri::command]
+pub async fn fs_host_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
 }
 
 /// 清理 Exec 的 %U/%f 等占位符（宿主侧不展开容器内文件参数；export/toggle 共用）
@@ -425,9 +457,10 @@ pub async fn passthrough_set_auto_start(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let mut apps = read_container_apps(sess).await?;
+    let mut cfg = read_container_config(sess).await?;
     // 保留已存应用的图标（upsert 会整体覆盖，不能丢）
-    let existing_icon = apps
+    let existing_icon = cfg
+        .apps
         .iter()
         .find(|a| a.id == id)
         .and_then(|a| a.icon.clone());
@@ -442,19 +475,19 @@ pub async fn passthrough_set_auto_start(
     if enabled {
         let mut app = app;
         app.auto_start = true;
-        if let Some(existing) = apps.iter_mut().find(|a| a.id == id) {
+        if let Some(existing) = cfg.apps.iter_mut().find(|a| a.id == id) {
             *existing = app;
         } else {
-            apps.push(app);
+            cfg.apps.push(app);
         }
-    } else if let Some(existing) = apps.iter_mut().find(|a| a.id == id) {
+    } else if let Some(existing) = cfg.apps.iter_mut().find(|a| a.id == id) {
         if id.starts_with("custom:") {
             existing.auto_start = false; // custom 保留（是资产，仅关 auto-start）
         } else {
-            apps.retain(|a| a.id != id); // 扫描应用 absence = false
+            cfg.apps.retain(|a| a.id != id); // 扫描应用 absence = false
         }
     }
-    save_container_apps(sess, apps).await?;
+    save_container_config(sess, &cfg).await?;
     info!("passthrough auto-start 已设置（容器内）：{container} enabled={enabled}");
     Ok(())
 }
@@ -477,8 +510,8 @@ pub async fn passthrough_add_custom(
         return Err("自定义应用名称与命令不能为空".to_string());
     }
     let id = format!("custom:{name}");
-    let mut apps = read_container_apps(sess).await?;
-    if apps.iter().any(|a| a.id == id) {
+    let mut cfg = read_container_config(sess).await?;
+    if cfg.apps.iter().any(|a| a.id == id) {
         return Err(format!("自定义应用 {name} 已存在"));
     }
     let app = PtConfiguredApp {
@@ -489,8 +522,8 @@ pub async fn passthrough_add_custom(
         auto_start: false,
         icon: None,
     };
-    apps.push(app);
-    save_container_apps(sess, apps).await?;
+    cfg.apps.push(app);
+    save_container_config(sess, &cfg).await?;
     info!("自定义应用已添加（容器内）：{container} {name}");
     Ok(AppInfoFrontend {
         name,
@@ -516,9 +549,11 @@ pub async fn passthrough_remove_app(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let mut apps = read_container_apps(sess).await?;
-    apps.retain(|a| a.id != id);
-    save_container_apps(sess, apps).await?;
+    let mut cfg = read_container_config(sess).await?;
+    cfg.apps.retain(|a| a.id != id);
+    // 移除应用时一并取消收藏（防孤儿——收藏引用已不存在的应用）
+    cfg.pinned.retain(|a| a.id != id);
+    save_container_config(sess, &cfg).await?;
 
     // 非 custom 且已导出 → 清理导出（防孤儿）
     if !id.starts_with("custom:") {
@@ -552,7 +587,7 @@ fn save_icon_to_appdata(bytes: &[u8], source_name: &str) -> Result<String, Strin
 }
 
 /// 从宿主机选择图标（rfd 原生文件对话框）→ 复制到 ~/.easytidy/icons/。
-/// 自定义应用图标入口之一；返回宿主本地路径（写入 passthrough.toml 的 icon）。
+/// 自定义应用图标入口之一；返回宿主本地路径（写入**容器内** passthrough 配置的 icon）。
 #[tauri::command]
 pub async fn passthrough_pick_host_icon() -> Result<String, String> {
     use std::io::Read;
@@ -604,12 +639,12 @@ pub async fn passthrough_set_custom_icon(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    let mut apps = read_container_apps(sess).await?;
-    let Some(app) = apps.iter_mut().find(|a| a.id == id) else {
+    let mut cfg = read_container_config(sess).await?;
+    let Some(app) = cfg.apps.iter_mut().find(|a| a.id == id) else {
         return Err(format!("应用不存在：{id}"));
     };
     app.icon = icon.clone();
-    save_container_apps(sess, apps).await?;
+    save_container_config(sess, &cfg).await?;
     info!("自定义应用图标已设置（容器内）：{container} {id} → {icon:?}");
     Ok(())
 }

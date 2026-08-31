@@ -71,11 +71,6 @@ pub fn config_file_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("config.toml"))
 }
 
-/// passthrough 配置文件路径（`~/.easytidy/passthrough.toml`）
-pub fn passthrough_config_path() -> Result<PathBuf> {
-    Ok(app_data_dir()?.join("passthrough.toml"))
-}
-
 /// 一次性迁移：`$XDG_CONFIG_HOME/easytidy/` 下旧配置/flavors → 新目录
 /// （新路径不存在且旧路径存在时复制；幂等，可反复调用）。
 pub fn migrate_legacy_configs() {
@@ -90,7 +85,9 @@ pub fn migrate_legacy_configs() {
     }
 
     // 配置文件
-    for name in ["config.toml", "passthrough.toml"] {
+    // （passthrough 配置已迁容器内 `/home/easytidy/.config/easytidy/passthrough.toml`，
+    //  宿主侧不再持有 per-container 配置，故不迁移旧宿主 passthrough.toml）
+    for name in ["config.toml"] {
         let legacy = legacy_dir.join(name);
         let new = new_dir.join(name);
         if legacy.exists() && !new.exists() {

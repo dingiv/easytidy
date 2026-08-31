@@ -487,15 +487,22 @@ pub struct PtConfiguredApp {
 pub struct PassthroughList;
 
 /// PassthroughList 响应
+///
+/// `pinned`（收藏/pin 到工具栏）与 `apps`（auto-start/自定义应用）同存容器内配置，
+/// 容器自包含——容器删除/同名重建即随之清空，不再泄漏到宿主。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PassthroughListResp {
     pub apps: Vec<PtConfiguredApp>,
+    #[serde(default)]
+    pub pinned: Vec<PtConfiguredApp>,
 }
 
 /// 写容器内 passthrough 配置（passthrough.set；整份覆盖 + 建目录）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PassthroughSet {
     pub apps: Vec<PtConfiguredApp>,
+    #[serde(default)]
+    pub pinned: Vec<PtConfiguredApp>,
 }
 
 // ============================================================================

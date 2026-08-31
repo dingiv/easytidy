@@ -161,6 +161,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::passthrough_pick_host_icon,
             commands::passthrough::passthrough_import_container_icon,
             commands::passthrough::passthrough_set_custom_icon,
+            // 收藏自定义应用图标：宿主路径存在性探测（缺失 → 显示「图标异常」）
+            commands::passthrough::fs_host_exists,
             // 收藏（pin 到工具栏）
             commands::passthrough::passthrough_set_pinned,
             commands::passthrough::passthrough_launch,

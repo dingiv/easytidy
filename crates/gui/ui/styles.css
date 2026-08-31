@@ -1116,6 +1116,11 @@ button:disabled {
   font-size: 1.1rem;
 }
 
+/* 收藏图标异常（宿主图标缺失：容器迁移到其它宿主 / 图标被清理） */
+.favorite-abnormal {
+  color: #f38ba8;
+}
+
 /* 悬停 ✕（取消收藏） */
 .favorite-unpin {
   position: absolute;
