@@ -1,7 +1,14 @@
-//! 应用数据目录（`~/.easytidy`）：图标缓存 + 配置文件统一放这里。
+//! 应用数据目录：图标缓存 + 配置文件统一放这里。
 //!
-//! 宿主侧集中目录，方便用户查看/备份/清理；桌面入口 `Icon=` 也指向这里
-//! （图标放私有目录不依赖 hicolor 主题，GNOME 也能解析绝对路径）。
+//! **双轨制（dev / prod 分离，与 conf 模板一致）**：
+//! - **dev**（运行期 env 含 `CARGO_MANIFEST_DIR`：cargo run / cargo test / tauri dev）
+//!   → 本 crate 源码树 `<manifest>/data`（即 `crates/core/data`，git-ignore）——
+//!   dev 与已安装实例彻底隔离，不读写宿主 `~/.easytidy`。
+//! - **prod**（安装二进制，无该 env）→ `~/.easytidy`（HOME 不可用时回退
+//!   `$XDG_DATA_HOME/easytidy`）。
+//!
+//! 集中目录方便用户查看/备份/清理；桌面入口 `Icon=` 也指向这里（图标放私有
+//! 目录不依赖 hicolor 主题，GNOME 也能解析绝对路径）。
 //! 旧版本（v0.1）配置在 `$XDG_CONFIG_HOME/easytidy/`，首次使用自动复制迁移
 //! （只复制不删除，回滚友好）。
 
@@ -9,8 +16,19 @@ use std::path::PathBuf;
 
 use crate::error::{Error, Result};
 
-/// 应用数据根目录（`~/.easytidy`；HOME 不可用时回退 `$XDG_DATA_HOME/easytidy`）
+/// 应用数据根目录（双轨制）。
+///
+/// - **dev**（运行期 env 含 `CARGO_MANIFEST_DIR`）→ 本 crate 源码树
+///   `<manifest>/data`（`crates/core/data`，git-ignore）——dev 与已安装实例
+///   彻底隔离。用编译期 `env!("CARGO_MANIFEST_DIR")`（恒为本 crate 的 manifest
+///   目录，无论由哪个二进制运行），而非运行期 env（后者是「被运行」crate 的
+///   manifest，如 `cargo run -p easytidy-gui` 时为 gui 的目录）。
+/// - **prod**（安装二进制）→ `~/.easytidy`（HOME 不可用时回退
+///   `$XDG_DATA_HOME/easytidy`）。
 pub fn app_data_dir() -> Result<PathBuf> {
+    if easytidy_shared::is_dev() {
+        return Ok(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data"));
+    }
     if let Some(home) = dirs::home_dir() {
         return Ok(home.join(".easytidy"));
     }
@@ -114,5 +132,18 @@ pub fn migrate_legacy_configs() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_data_dir_is_source_tree_in_dev() {
+        // cargo test → CARGO_MANIFEST_DIR 在 env → is_dev() true → dev 根 =
+        // <core manifest>/data（源码树内，与已安装 ~/.easytidy 隔离）
+        let dir = app_data_dir().unwrap();
+        assert_eq!(dir, PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data"));
     }
 }

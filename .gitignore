@@ -6,3 +6,6 @@
 *.log
 .DS_Store
 tsconfig.tsbuildinfo
+
+# dev 期宿主数据目录（dev/prod 分离：dev → 源码树内，prod → ~/.easytidy）
+crates/core/data/
