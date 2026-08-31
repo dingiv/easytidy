@@ -188,6 +188,22 @@ pub async fn image_remove(
     Ok(())
 }
 
+/// 镜像占用查询（删除前防呆）：返回每个镜像被哪些容器使用
+/// （`image -> 容器名列表`；空列表 = 未被占用，可删除）。
+#[tauri::command]
+pub async fn images_used_by(
+    podman: tauri::State<'_, PodmanState>,
+    images: Vec<String>,
+) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let result = p
+        .images_used_by(&images)
+        .await
+        .map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+    Ok(result)
+}
+
 // ============================================================================
 // 环境（env）语义 + conf 模板扩展（doc 镜像管理命令之后、env_list 之前）
 // ============================================================================

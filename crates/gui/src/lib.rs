@@ -94,6 +94,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::images_list,
             commands::containers::image_pull,
             commands::containers::image_remove,
+            commands::containers::images_used_by,
             // 环境（env）语义
             commands::containers::env_list,
             commands::containers::env_new,

@@ -1,8 +1,8 @@
 // 镜像管理面板（主 GUI）：本地镜像列表 / 拉取 / 删除。
 //
-// 拉取是显式动作（创建容器不自动拉取）；删除支持 force（被容器引用时）。
-// 批量管理：行首多选框（含表头全选）+「删除选中」——逐个删除、被引用时
-// 自动 force，失败逐个汇总展示（不中断批次）。
+// 拉取是显式动作（创建容器不自动拉取）。删除带「防呆」：删除前先查询镜像占用
+// （images_used_by），被容器引用的镜像不可删除——单个删除直接提示「无法删除」
+// 并列出占用容器；批量删除只删未被占用的，跳过被占用的并汇总提示。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -84,22 +84,48 @@ export function ImagesPanel() {
     }
   };
 
-  const handleRemove = (img: ImageSummary) => {
+  /** 查询一批镜像的占用情况：image 名 -> 占用容器名列表（空 = 可删除）。
+   *  查询失败时返回空表（不阻断删除——podman 自身仍会保护被引用的镜像）。 */
+  const queryUsage = async (names: string[]): Promise<Record<string, string[]>> => {
+    try {
+      return await invoke<Record<string, string[]>>('images_used_by', { images: names });
+    } catch (err: any) {
+      console.error('images_used_by failed:', err);
+      return {};
+    }
+  };
+
+  const handleRemove = async (img: ImageSummary) => {
     const name = img.repo_tags[0] ?? img.id;
+    const usage = await queryUsage([name]);
+    const usedBy = usage[name] ?? [];
+    if (usedBy.length > 0) {
+      modal.error({
+        title: `无法删除镜像 ${name}`,
+        width: 520,
+        content: (
+          <div>
+            <p>该镜像正被以下容器使用，请先删除或迁移这些容器后再试：</p>
+            <ul style={{ paddingLeft: 20, margin: '8px 0' }}>
+              {usedBy.map((n) => (
+                <li key={n}>{n}</li>
+              ))}
+            </ul>
+          </div>
+        ),
+        okText: '知道了',
+      });
+      return;
+    }
     modal.confirm({
       title: `删除镜像 ${name}?`,
-      content: '被容器引用时需强制删除（force）。',
+      content: '删除后不可恢复。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
         try {
-          // 先常规删除；被引用时报错再 force（一次交互完成两种语义）
-          try {
-            await invoke('image_remove', { image: name, force: false });
-          } catch {
-            await invoke('image_remove', { image: name, force: true });
-          }
+          await invoke('image_remove', { image: name, force: false });
           message.success(`已删除：${name}`);
           await load();
         } catch (err: any) {
@@ -110,18 +136,55 @@ export function ImagesPanel() {
     });
   };
 
-  /** 批量删除选中镜像：逐个删除（被引用自动 force），失败汇总不中断批次 */
-  const handleBatchRemove = () => {
+  /** 批量删除选中镜像：先查占用，只删未被占用的，跳过被占用的并汇总提示 */
+  const handleBatchRemove = async () => {
     const selected = images.filter((img) => selectedKeys.includes(img.id));
     if (selected.length === 0) return;
-    const totalSize = selected.reduce((acc, img) => acc + img.size, 0);
+    const names = selected.map((img) => img.repo_tags[0] ?? img.id);
+    const usage = await queryUsage(names);
+
+    const deletable = selected.filter((img) => (usage[img.repo_tags[0] ?? img.id] ?? []).length === 0);
+    const inUse = selected.filter((img) => (usage[img.repo_tags[0] ?? img.id] ?? []).length > 0);
+
+    // 全部被占用 → 直接提示，不进入删除确认
+    if (deletable.length === 0) {
+      modal.error({
+        title: `无法删除选中的 ${selected.length} 个镜像`,
+        width: 560,
+        content: (
+          <div>
+            <p>这些镜像均被容器使用，无法删除：</p>
+            <ul style={{ paddingLeft: 20, margin: '8px 0', maxHeight: 200, overflow: 'auto' }}>
+              {inUse.map((img) => {
+                const n = img.repo_tags[0] ?? img.id;
+                return (
+                  <li key={img.id}>
+                    {n}（{usage[n]?.join('、')}）
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        ),
+        okText: '知道了',
+      });
+      return;
+    }
+
+    const deletableSize = deletable.reduce((acc, img) => acc + img.size, 0);
     modal.confirm({
-      title: `删除选中的 ${selected.length} 个镜像？`,
+      title: `删除选中的 ${deletable.length} 个镜像？`,
       content: (
         <div>
-          <p>共约 {fmtSize(totalSize)}。被容器引用的将强制删除（force）。</p>
+          {inUse.length > 0 && (
+            <p>
+              <b>{inUse.length} 个</b> 镜像被容器使用，将跳过不删除：
+              {inUse.map((img) => img.repo_tags[0] ?? img.id).join('、')}
+            </p>
+          )}
+          <p>可删除（共约 {fmtSize(deletableSize)}）：</p>
           <p style={{ paddingLeft: 12, maxHeight: 180, overflow: 'auto' }}>
-            {selected.map((img) => (
+            {deletable.map((img) => (
               <div key={img.id}>
                 {img.repo_tags[0] ?? `<none>（悬空 ${img.id}）`}
               </div>
@@ -129,7 +192,7 @@ export function ImagesPanel() {
           </p>
         </div>
       ),
-      okText: '全部删除',
+      okText: `删除 ${deletable.length} 个`,
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
@@ -137,14 +200,10 @@ export function ImagesPanel() {
         const failures: string[] = [];
         let done = 0;
         try {
-          for (const img of selected) {
+          for (const img of deletable) {
             const name = img.repo_tags[0] ?? img.id;
             try {
-              try {
-                await invoke('image_remove', { image: name, force: false });
-              } catch {
-                await invoke('image_remove', { image: name, force: true });
-              }
+              await invoke('image_remove', { image: name, force: false });
               done += 1;
             } catch (err: any) {
               failures.push(`${name}：${errMsg(err)}`);
@@ -157,6 +216,8 @@ export function ImagesPanel() {
               content: <pre className="error-detail">{failures.join('\n\n')}</pre>,
               okText: '知道了',
             });
+          } else if (inUse.length > 0) {
+            message.success(`已删除 ${done} 个镜像；跳过 ${inUse.length} 个（被容器使用）`);
           } else {
             message.success(`已删除 ${done} 个镜像`);
           }

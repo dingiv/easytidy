@@ -812,10 +812,77 @@ impl Podman {
                 }),
                 None,
             )
-            .await
-            .map_err(Error::Api)?;
+        .await
+        .map_err(Error::Api)?;
         tracing::info!("镜像已删除：{name}");
         Ok(())
+    }
+
+    /// 镜像占用查询：返回每个镜像被哪些容器使用（入参原样 -> 容器名列表）。
+    ///
+    /// 按镜像 **内容寻址 ID** 精确匹配：先把每个目标镜像（tag / 短 ID / 完整 ID
+    /// 均可）解析成完整 ID，再取容器列表里每个容器的 `ImageID` 比对命中。故
+    /// 「按 tag 创建后被 re-tag」「悬空镜像仍被引用」等场景也能正确识别；未被
+    /// 任何容器引用的镜像返回空列表（可安全删除）。镜像本身不存在（inspect 失败）
+    /// 按无占用处理（必然可删）。
+    pub async fn images_used_by(
+        &self,
+        images: &[String],
+    ) -> Result<std::collections::HashMap<String, Vec<String>>> {
+        use bollard::container::ListContainersOptions;
+
+        // 1. 解析每个目标镜像的完整 ID（去 `sha256:` 前缀归一，便于比对）。
+        let norm = |s: String| s.trim_start_matches("sha256:").to_string();
+        let mut image_ids: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for image in images {
+            match self.docker.inspect_image(image).await {
+                Ok(img) => {
+                    image_ids.insert(image.clone(), norm(img.id.unwrap_or_default()));
+                }
+                Err(_) => {
+                    // 镜像不存在 → 无容器占用（必然可删）
+                    image_ids.insert(image.clone(), String::new());
+                }
+            }
+        }
+
+        // 2. 列出所有容器（list 响应已带 ImageID，all=true 含已停止）。
+        let containers = self
+            .docker
+            .list_containers(Some(ListContainersOptions::<String> {
+                all: true,
+                ..Default::default()
+            }))
+            .await
+            .map_err(Error::Api)?;
+
+        // 3. 按 ImageID 命中收集容器名。
+        let mut result: std::collections::HashMap<String, Vec<String>> = images
+            .iter()
+            .map(|i| (i.clone(), Vec::new()))
+            .collect();
+        for c in containers {
+            let image_id = norm(c.image_id.unwrap_or_default());
+            if image_id.is_empty() {
+                continue;
+            }
+            let name = c
+                .names
+                .as_ref()
+                .and_then(|n| n.first())
+                .map(|s| s.trim_start_matches('/').to_string())
+                .unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            for (image, id) in &image_ids {
+                if !id.is_empty() && *id == image_id {
+                    result.get_mut(image).unwrap().push(name.clone());
+                }
+            }
+        }
+        Ok(result)
     }
 
     pub async fn pull_image(&self, image: &str) -> Result<()> {
