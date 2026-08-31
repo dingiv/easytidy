@@ -74,8 +74,8 @@ function ContainersPanelInner(
   const [error, setError] = useState<string | null>(null);
   const [rebuilding, setRebuilding] = useState<string | null>(null);
 
-  // 快照(按容器记录可选标签)
-  const [snapshotTag, setSnapshotTag] = useState<Record<string, string>>({});
+  // 快照(按容器记录可选快照名)
+  const [snapshotNameMap, setSnapshotNameMap] = useState<Record<string, string>>({});
 
   const load = async () => {
     setLoading(true);
@@ -150,16 +150,16 @@ function ContainersPanelInner(
     }
   };
 
-  /** 快照(commit 当前文件系统层为独立备份资产；标签可用于后续手动恢复/重建。
+  /** 快照(commit 当前文件系统层为独立备份资产；快照名可用于后续手动恢复/重建。
    *  未接管容器同样适用——commit 是 podman 原生能力，不依赖 easytidy 注册配置) */
   const handleSnapshot = async (env: EnvView) => {
-    const tag = (snapshotTag[env.name] ?? '').trim();
+    const snapshotName = (snapshotNameMap[env.name] ?? '').trim();
     try {
       const imageRef = await invoke<string>('env_snapshot', {
         name: env.name,
-        tag: tag || null,
+        snapshotName: snapshotName || null,
       });
-      setSnapshotTag((prev) => ({ ...prev, [env.name]: '' }));
+      setSnapshotNameMap((prev) => ({ ...prev, [env.name]: '' }));
       message.success(`快照已创建：${imageRef}（可作为基础镜像新建容器）`);
       await load();
     } catch (err: any) {
@@ -228,9 +228,10 @@ function ContainersPanelInner(
                       <Typography.Text strong className="env-name">
                         {env.name}
                       </Typography.Text>
-                      <Tag color={managed ? st.color : 'orange'}>
-                        {managed ? st.label : '未接管'}
+                      <Tag color={managed ? 'blue' : 'orange'}>
+                        {managed ? '已接管' : '未接管'}
                       </Tag>
+                      <Tag color={st.color}>{st.label}</Tag>
                     </div>
                     <Typography.Text code className="env-image">
                       {env.image}
@@ -289,10 +290,10 @@ function ContainersPanelInner(
                       title="创建快照"
                       description={
                         <Input
-                          placeholder="快照标签(可选,默认时间戳)"
-                          value={snapshotTag[env.name] ?? ''}
+                          placeholder="快照名(可选,默认 <容器名>-<时间>)"
+                          value={snapshotNameMap[env.name] ?? ''}
                           onChange={(e) =>
-                            setSnapshotTag((prev) => ({ ...prev, [env.name]: e.target.value }))
+                            setSnapshotNameMap((prev) => ({ ...prev, [env.name]: e.target.value }))
                           }
                           onKeyDown={(e) => {
                             if (e.key === 'Enter') handleSnapshot(env);
