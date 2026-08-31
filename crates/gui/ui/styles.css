@@ -1542,6 +1542,11 @@ button:disabled {
   color: #a6e3a1;
 }
 
+/* EasyTidy 注入（EASYTIDY_USER_* + GUI/GPU 透传）——与用户/系统区分 */
+.env-src-easytidy {
+  color: #89b4fa;
+}
+
 .env-src-system {
   color: #6c7086;
 }

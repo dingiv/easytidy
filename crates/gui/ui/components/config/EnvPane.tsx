@@ -1,9 +1,17 @@
-// 环境变量面板：编辑表（增删）+ 只读生效环境（来源分栏）。
+// 环境变量面板：单一合并表（按来源分类型）+ 添加行。
+//
+// 类型（来源）：
+// - 用户自定义：env 配置（可增删，随「保存并重启」生效）
+// - EasyTidy 注入：EASYTIDY_USER_* 系统注入 + GUI/GPU 透传注入（只读）
+// - Podman 注入：podman 默认注入（PATH/HOSTNAME 等，只读）
+// - 镜像默认：镜像 ENV 带入的其余变量（只读）
+//
+// 用户自定义行可删除（其余行带锁图标只读）；添加行固定在表下方。
 
 import { useState } from 'react';
 import { App as AntApp, Button, Empty, Input, Table, Typography } from 'antd';
 import type { TableProps } from 'antd';
-import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import { DeleteOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons';
 import {
   EASYTIDY_SYSTEM_ENV_PREFIX,
   PODMAN_DEFAULT_ENV_KEYS,
@@ -13,14 +21,77 @@ import {
 
 interface EnvPaneProps {
   env: string[];
+  /** GUI/GPU 透传开启时引擎将隐式注入的 env（只读展示；gui/gpu 开启时由
+   *  passthrough_preview 计算） */
+  readonlyEnv?: string[];
   effectiveEnv: string[] | null; // null = 容器未创建
   onAdd(key: string, value: string): void;
   onRemove(idx: number): void;
 }
 
-export function EnvPane({ env, effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
+/** 环境变量来源类型 */
+type EnvRowType = 'user' | 'easytidy' | 'podman' | 'image';
+
+const ENV_TYPE_META: Record<EnvRowType, { label: string; cls: string; order: number }> = {
+  user: { label: '用户自定义', cls: 'env-src-user', order: 0 },
+  easytidy: { label: 'EasyTidy 注入', cls: 'env-src-easytidy', order: 1 },
+  podman: { label: 'Podman 注入', cls: 'env-src-system', order: 2 },
+  image: { label: '镜像默认', cls: 'env-src-system', order: 3 },
+};
+
+interface EnvRow {
+  key: string;
+  value: string;
+  type: EnvRowType;
+  /** 仅用户自定义行可删除 */
+  removable: boolean;
+  /** env 配置中的下标（仅用户自定义行，删除用） */
+  idx?: number;
+}
+
+/** 合并三个来源（用户配置 / 引擎透传预览 / 生效环境）为单一表；
+ *  同一 key 只出现一次（用户配置优先），其余按来源归类、只读 */
+function buildEnvRows(env: string[], readonlyEnv: string[], effectiveEnv: string[] | null): EnvRow[] {
+  const rows: EnvRow[] = [];
+  const userKeys = new Set<string>();
+  env.forEach((kv, i) => {
+    const { key, value } = parseEnv(kv);
+    userKeys.add(key);
+    rows.push({ key, value, type: 'user', removable: true, idx: i });
+  });
+
+  const easyKeys = new Set<string>();
+  for (const kv of readonlyEnv) {
+    const { key, value } = parseEnv(kv);
+    if (userKeys.has(key)) continue;
+    easyKeys.add(key);
+    rows.push({ key, value, type: 'easytidy', removable: false });
+  }
+
+  if (effectiveEnv) {
+    for (const kv of effectiveEnv) {
+      const { key, value } = parseEnv(kv);
+      if (userKeys.has(key) || easyKeys.has(key)) continue;
+      let type: EnvRowType;
+      if (key.startsWith(EASYTIDY_SYSTEM_ENV_PREFIX)) type = 'easytidy';
+      else if (PODMAN_DEFAULT_ENV_KEYS.has(key)) type = 'podman';
+      else type = 'image';
+      if (type === 'easytidy') easyKeys.add(key);
+      rows.push({ key, value, type, removable: false });
+    }
+  }
+
+  return rows.sort((a, b) => {
+    const d = ENV_TYPE_META[a.type].order - ENV_TYPE_META[b.type].order;
+    return d !== 0 ? d : a.key.localeCompare(b.key);
+  });
+}
+
+export function EnvPane({ env, readonlyEnv = [], effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
   const { message } = AntApp.useApp();
   const [newEnv, setNewEnv] = useState({ key: '', value: '' });
+
+  const rows = buildEnvRows(env, readonlyEnv, effectiveEnv);
 
   const addEnv = () => {
     const key = newEnv.key.trim();
@@ -33,13 +104,18 @@ export function EnvPane({ env, effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
     setNewEnv({ key: '', value: '' });
   };
 
-  const envColumns: TableProps<{ key: string; value: string }>['columns'] = [
+  const columns: TableProps<EnvRow>['columns'] = [
     {
       title: '变量名',
       dataIndex: 'key',
       key: 'key',
       ellipsis: true,
-      render: (v: string) => <span className="env-key-cell">{v}</span>,
+      render: (v: string, rec: EnvRow) => (
+        <span className="env-key-cell">
+          {rec.type !== 'user' && <LockOutlined className="readonly-badge-icon" />}
+          {v}
+        </span>
+      ),
     },
     {
       title: '值',
@@ -49,18 +125,26 @@ export function EnvPane({ env, effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
       render: (v: string) => <Typography.Text>{v}</Typography.Text>,
     },
     {
+      title: '类型',
+      dataIndex: 'type',
+      key: 'type',
+      width: 130,
+      render: (t: EnvRowType) => <span className={ENV_TYPE_META[t].cls}>{ENV_TYPE_META[t].label}</span>,
+    },
+    {
       title: '操作',
       key: 'actions',
       width: 70,
-      render: (_: unknown, _rec: { key: string; value: string }, idx: number) => (
-        <Button
-          type="text"
-          danger
-          size="small"
-          icon={<DeleteOutlined />}
-          onClick={() => onRemove(idx)}
-        />
-      ),
+      render: (_: unknown, rec: EnvRow) =>
+        rec.removable ? (
+          <Button
+            type="text"
+            danger
+            size="small"
+            icon={<DeleteOutlined />}
+            onClick={() => onRemove(rec.idx!)}
+          />
+        ) : null,
     },
   ];
 
@@ -68,11 +152,11 @@ export function EnvPane({ env, effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
     <div className="config-pane">
       <Table
         size="small"
-        rowKey={(_rec: { key: string; value: string }, i) => `env-${i}`}
-        columns={envColumns}
-        dataSource={env.map(parseEnv)}
+        rowKey={(r) => r.key}
+        columns={columns}
+        dataSource={rows}
         pagination={false}
-        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无自定义环境变量" /> }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无环境变量" /> }}
       />
       <div className="add-row">
         <Input
@@ -93,57 +177,9 @@ export function EnvPane({ env, effectiveEnv, onAdd, onRemove }: EnvPaneProps) {
         </Button>
       </div>
       <span className="section-hint">
-        环境变量随「保存并重启」在容器重建后生效；EASYTIDY_USER_* 由引擎保留注入，不可手动修改。
+        用户自定义行可增删，随「保存并重启」生效；EasyTidy 注入（EASYTIDY_USER_* 与 GUI/GPU 透传）、
+        Podman 注入与镜像默认由引擎/运行时带入，只读。
       </span>
-
-      <div className="config-subsection">
-        <Typography.Text strong>生效环境（含系统注入，只读）</Typography.Text>
-        {effectiveEnv ? (
-          <Table
-            size="small"
-            rowKey={(_rec: { key: string; value: string; src: string }, i) => `eff-env-${i}`}
-            dataSource={effectiveEnv
-              .map((kv) => {
-                const { key, value } = parseEnv(kv);
-                let src = '用户配置';
-                if (key.startsWith(EASYTIDY_SYSTEM_ENV_PREFIX)) src = 'easytidy 系统注入';
-                else if (PODMAN_DEFAULT_ENV_KEYS.has(key)) src = 'podman 默认';
-                return { key, value, src };
-              })
-              .sort((a, b) => (a.src === b.src ? 0 : a.src === '用户配置' ? -1 : 1))}
-            pagination={false}
-            locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无" /> }}
-            columns={[
-              {
-                title: '变量名',
-                dataIndex: 'key',
-                key: 'key',
-                ellipsis: true,
-                render: (v: string) => <span className="env-key-cell">{v}</span>,
-              },
-              {
-                title: '值',
-                dataIndex: 'value',
-                key: 'value',
-                ellipsis: true,
-              },
-              {
-                title: '来源',
-                dataIndex: 'src',
-                key: 'src',
-                width: 150,
-                render: (v: string) => (
-                  <span className={v === '用户配置' ? 'env-src-user' : 'env-src-system'}>{v}</span>
-                ),
-              },
-            ]}
-          />
-        ) : (
-          <Typography.Text type="secondary">
-            容器未创建，无实际生效环境（可编辑下方配置后保存并重启）。
-          </Typography.Text>
-        )}
-      </div>
     </div>
   );
 }
