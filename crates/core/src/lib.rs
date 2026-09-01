@@ -26,6 +26,7 @@ pub mod passthrough;
 pub mod error;
 pub mod events;
 pub mod flavor;
+pub mod gui_passthrough;
 pub mod libpod;
 pub mod models;
 pub mod pathvars;

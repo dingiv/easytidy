@@ -26,6 +26,7 @@ dirs = { workspace = true }
 fs2 = { workspace = true }
 chrono = { workspace = true }
 toml = { workspace = true }
+serde_yaml = { workspace = true }
 libc = { workspace = true }
 tar = { workspace = true }
 
@@ -51,3 +52,7 @@ CTOOL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/us
 # shell）。**宿主原生二进制**（非容器内进程）：dev = 原生 target/debug
 # （SERVER_BIN 是 musl 目标，二者不同）；prod 随安装包发布到 /usr/bin。
 ROOT_CHANNEL_BIN = { dev = "../../target/debug/", prod = "/usr/bin" }
+# GUI 透传规则等内置资源（内容，非代码）：dev = 源码树 crates/gui/assets
+# （core manifest 的 ../gui/assets）；prod = 数据目录 ~/.easytidy/assets（首跑从
+# 内嵌默认播种、可被用户定制）。core 经 ASSETS_DIR:: 加载（见 gui_passthrough.rs）。
+ASSETS_DIR = { dev = "../gui/assets", prod = "~/.easytidy/assets" }

@@ -1,0 +1,65 @@
+# GUI 透传规则 —— gui: true 时引擎按宿主实时环境注入的 mounts + env。
+#
+# 这是「内容」而非「代码」：映射表 / XDG_DATA_DIRS 值 / keep-id 意图都在这里，
+# 改规则不用改 Rust。core 经 FileLoader 的 ASSETS_DIR namespace 加载：
+#   dev  = crates/gui/assets/gui-passthrough.yaml（源码树，本文件）
+#   prod = ~/.easytidy/assets/gui-passthrough.yaml（数据目录，首跑从内嵌默认播种、可定制）
+#
+# 占位符（宿主侧变量，host_path / container_path / env 值统一按宿主 env 展开）：
+#   ${HOME} ${USER} ${UID} ${GID}            宿主用户
+#   ${DISPLAY} ${WAYLAND_DISPLAY}            宿主显示环境（session 耦合，运行时探测）
+#   ${XDG_RUNTIME_DIR}                       宿主运行时目录（Wayland / dbus / XAUTHORITY）
+# 展开后 host_path 为空（session 变量未设）→ 该挂载跳过；env 值为空 → 该 env 跳过。
+# require_exists: true 的挂载额外要求宿主路径存在（字体/图标等可选资源缺失时跳过）。
+#
+# 设计意图：YAML 只存静态意图（映射规则），宿主耦合的运行时值（DISPLAY /
+# XDG_RUNTIME_DIR）留到创建时实时探测注入——避免硬编 session 特有的值。
+# XAUTHORITY 不在此处（路径含随机后缀，由容器内 easytidy-server 启动时自动探测，
+# 见 crates/server/src/setup.rs ensure_xauthority）。
+#
+# 注：
+# - XDG_DATA_DIRS 必须**追加**系统默认、不能纯覆盖：gdk-pixbuf 经
+#   $XDG_DATA_DIRS/.../loaders.cache 找 loader 注册表，覆盖后系统 cache 不可达
+#   → 容器内 PNG 图标解码失败（2026-08-07 Chrome 保存图片实测）。
+# - 字体/图标挂非冲突路径 /mnt/host/，由 fontconfig local.conf
+#   （server 启动时写）+ XDG_DATA_DIRS 接入；不能覆盖容器自身 /usr/share/{fonts,icons}
+#   （dpkg postinst 会写这两个目录，只读挂载导致安装失败，实测）。
+
+env:
+  # 显示相关（session 耦合，宿主探测；未设则跳过）
+  - DISPLAY=${DISPLAY}
+  - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
+  - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
+  # 系统默认 XDG_DATA_DIRS（不能纯覆盖——见上方注）
+  - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
+
+mounts:
+  # X11 socket（恒注入；Wayland 会话下兜底兼容 X11 应用）
+  - host_path: /tmp/.X11-unix
+    container_path: /tmp/.X11-unix
+    read_only: false
+  # 宿主 $XDG_RUNTIME_DIR（Wayland socket / dbus / XAUTHORITY；未设则跳过）
+  - host_path: ${XDG_RUNTIME_DIR}
+    container_path: ${XDG_RUNTIME_DIR}
+    read_only: false
+  # 系统字体/图标（只读；宿主路径须存在）
+  - host_path: /usr/share/fonts
+    container_path: /mnt/host/fonts
+    read_only: true
+    require_exists: true
+  - host_path: /usr/share/icons
+    container_path: /mnt/host/icons
+    read_only: true
+    require_exists: true
+  # 用户级字体/图标（只读；宿主路径须存在）
+  - host_path: ${HOME}/.local/share/fonts
+    container_path: /mnt/host/.local/share/fonts
+    read_only: true
+    require_exists: true
+  - host_path: ${HOME}/.local/share/icons
+    container_path: /mnt/host/.local/share/icons
+    read_only: true
+    require_exists: true
+
+# gui=true 恒开 keep-id（GUI 应用需以宿主用户身份读写宿主挂载目录）
+keep_id: true

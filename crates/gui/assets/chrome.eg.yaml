@@ -31,12 +31,12 @@ mounts:
   - host_path: /run/user/1000
     container_path: /run/user/1000
     read_only: false
-  # 宿主字体（只读,经 easytidy-host 路径接入 fontconfig）
+  # 宿主字体（只读,经 /mnt/host 路径接入 fontconfig）
   - host_path: /usr/share/fonts
-    container_path: /usr/share/easytidy-host/fonts
+    container_path: /mnt/host/fonts
     read_only: true
   - host_path: /usr/share/icons
-    container_path: /usr/share/easytidy-host/icons
+    container_path: /mnt/host/icons
     read_only: true
 
 network:
@@ -47,7 +47,7 @@ network:
 # 保留在模板里。DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR 在展开时按宿主 env
 # 动态注入,模板里不写。
 env:
-  - XDG_DATA_DIRS=/usr/share/easytidy-host:/usr/local/share:/usr/share
+  - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
 
 setup: []
 flavor: chrome

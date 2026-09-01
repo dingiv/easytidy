@@ -27,14 +27,14 @@ use crate::error::{Error, Result};
 // 接收路径，单测可指到临时目录）
 const PASSWD: &str = "/etc/passwd";
 const GROUP: &str = "/etc/group";
-const HOST_FONTS: &str = "/usr/share/easytidy-host";
+const HOST_FONTS: &str = "/mnt/host";
 const FONTCONF_DIR: &str = "/etc/fonts";
 
 const FONTCONF_XML: &str = "<?xml version=\"1.0\"?>\n\
 <!DOCTYPE fontconfig SYSTEM \"fonts.dtd\">\n\
 <fontconfig>\n\
-  <dir>/usr/share/easytidy-host/fonts</dir>\n\
-  <dir>/usr/share/easytidy-host/.local/share/fonts</dir>\n\
+  <dir>/mnt/host/fonts</dir>\n\
+  <dir>/mnt/host/.local/share/fonts</dir>\n\
 </fontconfig>\n";
 
 // ── 身份（单一事实源：server 身份自发现 + ctool ensure-home 共用）────────────
@@ -236,7 +236,7 @@ pub fn plan_prepare(passwd: &str, group: &str, spec: &PrepareSpec) -> PreparePla
 pub struct IncontainerPaths {
     pub passwd: PathBuf,
     pub group: PathBuf,
-    /// 宿主字体/图标挂载根（/usr/share/easytidy-host）
+    /// 宿主字体/图标挂载根（/mnt/host）
     pub host_fonts: PathBuf,
     /// fontconfig 目录（/etc/fonts；写其下 local.conf）
     pub fontconf_dir: PathBuf,
@@ -366,7 +366,7 @@ fn chown(path: &CString, uid: u32, gid: u32) -> Result<()> {
 
 /// fontconfig 宿主字体接入（幂等覆写）。
 ///
-/// flavor `gui=true` 把宿主字体/图标只读挂到 `/usr/share/easytidy-host/`；
+/// flavor `gui=true` 把宿主字体/图标只读挂到 `/mnt/host/`；
 /// 无挂载或无 fontconfig 目录（非 GUI 容器）时静默跳过。
 fn write_fontconfig(host_fonts: &Path, fontconf_dir: &Path) -> Result<()> {
     if !host_fonts.is_dir() || !fontconf_dir.is_dir() {
@@ -636,7 +636,7 @@ mod tests {
         write_fontconfig(&host_fonts, &fonts_dir).unwrap();
         let conf = fs::read_to_string(fonts_dir.join("local.conf")).unwrap();
         assert!(conf.contains("<fontconfig>"));
-        assert!(conf.contains("/usr/share/easytidy-host/fonts"));
-        assert!(conf.contains("/usr/share/easytidy-host/.local/share/fonts"));
+        assert!(conf.contains("/mnt/host/fonts"));
+        assert!(conf.contains("/mnt/host/.local/share/fonts"));
     }
 }

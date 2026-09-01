@@ -49,7 +49,7 @@ mounts:
   - host_path: /run/user/1000
     container_path: /run/user/1000
     read_only: false
-  # 宿主字体（只读,经 easytidy-host 路径接入 fontconfig）
+  # 宿主字体（只读,经 /mnt/host 路径接入 fontconfig）
   - host_path: /usr/share/fonts
     container_path: /mnt/host/fonts
     read_only: true
