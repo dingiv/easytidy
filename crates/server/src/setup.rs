@@ -29,21 +29,6 @@ use tracing::{info, warn};
 /// 名字/HOME 解析与容器内 ctool 共用 core 的单一事实源）。
 pub(crate) type UserMap = easytidy_core::incontainer::Identity;
 
-/// 自身 uid/gid（/proc/self/status 解析，零依赖）。
-pub(crate) fn self_uid_gid() -> (u32, u32) {
-    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let mut uid = 0u32;
-    let mut gid = 0u32;
-    for line in status.lines() {
-        if let Some(v) = line.strip_prefix("Uid:") {
-            uid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        } else if let Some(v) = line.strip_prefix("Gid:") {
-            gid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-        }
-    }
-    (uid, gid)
-}
-
 /// 身份全局态：`setup_user_identity` 后写入。
 /// `user_map()` 理论上恒有值（main 在 listen 前初始化）；保留 Option
 /// 仅为防御（初始化前的极早期调用）。
@@ -103,7 +88,7 @@ pub(crate) fn injected_env() -> &'static [InjectedEnv] {
 /// 名字/HOME 解析委托 `easytidy_core::incontainer::resolve_identity`
 /// （与容器内 ctool 的 ensure-home 同一事实源）。
 pub(crate) fn setup_user_identity() -> UserMap {
-    let (uid, gid) = self_uid_gid();
+    let (uid, gid) = easytidy_core::incontainer::self_uid_gid();
     if uid == 0 {
         warn!(
             "server 以 root（uid 0）运行——旧形态容器，新模型不再支持 \
@@ -118,26 +103,9 @@ pub(crate) fn setup_user_identity() -> UserMap {
     identity
 }
 
-/// 修正 XDG_DATA_DIRS 值，确保包含系统默认数据目录。
-///
-/// 背景：旧版 flavor 注入 `XDG_DATA_DIRS=/usr/share/easytidy-host`（纯覆盖），
-/// gdk-pixbuf 2.42 经 `$XDG_DATA_DIRS/gdk-pixbuf-2.0/2.10.0/loaders.cache`
-/// 查找 loader 注册表，覆盖后系统 cache 不可达 → 容器内 PNG 图标解码失败
-/// （"Unrecognized image file format"）→ GTK 文件选择器断言崩溃（实测 Chrome
-/// 保存图片）。mime 数据库（$XDG_DATA_DIRS/mime）同理受影响。追加 glib 默认
-/// 的 /usr/local/share:/usr/share（容器内缺失路径无害）。
-pub(crate) fn fixup_xdg_data_dirs_value(v: &str) -> String {
-    let mut merged = v.to_string();
-    for p in ["/usr/local/share", "/usr/share"] {
-        if !merged.split(':').any(|c| c == p) {
-            merged.push(':');
-            merged.push_str(p);
-        }
-    }
-    merged
-}
-
-/// 修正 server 进程自身的 XDG_DATA_DIRS（子进程继承）。
+/// 修正 server 进程自身的 XDG_DATA_DIRS（子进程继承）——薄壳：值计算（纯）委托
+/// `easytidy_core::incontainer::fixup_xdg_data_dirs_value`，本处只读 env + set_var
+/// （进程副作用）。
 ///
 /// 返回修正后的新值（**确实发生**修正时）；未修正（值已含系统默认 / 未设
 /// XDG_DATA_DIRS）返回 `None`——供 `finalize_injected_env` 记录「easytidy 注入」。
@@ -145,7 +113,7 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
     let Ok(v) = std::env::var("XDG_DATA_DIRS") else {
         return None;
     };
-    let merged = fixup_xdg_data_dirs_value(&v);
+    let merged = easytidy_core::incontainer::fixup_xdg_data_dirs_value(&v);
     if merged != v {
         info!("XDG_DATA_DIRS 已修正（追加系统默认）: {merged}");
         std::env::set_var("XDG_DATA_DIRS", &merged);
@@ -155,56 +123,40 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
     }
 }
 
-/// 探测 X11 auth 文件并强制覆盖进程 `XAUTHORITY`(server 内置 GUI 透传)。
+/// 探测 X11 auth 文件并强制覆盖进程 `XAUTHORITY`（server 内置 GUI 透传）——薄壳：
+/// 探测（纯）委托 `easytidy_core::incontainer::probe_xauthority`，本处只读
+/// `$XDG_RUNTIME_DIR` + set_var（进程副作用）。
 ///
 /// **为什么不让用户配 XAUTHORITY**:
-/// - 路径含随机后缀(典型 `/run/user/$uid/mutter-Xwaylandauth.<random>` 或
-///   `xauth_<random>`,由 compositor 在登录会话时随机生成,会变)。
+/// - 路径含随机后缀（典型 `/run/user/$uid/mutter-Xwaylandauth.<random>` 或
+///   `xauth_<random>`，由 compositor 在登录会话时随机生成，会变）。
 /// - 用户写在 YAML/容器配置里的字面值无法跟住 session 变化——历史上因
 ///   `.mutter-Xwaylandauth.XXXXXX` 字面占位符 + 文件不存在 → Chrome "Authorization
 ///   required" 的 bug 链就是这条。
-/// - 这是 session 耦合运行时数据,不是用户配置。把它做进 server:
-///   容器每次启动 server 时,**忽略** podman create 时可能注入的任何
-///   `XAUTHORITY`(包括 host 注入 + 用户模板声明),由 server 自己探 $XDG_RUNTIME_DIR
-///   下已知模式,覆盖写进程 env。后续 pty.open / apps.launch 经 `std::env::vars()`
-///   取到的就是 server 持有值。
+/// - 这是 session 耦合运行时数据，不是用户配置。容器每次启动 server 时**忽略**
+///   podman create 时可能注入的任何 `XAUTHORITY`（包括 host 注入 + 用户模板声明），
+///   由 server 自己探 `$XDG_RUNTIME_DIR` 下已知模式，覆盖写进程 env。后续
+///   pty.open / apps.launch 经 `std::env::vars()` 取到的就是 server 持有值。
 ///
-/// **探针模式**(取第一个匹配,剥掉可能的首个 `.` 前缀后再判):
-///   1. `[.]mutter-Xwaylandauth.*`(GNOME/Mutter 启动 Xwayland 时生成——**实际是
-///      点前缀** `.mutter-Xwaylandauth.<rand>`)
-///   2. `[.]xauth_*`(Xorg 原生或老会话)
-///
-/// 取不到时仅 warn——非 GUI 容器(纯 headless)不应被这条路径阻碍启动。
+/// 取不到时仅 warn——非 GUI 容器（纯 headless）不应被这条路径阻碍启动。
 pub(crate) fn ensure_xauthority() -> Option<String> {
     let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
         tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
         return None;
     };
-    let Ok(read_dir) = std::fs::read_dir(&runtime) else {
-        tracing::debug!("XDG_RUNTIME_DIR ({runtime}) 不可读,跳过 XAUTHORITY 自动注入");
+    let Some(path) = easytidy_core::incontainer::probe_xauthority(std::path::Path::new(&runtime)) else {
+        tracing::warn!(
+            "未在 {runtime} 找到 X11 auth 文件([.]mutter-Xwaylandauth.* 或 xauth_*);\
+             X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
+        );
         return None;
     };
-    for entry in read_dir.flatten() {
-        let name = entry.file_name();
-        let Some(n) = name.to_str() else { continue };
-        // GNOME/Mutter 实际生成**点前缀**文件（`.mutter-Xwaylandauth.<rand>`），
-        // 剥掉可能的首个 `.` 后匹配，兼容有无点前缀两种形态；`xauth_*` 同理。
-        let stripped = n.strip_prefix('.').unwrap_or(n);
-        if stripped.starts_with("mutter-Xwaylandauth.") || stripped.starts_with("xauth_") {
-            let path = format!("{runtime}/{n}");
-            tracing::info!("server 自动注入 XAUTHORITY={path} (覆盖 podman create 时可能注入的旧值)");
-            // 覆盖进程 env——后续 pty.open 经 std::env::vars() 取到的就是这个值。
-            // std::env::set_var 在多线程下是 unsafe(race),server 此时仍单线程
-            // (未启动 listener / accept 循环),安全。
-            std::env::set_var("XAUTHORITY", &path);
-            return Some(path);
-        }
-    }
-    tracing::warn!(
-        "未在 {runtime} 找到 X11 auth 文件([.]mutter-Xwaylandauth.* 或 xauth_*);\
-         X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
-    );
-    None
+    tracing::info!("server 自动注入 XAUTHORITY={path} (覆盖 podman create 时可能注入的旧值)");
+    // 覆盖进程 env——后续 pty.open 经 std::env::vars() 取到的就是这个值。
+    // std::env::set_var 在多线程下是 unsafe(race),server 此时仍单线程
+    // (未启动 listener / accept 循环),安全。
+    std::env::set_var("XAUTHORITY", &path);
+    Some(path)
 }
 
 #[cfg(test)]
@@ -212,16 +164,10 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // 身份解析（resolve_identity）的测试随单一事实源迁到
-    // easytidy_core::incontainer::tests（server 与 ctool 共用）。
-
-    #[test]
-    fn test_self_uid_gid_reads_proc() {
-        // 真实进程身份：非负且与 libc 一致（Linux 容器环境）
-        let (uid, gid) = self_uid_gid();
-        assert_eq!(uid, unsafe { libc::getuid() });
-        assert_eq!(gid, unsafe { libc::getgid() });
-    }
+    // 身份解析（resolve_identity）与 env 探测纯函数（self_uid_gid / probe_xauthority /
+    // fixup_xdg_data_dirs_value）的测试随单一事实源迁到
+    // easytidy_core::incontainer::tests（server 与 ctool 共用）。本处只留
+    // ensure_xauthority / fixup_xdg_data_dirs 的**进程副作用**（set_var）测试。
 
     /// 测试串行化:`ensure_xauthority` 修改的是**进程全局 env**(XDG_RUNTIME_DIR +
     /// XAUTHORITY),并行跑会让测试互相污染(一个测试设的目录会被另一个读到)。

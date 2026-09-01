@@ -1,6 +1,6 @@
 //! PTY 服务：open/attach/回放/resize/close/枚举/cwd 跟随。
 use crate::state::{PtySession, RING_MAX, ServerState};
-use crate::setup::{user_map, fixup_xdg_data_dirs_value};
+use crate::setup::user_map;
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -188,7 +188,7 @@ pub(crate) async fn handle_pty_open(
     // 断言崩溃——Chrome 保存图片实测），此处对固化 env 做防御性修正。
     for (k, v) in &req.env {
         if k == "XDG_DATA_DIRS" {
-            cmd_builder.env(k, fixup_xdg_data_dirs_value(v));
+            cmd_builder.env(k, easytidy_core::incontainer::fixup_xdg_data_dirs_value(v));
         } else {
             cmd_builder.env(k, v);
         }

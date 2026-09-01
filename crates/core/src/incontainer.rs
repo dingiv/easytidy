@@ -84,6 +84,76 @@ pub fn resolve_identity(passwd: &str, uid: u32, gid: u32, user_name: Option<&str
     }
 }
 
+// ── 容器运行时 env 探测（纯函数，server 启动期用）────────────────────────
+//
+// 容器内 server（= 容器默认用户）启动时的 env 适配纯逻辑——与 [`resolve_identity`]
+// 同属「容器侧身份/env 单一事实源」。纯函数（无进程副作用），server 据此做
+// `std::env::set_var` 等副作用薄壳。从 `server/src/setup.rs` 下沉（2026-09-01
+// env 模块族收敛）：探测逻辑归 core，进程级 set_var / static 留 server。
+
+/// 当前进程 uid/gid（读 `/proc/self/status`，零依赖）。
+///
+/// server 即容器默认用户——容器 `User` 字段直指配置 uid:gid（宿主 create_with_config
+/// 设），server 无需建号/降权，自身 uid/gid 即身份。
+pub fn self_uid_gid() -> (u32, u32) {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    let mut uid = 0u32;
+    let mut gid = 0u32;
+    for line in status.lines() {
+        if let Some(v) = line.strip_prefix("Uid:") {
+            uid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        } else if let Some(v) = line.strip_prefix("Gid:") {
+            gid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+        }
+    }
+    (uid, gid)
+}
+
+/// 修正 XDG_DATA_DIRS 值，确保包含系统默认数据目录（纯字符串变换）。
+///
+/// 背景：旧版 flavor 注入 `XDG_DATA_DIRS=/usr/share/easytidy-host`（纯覆盖），
+/// gdk-pixbuf 2.42 经 `$XDG_DATA_DIRS/gdk-pixbuf-2.0/2.10.0/loaders.cache` 查
+/// loader 注册表，覆盖后系统 cache 不可达 → 容器内 PNG 图标解码失败 → GTK 文件
+/// 选择器断言崩溃（实测 Chrome 保存图片）。追加 glib 默认的
+/// `/usr/local/share:/usr/share`（容器内缺失路径无害）。
+pub fn fixup_xdg_data_dirs_value(v: &str) -> String {
+    let mut merged = v.to_string();
+    for p in ["/usr/local/share", "/usr/share"] {
+        if !merged.split(':').any(|c| c == p) {
+            if !merged.is_empty() {
+                merged.push(':');
+            }
+            merged.push_str(p);
+        }
+    }
+    merged
+}
+
+/// 在 `$XDG_RUNTIME_DIR` 下探测 X11 auth 文件（纯探测，**不做 set_var**）。
+///
+/// 路径含随机后缀（compositor 登录会话随机生成），不可由用户配置——故运行时
+/// 探测。探针模式（取第一个匹配，剥掉可能的首个 `.` 前缀后再判，兼容有无点
+/// 前缀两种形态）：
+///   1. `[.]mutter-Xwaylandauth.*`（GNOME/Mutter 启动 Xwayland 生成，**实际点前缀**）
+///   2. `[.]xauth_*`（Xorg 原生或老会话）
+///
+/// 取不到 → `None`（非 GUI 容器 / 未挂 XDG_RUNTIME_DIR 时正常）。server 据返回值
+/// 决定 `set_var("XAUTHORITY", ...)` 与记录。
+pub fn probe_xauthority(runtime_dir: &Path) -> Option<String> {
+    let Ok(read_dir) = fs::read_dir(runtime_dir) else {
+        return None;
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name();
+        let Some(n) = name.to_str() else { continue };
+        let stripped = n.strip_prefix('.').unwrap_or(n);
+        if stripped.starts_with("mutter-Xwaylandauth.") || stripped.starts_with("xauth_") {
+            return Some(format!("{}/{}", runtime_dir.display(), n));
+        }
+    }
+    None
+}
+
 // ── /etc/passwd、/etc/group 行式解析（纯）──────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -382,6 +452,66 @@ mod tests {
     const PASSWD: &str = "root:x:0:0:root:/root:/bin/sh\n\
                       tidy:x:1000:1000::/home/tidy:/bin/bash\n\
                       other:x:1001:1001::/home/other:/bin/sh\n";
+
+    // ── 容器运行时 env 探测（server 启动期纯函数）──
+
+    #[test]
+    fn test_self_uid_gid_matches_libc() {
+        // 真实进程身份：与 libc getuid/getgid 一致（Linux 容器环境）
+        let (uid, gid) = self_uid_gid();
+        assert_eq!(uid, unsafe { libc::getuid() });
+        assert_eq!(gid, unsafe { libc::getgid() });
+    }
+
+    #[test]
+    fn test_fixup_xdg_data_dirs_appends_system_defaults() {
+        // 缺系统默认 → 追加
+        assert_eq!(
+            fixup_xdg_data_dirs_value("/usr/share/easytidy-host"),
+            "/usr/share/easytidy-host:/usr/local/share:/usr/share"
+        );
+        // 已含系统默认 → 原样（幂等）
+        assert_eq!(
+            fixup_xdg_data_dirs_value("/mnt/host:/usr/local/share:/usr/share"),
+            "/mnt/host:/usr/local/share:/usr/share"
+        );
+        // 空值 → 仅系统默认
+        assert_eq!(fixup_xdg_data_dirs_value(""), "/usr/local/share:/usr/share");
+    }
+
+    fn write_auth(dir: &Path, name: &str) {
+        fs::write(dir.join(name), b"mock-cookie").unwrap();
+    }
+
+    #[test]
+    fn test_probe_xauthority_mutter() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_auth(tmp.path(), "mutter-Xwaylandauth.hzQT2z");
+        let p = probe_xauthority(tmp.path()).unwrap();
+        assert!(p.ends_with("mutter-Xwaylandauth.hzQT2z"));
+    }
+
+    #[test]
+    fn test_probe_xauthority_dot_prefixed_mutter() {
+        // GNOME/Mutter 实际点前缀（.mutter-Xwaylandauth.<rand>）必须被探测到
+        let tmp = tempfile::tempdir().unwrap();
+        write_auth(tmp.path(), ".mutter-Xwaylandauth.DE23U3");
+        let p = probe_xauthority(tmp.path()).unwrap();
+        assert!(p.ends_with(".mutter-Xwaylandauth.DE23U3"));
+    }
+
+    #[test]
+    fn test_probe_xauthority_xauth_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_auth(tmp.path(), "xauth_abc123");
+        assert!(probe_xauthority(tmp.path()).unwrap().ends_with("xauth_abc123"));
+    }
+
+    #[test]
+    fn test_probe_xauthority_none_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(probe_xauthority(tmp.path()), None);
+    }
 
     // ── resolve_identity（server 身份自发现的同一事实源）──
 
