@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 
 use crate::error::{Error, Result};
-use crate::incontainer::resolve_identity;
+use crate::env::resolve_identity;
 use crate::models::MountConfig;
 use crate::userenv::HostUser;
 

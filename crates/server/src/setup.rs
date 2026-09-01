@@ -10,7 +10,7 @@
 //!    容器内建号命名一致；镜像无该 uid 真实条目且建号尚未执行时
 //!    的名字/home 来源）
 //!
-//! 名字/HOME 解析的**单一事实源**在 `easytidy_core::incontainer::
+//! 名字/HOME 解析的**单一事实源**在 `easytidy_core::env::
 //! resolve_identity`——与容器内 ctool 的 ensure-home 共用同一函数，
 //! 保证 server 的 HOME 与 ctool 实际补齐的目录必然一致（2026-08-28
 //! 定案：家目录跟随容器默认用户 passwd home，容器层持久）。
@@ -25,9 +25,9 @@ use std::sync::OnceLock;
 
 use tracing::{info, warn};
 
-/// 当前身份（`easytidy_core::incontainer::Identity` 的本地别名——
+/// 当前身份（`easytidy_core::env::Identity` 的本地别名——
 /// 名字/HOME 解析与容器内 ctool 共用 core 的单一事实源）。
-pub(crate) type UserMap = easytidy_core::incontainer::Identity;
+pub(crate) type UserMap = easytidy_core::env::Identity;
 
 /// 身份全局态：`setup_user_identity` 后写入。
 /// `user_map()` 理论上恒有值（main 在 listen 前初始化）；保留 Option
@@ -85,10 +85,10 @@ pub(crate) fn injected_env() -> &'static [InjectedEnv] {
 
 /// 启动期身份初始化（main 初始化后、listen 前调用；同步，无 IO 阻塞点）。
 ///
-/// 名字/HOME 解析委托 `easytidy_core::incontainer::resolve_identity`
+/// 名字/HOME 解析委托 `easytidy_core::env::resolve_identity`
 /// （与容器内 ctool 的 ensure-home 同一事实源）。
 pub(crate) fn setup_user_identity() -> UserMap {
-    let (uid, gid) = easytidy_core::incontainer::self_uid_gid();
+    let (uid, gid) = easytidy_core::env::self_uid_gid();
     if uid == 0 {
         warn!(
             "server 以 root（uid 0）运行——旧形态容器，新模型不再支持 \
@@ -97,14 +97,14 @@ pub(crate) fn setup_user_identity() -> UserMap {
     }
     let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
     let env_name = std::env::var("EASYTIDY_USER_NAME").ok();
-    let identity = easytidy_core::incontainer::resolve_identity(&passwd, uid, gid, env_name.as_deref());
+    let identity = easytidy_core::env::resolve_identity(&passwd, uid, gid, env_name.as_deref());
     let _ = USER_MAP.set(identity.clone());
     info!("身份自发现：{}({}:{}) home={}", identity.name, identity.uid, identity.gid, identity.home);
     identity
 }
 
 /// 修正 server 进程自身的 XDG_DATA_DIRS（子进程继承）——薄壳：值计算（纯）委托
-/// `easytidy_core::incontainer::fixup_xdg_data_dirs_value`，本处只读 env + set_var
+/// `easytidy_core::env::fixup_xdg_data_dirs_value`，本处只读 env + set_var
 /// （进程副作用）。
 ///
 /// 返回修正后的新值（**确实发生**修正时）；未修正（值已含系统默认 / 未设
@@ -113,7 +113,7 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
     let Ok(v) = std::env::var("XDG_DATA_DIRS") else {
         return None;
     };
-    let merged = easytidy_core::incontainer::fixup_xdg_data_dirs_value(&v);
+    let merged = easytidy_core::env::fixup_xdg_data_dirs_value(&v);
     if merged != v {
         info!("XDG_DATA_DIRS 已修正（追加系统默认）: {merged}");
         std::env::set_var("XDG_DATA_DIRS", &merged);
@@ -124,7 +124,7 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
 }
 
 /// 探测 X11 auth 文件并强制覆盖进程 `XAUTHORITY`（server 内置 GUI 透传）——薄壳：
-/// 探测（纯）委托 `easytidy_core::incontainer::probe_xauthority`，本处只读
+/// 探测（纯）委托 `easytidy_core::env::probe_xauthority`，本处只读
 /// `$XDG_RUNTIME_DIR` + set_var（进程副作用）。
 ///
 /// **为什么不让用户配 XAUTHORITY**:
@@ -144,7 +144,7 @@ pub(crate) fn ensure_xauthority() -> Option<String> {
         tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
         return None;
     };
-    let Some(path) = easytidy_core::incontainer::probe_xauthority(std::path::Path::new(&runtime)) else {
+    let Some(path) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime)) else {
         tracing::warn!(
             "未在 {runtime} 找到 X11 auth 文件([.]mutter-Xwaylandauth.* 或 xauth_*);\
              X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
@@ -166,7 +166,7 @@ mod tests {
 
     // 身份解析（resolve_identity）与 env 探测纯函数（self_uid_gid / probe_xauthority /
     // fixup_xdg_data_dirs_value）的测试随单一事实源迁到
-    // easytidy_core::incontainer::tests（server 与 ctool 共用）。本处只留
+    // easytidy_core::env::incontainer::tests（server 与 ctool 共用）。本处只留
     // ensure_xauthority / fixup_xdg_data_dirs 的**进程副作用**（set_var）测试。
 
     /// 测试串行化:`ensure_xauthority` 修改的是**进程全局 env**(XDG_RUNTIME_DIR +

@@ -3,7 +3,7 @@
 //! 由宿主 ro bind-mount 进容器（`/usr/bin/easytidy-ctool`），与
 //! easytidy-server 并列的第二个容器内二进制。以 root（exec --user 0）
 //! 运行，**零容器内命令依赖**（无 sh/useradd/sed/awk）：全部逻辑为纯
-//! Rust（`easytidy_core::incontainer`），alpine/busybox/debian 通吃。
+//! Rust（`easytidy_core::env::incontainer`），alpine/busybox/debian 通吃。
 //!
 //! 宿主侧调用（core::podman::user::prepare_container）：
 //!   exec_oneshot(container, "0", ["easytidy-ctool", "prepare", ...])
@@ -58,7 +58,7 @@ fn run(command: Commands) -> anyhow::Result<Option<String>> {
     match command {
         Commands::Prepare { uid, gid, name } => {
             let report =
-                easytidy_core::incontainer::prepare_in_container(uid, gid, name.as_deref())
+                easytidy_core::env::prepare_in_container(uid, gid, name.as_deref())
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(report.skip_reason)
         }

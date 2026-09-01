@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::flavor::inject_passthrough;
+use crate::env::inject_passthrough;
 use crate::models::ContainerConfig;
 
 /// conf YAML 模板：容器关键参数 + 可选安装命令(setup)。
@@ -58,7 +58,7 @@ impl ConfTemplate {
     /// 模板展开为可创建的 [`ContainerConfig`]。
     ///
     /// 与 [`crate::flavor::Flavor::build_config`] 对齐语义,区别是这里走
-    /// 共享的 [`inject_gui_passthrough`](crate::flavor::inject_gui_passthrough)
+    /// 共享的 [`inject_gui_passthrough`](crate::env::inject_gui_passthrough)
     /// 注入逻辑(`gui: true` 时追加宿主 env/mounts)。
     ///
     /// - `name`:执行容器名(覆盖模板内 `config.name`)

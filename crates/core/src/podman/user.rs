@@ -1,7 +1,7 @@
 //! 容器内用户准备（宿主侧以 root 一次性 exec 容器内 ctool 二进制）。
 //!
 //! 新身份模型下容器直接以配置的 uid/gid 运行（无 init 镜像烘焙）。
-//! 准备逻辑本身是**纯 Rust**（[`crate::incontainer`]）：容器内的
+//! 准备逻辑本身是**纯 Rust**（[`crate::env::incontainer`]）：容器内的
 //! `easytidy-ctool` 二进制（ro bind-mount，musl 静态）执行 fontconfig
 //! 接入 / 建号（行式读写 /etc/passwd、/etc/group）/ 家目录补齐——
 //! **零容器内命令依赖**（无 sh/useradd/sed/awk/getent，alpine/busybox
@@ -24,7 +24,7 @@ impl Podman {
     ///
     /// 实现：exec 容器内 `/usr/bin/easytidy-ctool prepare --uid --gid
     /// [--name]`（argv 直传，不经 shell）——逻辑见
-    /// [`crate::incontainer::prepare_in_container`]。
+    /// [`crate::env::incontainer::prepare_in_container`]。
     ///
     /// 调用点：容器创建启动后 / 重建后 / 模板应用后（GUI 与 CLI 均调）。
     /// 幂等，重复调用无害（覆盖"用户改了 user_name 后重建"场景）。

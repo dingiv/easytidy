@@ -6,7 +6,7 @@ use tracing::warn;
 
 use easytidy_core::conf_template::{ConfTemplate, ConfTemplateInfo};
 use easytidy_core::configfile::ConfigFile;
-use easytidy_core::flavor::inject_passthrough;
+use easytidy_core::env::inject_passthrough;
 use easytidy_core::models::{ContainerConfig, MountConfig};
 use easytidy_core::podman::Podman;
 use easytidy_protocol::{ServerEnv, ServerEnvItem, ServerEnvResp};

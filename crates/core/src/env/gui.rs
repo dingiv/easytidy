@@ -60,7 +60,7 @@ pub struct GuiPassthroughMount {
 /// 失败都回退内嵌默认（构建期恒可解析），不阻断容器创建。
 pub fn load_rule() -> GuiPassthroughRule {
     // 内嵌默认 = 源码树文件的编译期副本（与 dev 读取同一真相源）。
-    const EMBEDDED: &str = include_str!("../../gui/assets/gui-passthrough.yaml");
+    const EMBEDDED: &str = include_str!("../../../gui/assets/gui-passthrough.yaml");
 
     if let Some(path) = easytidy_shared::loader!().resolve("ASSETS_DIR::gui-passthrough.yaml") {
         // prod 首跑播种：数据目录无文件时从内嵌默认写入（dev 指向已存在的源码树文件）。
@@ -87,7 +87,7 @@ pub fn load_rule() -> GuiPassthroughRule {
 /// 执行 GUI 透传注入：按规则展开占位符 + 幂等去重，追加到 params.mounts / env。
 ///
 /// 幂等：模板已声明的同 container_path 挂载 / 同 key env 跳过（以模板作者声明
-/// 为准）。供 [`crate::flavor::inject_gui_passthrough`] 调用。
+/// 为准）。供 [`crate::env::host::inject_gui_passthrough`] 调用。
 pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>) {
     let rule = load_rule();
     let vars = host_vars();

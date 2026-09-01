@@ -9,7 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
-use easytidy_core::flavor::inject_passthrough;
+use easytidy_core::env::inject_passthrough;
 use easytidy_core::models::{ContainerConfig, ContainerSummary};
 
 use crate::commands::socket::send_json_request;

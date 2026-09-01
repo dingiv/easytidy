@@ -291,8 +291,8 @@ Icon=test-icon
     /// 身份自发现：server 自身 uid 必有身份（名字可能为 uid<uid> 兜底）
     #[test]
     fn test_identity_self_discovery() {
-        let (uid, gid) = easytidy_core::incontainer::self_uid_gid();
-        let id = easytidy_core::incontainer::resolve_identity(
+        let (uid, gid) = easytidy_core::env::self_uid_gid();
+        let id = easytidy_core::env::resolve_identity(
             "root:x:0:0:root:/root:/bin/sh\n",
             uid,
             gid,
