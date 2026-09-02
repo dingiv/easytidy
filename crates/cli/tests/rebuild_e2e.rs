@@ -82,9 +82,13 @@ fn make_fake_bins(dir: &std::path::Path) -> easytidy_core::ContainerBins {
     let fake_ctool = dir.join("easytidy-ctool");
     fs::write(&fake_ctool, FAKE_CTOOL_SCRIPT).unwrap();
     fs::set_permissions(&fake_ctool, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_root_channel = dir.join("easytidy-root-channel");
+    fs::write(&fake_root_channel, "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(&fake_root_channel, std::fs::Permissions::from_mode(0o755)).unwrap();
     easytidy_core::ContainerBins {
         server: fake_server,
         ctool: fake_ctool,
+        root_channel: fake_root_channel,
     }
 }
 

@@ -18,13 +18,16 @@ use serde::{Deserialize, Serialize};
 /// 动态分配的 stream_id 空间不撞）。
 pub const ROOT_STREAM_ID: u32 = 1 << 30;
 
-/// 挂载共享 root 会话（客户端 → root-channel）
+/// 挂载 root 会话（客户端 → root-channel daemon）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RcAttach {
     /// 终端列数
     pub cols: u16,
     /// 终端行数
     pub rows: u16,
+    /// 要 attach 的 session_id（daemon 内）
+    #[serde(default)]
+    pub session_id: u64,
 }
 
 /// RcAttach 响应：root shell 存活状态（false = 会话已死，不应再渲染输入）
@@ -58,6 +61,38 @@ pub struct RcPingResp {
     pub alive: bool,
 }
 
+/// 新建 root 会话（client → daemon）：分配新 session、fork bash、返回 session_id
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RcNew {
+    pub cols: u16,
+    pub rows: u16,
+}
+
+/// RcNew 响应
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RcNewAck {
+    /// daemon 内 session id（attach 用）
+    pub session_id: u64,
+    /// bash 是否存活（false = 创建后立即退出）
+    pub alive: bool,
+    /// 流 ID（恒为 [`ROOT_STREAM_ID`]）
+    pub stream_id: u32,
+}
+
+/// 会话列表条目（root-channel 多 session 模型；rc.list 响应用）
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: u64,
+    pub alive: bool,
+    pub spawn_pid: u32,
+}
+
+/// RcList 响应
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RcListResp {
+    pub sessions: Vec<SessionInfo>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,7 +104,7 @@ mod tests {
 
     #[test]
     fn test_rc_attach_serde() {
-        let op = RcAttach { cols: 80, rows: 24 };
+        let op = RcAttach { cols: 80, rows: 24, session_id: 0 };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<RcAttach>(&json).unwrap(), op);
     }

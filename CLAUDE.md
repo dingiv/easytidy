@@ -21,6 +21,44 @@ invoke('env_snapshot', { name, snapshot_name: snapshotName || null });
 
 （Tauri v2 `#[tauri::command]` 默认按 camelCase 解析 JS 侧参数，Rust 参数保持 snake_case 即可。）
 
+### root-channel 容器内 spawn 的三个坑（2026-09-02 已修）
+
+root-channel daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加坑**导致
+"root 终端点了没反应、静默失败"：
+
+1. **busybox `setsid` 无 `-f`**：`setsid -f` 在 busybox 直接报 `unrecognized option: f`
+   退出，daemon 从未启动。正确形式 `setsid <exe> daemon`（setsid 自身 exec 成 daemon，
+   天然新 session）。
+2. **clap subcommand 不带 `--`**：`--daemon`/`--bootstrap` 非法；正确是 `daemon`/
+   `bootstrap`（positional subcommand）。GUI/CLI 调用路径也要同步。
+3. **`process_group(0)` 不可靠**：daemon 子进程继承 exec session，exec 流关闭被连带杀；
+   必须 `setsid` 建全新 session。
+
+另两个根因：
+- **bind-mount 钉死 inode**：容器创建时 bind-mount 单文件钉住宿主 inode，cargo 重建换新
+  inode 后**已有容器仍跑旧二进制**，必须重建容器。dev 改 root-channel 后记得重建容器。
+- **GUI 丢 exec input 句柄**：`open_new_root_session` 曾 `let _input = exec.input` 直接 drop
+  → client stdin 立即 EOF → client 退出 → 终端没反应。input 必须存入 `root_sink`。
+- **exec 必须用容器内路径**：GUI/CLI 曾传宿主 `root_channel_binary_path()`（dev 相对路径
+  `crates/core/../../target/...`），runc 在容器命名空间 stat 不到 → "no such file or
+  directory: OCI runtime attempted to invoke a command that was not found"。一律 exec
+  `Podman::ROOT_CHANNEL_TARGET`（`/usr/bin/easytidy-root-channel`），bind-mount 阶段才用
+  宿主路径。
+- **`rc.ping` 的 alive 语义**：daemon 曾把 alive 当作"是否有存活 session"，无 session 时返回
+  false → GUI `probe_root_channel` 误判 daemon 未就绪 → "启动后 1s 内未就绪"误报。ping 能
+  收到响应就说明 daemon 活着 → `alive` 恒 true；session 存活看 `rc.list`。
+- **root 终端 attach 幂等**：`root_terminal_attach` 曾每次 `client new` 新建 session——React
+  StrictMode dev 双 invoke / 断线重连会生成多个 root bash（`ps aux` 见多个 `client new` +
+  多个 bash）。修复：持 `root_attach_lock` 串行「查 `client list` → 有 alive session 则
+  `client attach <id>` 复用（daemon fan-out）、无则 `client new`」。保证每容器**一个** root
+  bash。纯 GUI 改动，无需重建容器。
+- **client 日志不进 stderr**：client 模式 stderr 被 podman exec 捕获桥进终端（残留日志
+  污染）。`main.rs` 按模式决定：client 只写共享文件、daemon/bootstrap 才写 stderr。
+
+**诊断手段**：daemon stderr 被 /dev/null，全部日志进容器内 `/run/easytidy/root-channel.log`
+（daemon/bootstrap/client 都写）。查看：CLI `easytidy root-channel-logs --container <n>` 或
+GUI `root_channel_logs` 命令 / bootstrap 失败时错误信息里附日志尾。
+
 ## 架构：core `env` 模块族（2026-09-01 已收敛）
 
 「运行时环境适配」（env 探测 + 配置生成）统一收敛到 `core::env` 模块族，作单一

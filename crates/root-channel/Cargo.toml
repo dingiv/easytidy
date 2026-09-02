@@ -19,6 +19,8 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 futures = { workspace = true }
 clap = { workspace = true }
-fs2 = { workspace = true }
+libc = { workspace = true }
+nix = { workspace = true, features = ["signal", "process", "fs", "term"] }
+portable-pty = { workspace = true }
 easytidy-core = { path = "../core" }
 easytidy-protocol = { path = "../protocol" }

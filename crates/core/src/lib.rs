@@ -28,7 +28,6 @@ pub mod libpod;
 pub mod models;
 pub mod pathvars;
 pub mod podman;
-pub mod root_channel;
 pub mod systemd;
 pub mod userenv;
 
@@ -172,21 +171,31 @@ pub fn ctool_binary_path() -> Result<PathBuf> {
 }
 
 /// 容器内二进制（ro bind-mount 进容器）：server（常驻）+ ctool（root
-/// 一次性工具）。`create_with_config`/`rebuild` 的统一输入。
+/// 一次性工具）+ root-channel（容器内 root 服务，daemon/client 双模式）。
+/// `create_with_config`/`rebuild` 的统一输入。
 #[derive(Debug, Clone)]
 pub struct ContainerBins {
     /// → `/usr/bin/easytidy-server`
     pub server: PathBuf,
     /// → `/usr/bin/easytidy-ctool`
     pub ctool: PathBuf,
+    /// → `/usr/bin/easytidy-root-channel`
+    ///
+    /// 新设计（2026-09-01）：root-channel 跑在**容器内**，由宿主 GUI/CLI 通过
+    /// `podman exec --user 0 <container> <bin> --{bootstrap|client ...}` 拉起。
+    /// 容器内 daemon 持有 0..N 个 root bash + PTY session；多 client 可同时
+    /// attach 同一 session（fan-out + 128KB 回放）。daemon 与容器共死，
+    /// **零主机端残留**。
+    pub root_channel: PathBuf,
 }
 
 impl ContainerBins {
-    /// 宿主侧解析两个二进制的安装位置（纯路径解析，无副作用）。
+    /// 宿主侧解析三个二进制的安装位置（纯路径解析，无副作用）。
     pub fn resolve() -> Result<Self> {
         Ok(Self {
             server: server_binary_path()?,
             ctool: ctool_binary_path()?,
+            root_channel: root_channel_binary_path()?,
         })
     }
 }
@@ -195,7 +204,7 @@ impl ContainerBins {
 ///
 /// 与 [`server_binary_path`] 完全同构：`ROOT_CHANNEL_BIN` namespace
 /// dev/prod 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。
-/// 供 `root_channel::ensure_running`（GUI/CLI 共用）spawn 用。
+/// 供 GUI/CLI `podman exec --user 0 <container> <bin> --{bootstrap|client}` 用。
 pub fn root_channel_binary_path() -> Result<PathBuf> {
     let loader = easytidy_shared::loader!();
     let mut candidates: Vec<PathBuf> = Vec::new();

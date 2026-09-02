@@ -30,6 +30,88 @@ pub struct ExecPty {
 }
 
 impl Podman {
+    /// 在容器内以指定用户起交互进程（**不分配 TTY**）并挂接 stdio。
+    ///
+    /// 与 [`exec_pty`] 区别：不分配 exec TTY——专为「exec'd 进程本身不需要
+    /// TTY、其内部再起 TTY 进程」的桥接场景设计：
+    ///
+    /// - root-channel client 模式：client 经 podman exec 起来，本身只需桥
+    ///   stdio 到容器内 daemon socket（无 TTY 概念）；TTY 在 daemon 内由
+    ///   `portable-pty` 给 bash 分配。避免 podman exec 给 client 分配 TTY
+    ///   引入的 `\r\n` 转换 / 行缓冲。
+    ///
+    /// `cmd` 不允许为空（client 必须指定 root-channel-client 子命令）。
+    /// 不写 `COLUMNS/LINES` 环境变量（无 TTY 概念）。
+    pub async fn exec_no_tty(
+        &self,
+        container: &str,
+        user: &str,
+        cmd: Vec<String>,
+    ) -> Result<ExecPty> {
+        if cmd.is_empty() {
+            return Err(Error::Config(
+                "exec_no_tty 需要明确指定 cmd（client 子命令）".to_string(),
+            ));
+        }
+        let exec = self
+            .docker
+            .create_exec::<String>(
+                container,
+                CreateExecOptions {
+                    attach_stdin: Some(true),
+                    attach_stdout: Some(true),
+                    attach_stderr: Some(true),
+                    tty: Some(false),
+                    env: None,
+                    cmd: Some(cmd),
+                    privileged: None,
+                    detach_keys: None,
+                    user: Some(user.to_string()),
+                    working_dir: None,
+                },
+            )
+            .await
+            .map_err(Error::Api)?;
+
+        match self
+            .docker
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: false,
+                    output_capacity: None,
+                }),
+            )
+            .await
+            .map_err(Error::Api)?
+        {
+            StartExecResults::Attached { output, input } => {
+                let output = output
+                    .map(|item| match item {
+                        Ok(log) => Ok(match log {
+                            bollard::container::LogOutput::StdOut { message }
+                            | bollard::container::LogOutput::StdErr { message }
+                            | bollard::container::LogOutput::Console { message }
+                            | bollard::container::LogOutput::StdIn { message } => {
+                                message.to_vec()
+                            }
+                        }),
+                        Err(e) => Err(Error::Api(e)),
+                    })
+                    .boxed();
+                Ok(ExecPty {
+                    exec_id: exec.id.clone(),
+                    input: Arc::new(Mutex::new(input)),
+                    output,
+                })
+            }
+            StartExecResults::Detached => {
+                Err(Error::Connect("exec 意外进入 detach 模式".to_string()))
+            }
+        }
+    }
+
     /// 在容器内以指定用户起交互进程（TTY）并挂接 stdio。
     ///
     /// - `user`：`"0"`（root）或 `"node"` 等（OCI exec user 语义）

@@ -29,6 +29,12 @@ pub enum AppMode {
 /// 单条 PTY 会话的写侧（该 PTY 专用连接的 sink）
 pub type PtySink = Arc<tokio::sync::Mutex<SplitSink<Framed<UnixStream, FrameCodec>, Frame>>>;
 
+/// root 终端 exec 的 stdin 写侧（`exec_no_tty` 的 `ExecPty.input`）。
+/// 与 server socket 的 `PtySink` 不同：root 终端经 `podman exec --client new`
+/// 桥接，输入写到 exec 流 → client 桥给 daemon PTY。
+pub type RootInputSink =
+    Arc<tokio::sync::Mutex<std::pin::Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>;
+
 /// 与容器 server 的连接状态机（客户端侧）。
 ///
 /// 与 `GuiSession.socket`（Option<Framed>）同步维护：`None`=Unconnected、
@@ -57,10 +63,14 @@ pub struct GuiSession {
     pub next_msg_id: AtomicU64,
     /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）
     pub active_ptys: Arc<tokio::sync::Mutex<HashMap<u32, PtySink>>>,
-    /// root 会话写侧（每容器一个共享 root shell，root 通道专用连接；
-    /// None = 未 attach。root 会话是单例——流 ID 恒为 ROOT_STREAM_ID，
-    /// 不需要 stream_id 索引）
-    pub root_sink: Arc<tokio::sync::Mutex<Option<PtySink>>>,
+    /// root 会话写侧（每容器一个共享 root shell；经 podman exec 的 client
+    /// stdin 桥到 daemon PTY。None = 未 attach。root 会话是单例——不需要
+    /// stream_id 索引）
+    pub root_sink: Arc<tokio::sync::Mutex<Option<RootInputSink>>>,
+    /// root 终端 attach 串行锁：`root_terminal_attach` 的「查 session → 建/attach」
+    /// 全程持锁，保证幂等（StrictMode 双 invoke 并发 attach 只建一个 root bash，
+    /// 第二个复用既有 session）。
+    pub root_attach_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// PTY 事件（通过 Channel 发送给前端）

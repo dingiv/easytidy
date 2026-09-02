@@ -27,7 +27,6 @@ use easytidy_core::configfile::ConfigFile;
 use easytidy_core::models::{ContainerConfig, NetworkMode};
 use easytidy_core::podman::Podman;
 use easytidy_protocol::ops::{PtyExited, PtyOpen, PtyOpenResp, PtyResize};
-use easytidy_protocol::rc::{RcAttach, RcResize, ROOT_STREAM_ID};
 use easytidy_protocol::{Frame, FrameCodec, Message, MsgKind, PROTOCOL_VERSION};
 use easytidy_protocol::{Handshake, HandshakeAck};
 
@@ -163,6 +162,16 @@ enum Commands {
         command: Vec<String>,
     },
 
+    /// 查看容器内 root-channel 日志（诊断 root 终端"静默失败"）
+    RootChannelLogs {
+        /// 容器名
+        #[arg(long)]
+        container: String,
+        /// 只看末尾 N 行（默认 100）
+        #[arg(long, default_value_t = 100)]
+        tail: usize,
+    },
+
     /// 自启动入口（systemd user unit 登录时触发）
     Boot {
         /// 容器名
@@ -259,6 +268,10 @@ async fn main() -> Result<()> {
         Commands::Open { container, command } => {
             let code = cmd_open(container, command, cli.config.clone()).await?;
             std::process::exit(code);
+        }
+        Commands::RootChannelLogs { container, tail } => {
+            cmd_root_channel_logs(&container, tail).await?;
+            Ok(())
         }
         Commands::Unexport {
             container,
@@ -1236,9 +1249,8 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
 /// 以容器 root 身份运行。
 ///
 /// 新身份模型下容器 server 不再是 root（协议 v2 删 as_root），root 走
-/// **宿主 root 通道**（`easytidy-root-channel` 进程，每容器一个共享
-/// root shell，容器内父 = conmon）：
-/// - **无命令** = 附接共享 root 终端（与 GUI root 终端同屏互见；
+/// **容器内 root 通道**（`easytidy-root-channel` daemon，exec --user 0 拉起）：
+/// - **无命令** = 附接 root 终端（与 GUI root 终端同屏互见；
 ///   CLI 退出 = **detach**，会话继续运行）
 /// - **带命令** = 一次性 root exec（`exec_oneshot`，拿真实退出码）
 async fn cmd_run_root(podman: &Podman, container: &str, command: Vec<String>) -> Result<i32> {
@@ -1258,113 +1270,53 @@ async fn cmd_run_root(podman: &Podman, container: &str, command: Vec<String>) ->
         return Ok(out.code);
     }
 
-    // 无命令 = 附接共享 root 终端
-    cmd_run_root_attach(container).await
+    // 无命令 = 附接 root 终端（容器内 root 通道）
+    cmd_run_root_attach(podman, container).await
 }
 
-/// 附接共享 root 终端（宿主 root 通道）：hello → rc.attach（2026 包裹
-/// 回放）→ 双向 I/O（stdin→Raw 帧、输出→stdout、SIGWINCH→rc.resize）。
-/// CLI 退出 = **detach**（drop 连接；root shell 与 root 通道继续运行）。
-async fn cmd_run_root_attach(container: &str) -> Result<i32> {
+/// 附接 root 终端（容器内 root 通道）。
+///
+/// 新设计（2026-09-01）：root-channel 跑在**容器内**。本函数：
+/// 1. 确保容器运行（`ensure_running`）
+/// 2. bootstrap daemon（`podman exec --user 0 <bin> bootstrap`，未跑则 spawn）
+/// 3. `exec_pty` 起 client（`<bin> client new`），client 桥 stdio 到 daemon PTY
+/// 4. 双向桥：CLI stdin→exec.input、exec.output→CLI stdout、SIGWINCH→resize_exec_pty
+///
+/// CLI 退出 = **detach**（drop exec stream；client exit，bash 状态由 daemon 保留）。
+async fn cmd_run_root_attach(podman: &Podman, container: &str) -> Result<i32> {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
-    // 按需拉起 root 通道进程 + 连接
-    let socket = easytidy_core::root_channel::ensure_running(container).await?;
-    let stream = UnixStream::connect(&socket)
-        .await
-        .with_context(|| format!("连接 root 通道 socket 失败：{}", socket.display()))?;
-    let mut framed = Framed::new(stream, FrameCodec::new());
+    // Step 1: 确保容器运行
+    ensure_running(podman, container).await?;
 
-    // 握手
-    framed
-        .send(Frame::Json(Message {
-            id: 1,
-            kind: MsgKind::Req,
-            op: "hello".to_string(),
-            payload: serde_json::to_value(Handshake {
-                v: PROTOCOL_VERSION,
-                client: "easytidy-cli".to_string(),
-                wants: vec!["root".to_string()],
-            })?,
-            err: None,
-        }))
-        .await
-        .context("发送 root 通道握手失败")?;
-    let ack = framed
-        .next()
-        .await
-        .context("接收 root 通道握手确认失败")?
-        .context("root 通道握手确认帧为空")?;
-    let Frame::Json(ack_msg) = ack else {
-        bail!("root 通道握手响应应为 JSON 帧");
-    };
-    if ack_msg.kind != MsgKind::Resp || ack_msg.op != "hello" {
-        bail!("root 通道握手响应格式错误");
-    }
+    // Step 2: bootstrap daemon（如未跑）。exec 必须用**容器内路径**
+    // `/usr/bin/easytidy-root-channel`（宿主相对路径 runc stat 不到）。
+    let root_channel_bin = easytidy_core::podman::Podman::ROOT_CHANNEL_TARGET;
+    bootstrap_root_daemon(podman, container, root_channel_bin).await?;
 
-    // attach：订阅共享会话 + 2026 包裹回放（恢复屏幕）。
-    // root-channel 先回回放 Raw 帧、后回 ack——按序读，途中 Raw 帧直写 stdout。
-    framed
-        .send(Frame::Json(Message {
-            id: 2,
-            kind: MsgKind::Req,
-            op: "rc.attach".to_string(),
-            payload: serde_json::to_value(RcAttach { cols, rows })?,
-            err: None,
-        }))
-        .await
-        .context("发送 rc.attach 失败")?;
+    // Step 3: exec client new（TTY：client 进程有 tty → 其内部 SIGWINCH 触发 rc.resize）
+    let cmd = vec![
+        root_channel_bin.to_string(),
+        "client".to_string(),
+        "new".to_string(),
+        "--cols".to_string(),
+        cols.to_string(),
+        "--rows".to_string(),
+        rows.to_string(),
+    ];
+    let exec = podman.exec_pty(container, "0", cols, rows, cmd).await?;
+    let exec_id = exec.exec_id.clone();
+    let mut input = exec.input;
+    let mut output = exec.output;
 
-    let mut stdout = tokio::io::stdout();
-    let mut attached = false;
-    while !attached {
-        let frame = framed
-            .next()
-            .await
-            .context("接收 rc.attach 响应失败")?
-            .context("rc.attach 响应帧为空")?;
-        match frame {
-            Frame::Raw { data, .. } => {
-                if !data.is_empty() {
-                    stdout.write_all(&data).await?;
-                    stdout.flush().await?;
-                }
-            }
-            Frame::Json(msg) if msg.op == "rc.attach" => {
-                if let Some(err) = msg.err {
-                    bail!("rc.attach 失败：{} - {}", err.code, err.message);
-                }
-                let ack: easytidy_protocol::rc::RcAttachAck = serde_json::from_value(msg.payload)?;
-                if !ack.alive {
-                    bail!("root 会话已死（容器未运行或 shell 已退出）");
-                }
-                attached = true;
-            }
-            _ => { /* 其它帧忽略 */ }
-        }
-    }
-
-    let mut stdout = tokio::io::stdout();
-
+    // CLI 终端进入 raw 模式（交互 shell）
     let mut raw_enabled = false;
     match terminal::enable_raw_mode() {
         Ok(()) => raw_enabled = true,
         Err(e) => debug!("非 TTY 场景，跳过 raw 模式：{}", e),
     }
 
-    // SIGWINCH → rc.resize（root-channel 转发 resize_exec）
-    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-    std::thread::spawn(move || {
-        use signal_hook::iterator::Signals;
-        let mut signals = Signals::new([signal_hook::consts::SIGWINCH]).expect("注册信号处理失败");
-        for _ in signals.forever() {
-            if signal_tx.send(()).is_err() {
-                break;
-            }
-        }
-    });
-
-    // stdin → Raw 帧（阻塞读 + channel 转发）
+    // stdin → exec.input（阻塞读 + channel 转发）
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
@@ -1382,61 +1334,66 @@ async fn cmd_run_root_attach(container: &str) -> Result<i32> {
         }
     });
 
+    // SIGWINCH → resize_exec_pty（重设 exec TTY → client 收到 SIGWINCH → rc.resize → bash PTY）
+    let (signal_tx, mut signal_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    std::thread::spawn(move || {
+        use signal_hook::iterator::Signals;
+        let mut signals = Signals::new([signal_hook::consts::SIGWINCH]).expect("注册信号处理失败");
+        for _ in signals.forever() {
+            if signal_tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut stdout = tokio::io::stdout();
     let mut exited = false;
     loop {
         tokio::select! {
-            // root 会话输出 → stdout
-            item = framed.next() => {
+            // exec output（client stdout，即 bash 输出）→ CLI stdout
+            item = output.next() => {
                 match item {
-                    Some(Ok(Frame::Raw { stream_id, data })) => {
-                        if stream_id == ROOT_STREAM_ID && !data.is_empty() {
-                            if let Err(e) = stdout.write_all(&data).await {
+                    Some(Ok(bytes)) => {
+                        if !bytes.is_empty() {
+                            if let Err(e) = stdout.write_all(&bytes).await {
                                 error!("写入 stdout 失败：{}", e);
                                 break;
                             }
                             let _ = stdout.flush().await;
                         }
                     }
-                    Some(Ok(Frame::Json(msg))) => {
-                        if msg.op == "rc.exited" {
-                            exited = true;
-                            break;
-                        }
-                        // rc.ping 等其它 JSON 忽略
-                    }
                     Some(Err(e)) => {
                         error!("root 通道读取错误：{}", e);
                         break;
                     }
                     None => {
-                        info!("root 通道连接关闭（root-channel 退出）");
+                        info!("root 通道连接关闭（client exit / bash 退出）");
+                        exited = true;
                         break;
                     }
                 }
             }
-            // stdin → Raw 帧
+            // stdin → exec.input
             Some(data) = stdin_rx.recv() => {
-                framed.send(Frame::Raw { stream_id: ROOT_STREAM_ID, data }).await?;
+                use tokio::io::AsyncWriteExt;
+                let mut w = input.lock().await;
+                if let Err(e) = w.write_all(&data).await {
+                    debug!("写 exec.input 失败：{e}");
+                    break;
+                }
             }
-            // SIGWINCH → rc.resize
+            // SIGWINCH → resize_exec_pty
             Some(()) = signal_rx.recv() => {
                 if let Ok((c, r)) = terminal::size() {
-                    if let Err(e) = framed.send(Frame::Json(Message {
-                        id: 3,
-                        kind: MsgKind::Req,
-                        op: "rc.resize".to_string(),
-                        payload: serde_json::to_value(RcResize { cols: c, rows: r })?,
-                        err: None,
-                    })).await {
-                        debug!("rc.resize 失败：{}", e);
+                    if let Err(e) = podman.resize_exec_pty(&exec_id, c, r).await {
+                        debug!("resize_exec_pty 失败：{e}");
                     }
                 }
             }
-            else => break,
         }
     }
 
-    // CLI 退出 = detach：drop 连接即退订（root shell 与 root 通道继续运行）
+    // CLI 退出 = detach：drop exec stream → client exit，bash 状态由 daemon 保留
     if raw_enabled {
         terminal::disable_raw_mode().context("恢复终端模式失败")?;
     }
@@ -1447,6 +1404,77 @@ async fn cmd_run_root_attach(container: &str) -> Result<i32> {
         info!("已 detach（root 会话继续运行，GUI root 终端同屏可见）");
     }
     Ok(0)
+}
+
+/// 查看容器内 root-channel 日志（`/run/easytidy/root-channel.log`）。
+/// 诊断 root 终端"静默失败"：daemon stderr 被 /dev/null，唯一线索在此文件。
+async fn cmd_root_channel_logs(container: &str, tail: usize) -> Result<()> {
+    let podman = Podman::connect().await?;
+    let cmd = vec![
+        "tail".to_string(),
+        "-n".to_string(),
+        tail.to_string(),
+        "/run/easytidy/root-channel.log".to_string(),
+    ];
+    let out = podman
+        .exec_oneshot(container, "0", cmd)
+        .await
+        .context("读取 root-channel 日志失败（容器运行中？tail 可用？）")?;
+    if out.stdout.trim().is_empty() {
+        println!("(root-channel 日志为空——daemon 可能未启动或无输出)");
+    } else {
+        print!("{}", out.stdout);
+    }
+    if !out.stderr.trim().is_empty() {
+        eprint!("{}", out.stderr);
+    }
+    Ok(())
+}
+
+/// 在容器内启动 root-channel daemon（如未运行）。
+async fn bootstrap_root_daemon(
+    podman: &Podman,
+    container: &str,
+    root_channel_bin: &str,
+) -> Result<()> {
+    // 先探测：client ping 看 daemon 是否活着
+    let ping_cmd = vec![
+        root_channel_bin.to_string(),
+        "client".to_string(),
+        "ping".to_string(),
+    ];
+    let probe = podman
+        .exec_oneshot(container, "0", ping_cmd.clone())
+        .await
+        .map(|o| o.stdout.contains("alive: true"))
+        .unwrap_or(false);
+    if probe {
+        return Ok(());
+    }
+
+    // 未跑 → bootstrap（spawn --daemon 子进程，bootstrap 本身 fire-and-forget 退出）
+    let boot_cmd = vec![
+        root_channel_bin.to_string(),
+        "bootstrap".to_string(),
+    ];
+    podman
+        .exec_oneshot(container, "0", boot_cmd)
+        .await
+        .context("bootstrap root-channel daemon 失败")?;
+
+    // 等 daemon 就绪
+    for _ in 0..40 {
+        let alive = podman
+            .exec_oneshot(container, "0", ping_cmd.clone())
+            .await
+            .map(|o| o.stdout.contains("alive: true"))
+            .unwrap_or(false);
+        if alive {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    bail!("root-channel daemon 未就绪（2s 超时）")
 }
 
 #[cfg(test)]

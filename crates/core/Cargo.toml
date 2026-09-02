@@ -48,10 +48,12 @@ SERVER_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/u
 # 命令（无 sh/useradd/sed）。dev 须 `cargo build -p easytidy-ctool
 # --target x86_64-unknown-linux-musl`（gui beforeDevCommand 已含）。
 CTOOL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
-# root 通道进程（宿主用户身份，rootless socket exec --user 0 持有容器内 root
-# shell）。**宿主原生二进制**（非容器内进程）：dev = 原生 target/debug
-# （SERVER_BIN 是 musl 目标，二者不同）；prod 随安装包发布到 /usr/bin。
-ROOT_CHANNEL_BIN = { dev = "../../target/debug/", prod = "/usr/bin" }
+# root 通道进程（**容器内** root 服务：daemon 持 PTY + client 桥 stdio；宿主经
+# `podman exec --user 0 <container> <bin> --{bootstrap|client}` 拉起）。与 server/
+# ctool 同为 musl 静态二进制（bind-mount 进容器，不依赖镜像内 libc）。dev 须
+# `cargo build -p easytidy-root-channel --target x86_64-unknown-linux-musl`；prod
+# 随安装包发布到 /usr/bin。
+ROOT_CHANNEL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
 # GUI 透传规则等内置资源（内容，非代码）：dev = 源码树 crates/gui/assets
 # （core manifest 的 ../gui/assets）；prod = 数据目录 ~/.easytidy/assets（首跑从
 # 内嵌默认播种、可被用户定制）。core 经 ASSETS_DIR:: 加载（见 gui_passthrough.rs）。

@@ -35,6 +35,18 @@ impl Podman {
     /// ctool 二进制的容器内挂载目标（prepare_container 的 exec 目标）。
     pub(crate) const CTOOL_TARGET: &str = "/usr/bin/easytidy-ctool";
 
+    /// root-channel 二进制的容器内挂载目标。
+    ///
+    /// 新设计：root-channel 跑在容器内（`bootstrap` 启动 daemon、`client`
+    /// 桥接 stdio）。宿主页通过 `podman exec --user 0` 拉起，daemon 与容器
+    /// 共生死。
+    ///
+    /// **exec 必须用容器内路径**（宿主侧 `root_channel_binary_path()` 是 dev
+    /// 相对路径 `crates/core/../../target/...`，runc 在容器命名空间 stat 不到
+    /// → "no such file or directory"）。GUI/CLI 拉 root-channel 一律 exec
+    /// 本常量。
+    pub const ROOT_CHANNEL_TARGET: &str = "/usr/bin/easytidy-root-channel";
+
     /// 连接到 rootless podman socket 并协商 API 版本。
     ///
     /// 路径规则：$XDG_RUNTIME_DIR/podman/podman.sock（缺失则 Error::NoXdgRuntime）。
@@ -214,7 +226,8 @@ impl Podman {
         labels.insert("manager".to_string(), "easytidy".to_string());
         labels.insert("easytidy.name".to_string(), name.to_string());
 
-        // 构建挂载：server 二进制 + ctool 二进制 + socket 目录 + 用户配置的 bind mounts
+        // 构建挂载：server 二进制 + ctool 二进制 + root-channel 二进制 + socket 目录 +
+        // 用户配置的 bind mounts
         let mut mounts = vec![
             // Server 二进制（只读）
             Mount {
@@ -230,6 +243,16 @@ impl Podman {
                 typ: Some(MountTypeEnum::BIND),
                 source: Some(bins.ctool.to_string_lossy().to_string()),
                 target: Some(Self::CTOOL_TARGET.to_string()),
+                read_only: Some(true),
+                ..Default::default()
+            },
+            // root-channel 二进制（只读）：容器内 root 服务（--bootstrap 起 daemon、
+            // --client 桥 stdio）。宿主 GUI/CLI 经 `podman exec --user 0` 拉起，
+            // daemon 持 PTY master 跨 client 重连保 bash 状态。
+            Mount {
+                typ: Some(MountTypeEnum::BIND),
+                source: Some(bins.root_channel.to_string_lossy().to_string()),
+                target: Some(Self::ROOT_CHANNEL_TARGET.to_string()),
                 read_only: Some(true),
                 ..Default::default()
             },

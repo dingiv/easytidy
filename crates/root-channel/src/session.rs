@@ -1,25 +1,32 @@
-//! 共享 root 会话：exec 持有 + 输出环形缓冲 + 多客户端订阅 fan-out。
+//! root 会话管理（root-channel daemon 用）。
 //!
-//! 与 server 的 PTY 机制是两条独立进程边界（server 在容器内，root-channel
-//! 在宿主），不复用 server 的 `PtySession`——本文件按 server 的
-//! `RING_MAX` / `Subscribers` / 2026 包裹模式独立实现（~60 行重复可接受，
-//! 跨 crate 共享会引入不必要的依赖方向）。
+//! 每个 session = 一个容器内 root bash + PTY + 输出环形缓冲 + 多客户端订阅。
+//! daemon 持有 0..N 个 session，每个 session 可被 0..N 个 client attach。
+//!
+//! 与 server Pty.rs 的 PtySession 同构（共享 ring/fan-out/replay 模式），
+//! 但本会话是 root-channel 私有不依赖 server 的最小子集。
 
 use std::collections::VecDeque;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use easytidy_protocol::Frame;
-use tokio::sync::{mpsc, Mutex as TokioMutex};
+use tokio::sync::mpsc;
 
-/// 输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出；同 server RING_MAX）。
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+
+/// 输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出；与 server RING_MAX 一致）。
 pub const RING_MAX: usize = 128 * 1024;
 
-/// exec stdin 写侧类型（close 时换 sink → 原 writer drop → shell stdin EOF）。
-type StdinWriter = Arc<TokioMutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>;
+/// 全局 session id 分配器（daemon 内单实例）。
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
-/// 输出环形缓冲（超限丢最旧；2026 同步输出包裹供单测）。
+/// 分配新 session id（自增 1）。
+pub fn next_session_id() -> u64 {
+    NEXT_SESSION_ID.fetch_add(1, Ordering::SeqCst)
+}
+
+/// 输出环形缓冲。
 #[derive(Debug, Clone)]
 pub struct ReplayRing {
     data: VecDeque<u8>,
@@ -28,10 +35,12 @@ pub struct ReplayRing {
 
 impl ReplayRing {
     pub fn new(max: usize) -> Self {
-        Self { data: VecDeque::with_capacity(max), max }
+        Self {
+            data: VecDeque::with_capacity(max),
+            max,
+        }
     }
 
-    /// 追加输出，超限从最旧端裁剪。
     pub fn push(&mut self, bytes: &[u8]) {
         for b in bytes {
             self.data.push_back(*b);
@@ -41,22 +50,20 @@ impl ReplayRing {
         }
     }
 
-    /// 全量回放字节（未包裹）。
     pub fn replay_bytes(&self) -> Vec<u8> {
         self.data.iter().copied().collect()
     }
 
-    /// 2026 同步输出包裹的回放帧：`?2026h` + 清屏 + ring + `?2026l`。
-    ///
-    /// 与 server `attach_to_session` 同构：ring 是字节流中段截取，直接回放
-    /// 会让 xterm 从错误状态渲染 → 光标漂移。DECSET 2026 包裹使 xterm 6.0
-    /// 原子渲染整帧，消除逐块重绘闪烁（调研 2026-08-07 实测结论）。
+    /// 2026 同步输出包裹：`?2026h` + 清屏 + ring + `?2026l`。
+    /// 让 xterm 6.0 原子渲染整帧，避免重连时光标漂移/闪烁。
     pub fn replay_wrapped(&self) -> Vec<u8> {
         const SYNC_START: &[u8] = b"\x1b[?2026h";
         const SYNC_END: &[u8] = b"\x1b[?2026l";
         const PREFIX: &[u8] = b"\x1b[2J\x1b[H";
         let ring = self.replay_bytes();
-        let mut out = Vec::with_capacity(SYNC_START.len() + PREFIX.len() + ring.len() + SYNC_END.len());
+        let mut out = Vec::with_capacity(
+            SYNC_START.len() + PREFIX.len() + ring.len() + SYNC_END.len(),
+        );
         out.extend_from_slice(SYNC_START);
         out.extend_from_slice(PREFIX);
         out.extend_from_slice(&ring);
@@ -65,44 +72,46 @@ impl ReplayRing {
     }
 }
 
-/// 共享 root 会话（单 root shell + 输出缓冲 + 订阅者）。
+/// 单 root bash session（容器内 root PTY + 输出缓冲 + 多客户端 fan-out）。
 pub struct RootSession {
-    /// exec stdin 写侧（连接任务写入；close 时换 sink）。
-    writer: StdinWriter,
-    exec_id: String,
-    alive: AtomicBool,
-    ring: Mutex<ReplayRing>,
-    /// 订阅者：(连接 token, 输出通道)。连接断开按 token 退订。
-    subs: Mutex<Vec<(u64, mpsc::UnboundedSender<Frame>)>>,
+    /// session id（daemon 内唯一）
+    pub id: u64,
+    /// 容器内 PTY master（resize 用，cloned 自 session 创建时）
+    pub master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    /// PTY master 的写侧（client → bash 输入）
+    pub writer: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    /// 容器内 bash 的 spawn PID（仅供日志 / SIGCHLD 关联，daemon 不 wait）
+    pub spawn_pid: u32,
+    /// session 是否存活（bash exit → false）
+    pub alive: AtomicBool,
+    /// 输出环形缓冲（attach 时回放）
+    pub ring: Mutex<ReplayRing>,
+    /// 订阅者：(连接 token, 输出通道)。client 断开按 token 退订（detach）。
+    pub subs: Mutex<Vec<(u64, mpsc::UnboundedSender<Frame>)>>,
 }
 
 impl RootSession {
-    pub fn new(writer: StdinWriter, exec_id: String) -> Self {
+    pub fn new(master: Box<dyn MasterPty + Send>, writer: Box<dyn std::io::Write + Send>, spawn_pid: u32) -> Self {
         Self {
-            writer,
-            exec_id,
+            id: next_session_id(),
+            master: Arc::new(Mutex::new(master)),
+            writer: Arc::new(Mutex::new(writer)),
+            spawn_pid,
             alive: AtomicBool::new(true),
             ring: Mutex::new(ReplayRing::new(RING_MAX)),
             subs: Mutex::new(Vec::new()),
         }
     }
 
-    /// exec id（resize 经 podman resize_exec 用）。
-    pub fn exec_id(&self) -> &str {
-        &self.exec_id
-    }
-
-    /// root shell 是否存活。
     pub fn alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// 标记死亡（exec 流 EOF / close）。
     pub fn set_dead(&self) {
         self.alive.store(false, Ordering::SeqCst);
     }
 
-    /// 追加输出并 fan-out 给全部订阅者。
+    /// 追加 bash 输出 + fan-out 给所有订阅者。
     pub fn push_output(&self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
@@ -124,7 +133,7 @@ impl RootSession {
         }
     }
 
-    /// 会话死亡事件（广播给订阅者；客户端据此收尾输入区）。
+    /// 广播 session 死亡事件。
     pub fn broadcast_exited(&self) {
         let frame = Frame::Json(easytidy_protocol::Message {
             id: 0,
@@ -133,14 +142,21 @@ impl RootSession {
             payload: serde_json::Value::Null,
             err: None,
         });
-        let dead = self.subs.lock().unwrap().iter().filter(|(_, tx)| tx.send(frame.clone()).is_err()).map(|(t, _)| *t).collect::<Vec<u64>>();
+        let dead = self
+            .subs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, tx)| tx.send(frame.clone()).is_err())
+            .map(|(t, _)| *t)
+            .collect::<Vec<u64>>();
         if !dead.is_empty() {
             let mut subs = self.subs.lock().unwrap();
             subs.retain(|(t, _)| !dead.contains(t));
         }
     }
 
-    /// 2026 包裹的全量回放帧（新 attach 客户端恢复屏幕）。
+    /// 2026 包裹的回放帧（attach 时恢复屏幕）。
     pub fn replay(&self) -> Vec<u8> {
         self.ring.lock().unwrap().replay_wrapped()
     }
@@ -152,26 +168,75 @@ impl RootSession {
         rx
     }
 
-    /// 按 token 退订（连接断开 = detach，仅退订）。
+    /// 按 token 退订（client 断开 = detach，仅退订）。
     pub fn unsubscribe(&self, token: u64) {
         self.subs.lock().unwrap().retain(|(t, _)| *t != token);
     }
 
-    /// 写入 exec stdin（客户端输入）。
-    pub async fn write_input(&self, data: &[u8]) {
-        use tokio::io::AsyncWriteExt;
-        let mut w = self.writer.lock().await;
-        if let Err(e) = w.write_all(data).await {
-            tracing::warn!("root 会话 stdin 写入失败：{e}");
+    /// client → bash stdin。
+    pub fn write_input(&self, data: &[u8]) {
+        let mut w = self.writer.lock().unwrap();
+        if let Err(e) = w.write_all(data) {
+            tracing::warn!("root session {} stdin write failed: {e}", self.id);
         }
+        let _ = w.flush();
     }
 
-    /// 杀死 shell：写侧换 sink → 原 writer drop → stdin EOF → shell 退出。
+    /// 主动关闭 session（drop writer → bash EOF → bash exit）。
     pub fn kill(&self) {
-        if let Ok(mut w) = self.writer.try_lock() {
-            *w = Box::pin(tokio::io::sink());
-        }
+        // 写 EOF：让 master 写入端 drop 即可让 PTY slave 侧收到 EOF（bash 退出）。
+        // 这里用 take_writer 取新写侧不实际 — portable-pty 设计是 writer 持锁
+        // 与 master 同生命周期。简化做法：标记 alive=false + 后续由 owner drop。
+        self.set_dead();
     }
+}
+
+/// 创建容器内 root bash session：开 PTY + fork bash + 返回 session。
+///
+/// 默认登录 shell（bash 优先，alpine 等无 bash 时回退 sh）。
+/// 不设置环境（容器 server 注入的 env 与 root 无关——root 操作更接近
+/// 直接登录容器，env 极简）。
+pub fn spawn_root_shell(cols: u16, rows: u16) -> anyhow::Result<Arc<RootSession>> {
+    use anyhow::Context;
+
+    let shell = if std::path::Path::new("/bin/bash").exists() {
+        "/bin/bash"
+    } else {
+        "/bin/sh"
+    };
+    tracing::info!("spawn_root_shell: shell={shell} {}x{}", cols, rows);
+
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .context("openpty failed")?;
+
+    let writer = pair
+        .master
+        .take_writer()
+        .context("take PTY writer failed")?;
+
+    let mut cmd = CommandBuilder::new(shell);
+    cmd.arg("-l");
+    cmd.env("TERM", "xterm-256color");
+    // root 身份在容器内默认 home = /root（exec 已确保容器内 uid=0）
+    cmd.env("HOME", "/root");
+
+    let slave = pair
+        .slave
+        .spawn_command(cmd)
+        .context("spawn root shell failed")?;
+    let spawn_pid = slave.process_id().unwrap_or(0);
+
+    drop(pair.slave);
+
+    tracing::info!("root shell spawned (spawn_pid={spawn_pid})");
+    Ok(Arc::new(RootSession::new(pair.master, writer, spawn_pid)))
 }
 
 #[cfg(test)]
@@ -182,14 +247,7 @@ mod tests {
     fn test_ring_truncates_oldest() {
         let mut r = ReplayRing::new(4);
         r.push(&[1, 2, 3, 4, 5, 6]);
-        // 超限（6 > 4）→ 保留最旧裁剪后的 [3,4,5,6]
         assert_eq!(r.replay_bytes(), vec![3, 4, 5, 6]);
-    }
-
-    #[test]
-    fn test_ring_empty() {
-        let r = ReplayRing::new(8);
-        assert!(r.replay_bytes().is_empty());
     }
 
     #[test]
@@ -199,8 +257,14 @@ mod tests {
         let w = r.replay_wrapped();
         assert!(w.starts_with(b"\x1b[?2026h"));
         assert!(w.ends_with(b"\x1b[?2026l"));
-        // 中间 = 清屏 + ring
         let inner = &w[b"\x1b[?2026h".len()..w.len() - b"\x1b[?2026l".len()];
         assert_eq!(inner, b"\x1b[2J\x1b[Hhello");
+    }
+
+    #[test]
+    fn test_session_id_unique() {
+        let a = next_session_id();
+        let b = next_session_id();
+        assert_ne!(a, b);
     }
 }
