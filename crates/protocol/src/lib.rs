@@ -4,7 +4,7 @@
 //! 长度前缀分帧 + 1 字节判别符（`0x01` JSON 消息 / `0x02` 原始流数据），
 //! 以及全部消息族（pty / fs / apps / passthrough / config / lifecycle）。
 //!
-//! 另含 root-channel 专用载荷（`rc` 模块）：宿主 `easytidy-root-channel`
+//! 另含 root-channel 专用载荷（`rc` 模块）：`easytidy-dock` client↔daemon
 //! 进程与 GUI/CLI 客户端之间的 root 终端通道（同帧层、同握手）。
 //!
 //! 详见 docs/08-requirements.md「Socket 协议 v0」与实施计划。

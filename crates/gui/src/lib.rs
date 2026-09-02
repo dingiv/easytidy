@@ -143,7 +143,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::root::root_terminal_detach,
             commands::root::root_terminal_close,
             commands::root::root_session_list,
-            commands::root::root_channel_logs,
+            commands::root::dock_logs,
             // 文件系统 + 传输
             commands::fs::fs_list,
             commands::fs::fs_read,

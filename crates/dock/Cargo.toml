@@ -1,11 +1,11 @@
 [package]
-name = "easytidy-root-channel"
+name = "easytidy-dock"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "easytidy-root-channel"
+name = "easytidy-dock"
 path = "src/main.rs"
 
 [dependencies]

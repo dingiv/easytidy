@@ -44,9 +44,9 @@ fn check(cond: bool, msg: &str) -> Result<(), String> {
     }
 }
 
-/// 假 ctool 脚本（仅 e2e）：最小模拟 `prepare`（alpine/busybox 工具集）：
+/// 假 dock 脚本（仅 e2e）：最小模拟 `prepare`（alpine/busybox 工具集）：
 /// 幂等（同名已存在即退出）→ 清运行时占位条目（home=/ 的该 uid 条目）→
-/// adduser 建号 → mkdir home。真实 ctool 是纯 Rust 二进制（零命令依赖），
+/// adduser 建号 → mkdir home。真实 dock 是纯 Rust 二进制（零命令依赖），
 /// 此脚本只用于不构建 musl 二进制的 e2e 环境。
 const FAKE_CTOOL_SCRIPT: &str = r#"#!/bin/sh
 set -u
@@ -72,23 +72,19 @@ fi
 exit 0
 "#;
 
-/// 假容器内二进制（e2e 专用）：server = sleep 保活；ctool = 最小 prepare
+/// 假容器内二进制（e2e 专用）：server = sleep 保活；dock = 最小 prepare
 /// 模拟。测试直接传假路径，不依赖任何环境变量解析。
 fn make_fake_bins(dir: &std::path::Path) -> easytidy_core::ContainerBins {
     use std::os::unix::fs::PermissionsExt;
     let fake_server = dir.join("easytidy-server");
     fs::write(&fake_server, "#!/bin/sh\nsleep 300\n").unwrap();
     fs::set_permissions(&fake_server, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let fake_ctool = dir.join("easytidy-ctool");
-    fs::write(&fake_ctool, FAKE_CTOOL_SCRIPT).unwrap();
-    fs::set_permissions(&fake_ctool, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let fake_root_channel = dir.join("easytidy-root-channel");
-    fs::write(&fake_root_channel, "#!/bin/sh\nexit 0\n").unwrap();
-    fs::set_permissions(&fake_root_channel, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let fake_dock = dir.join("easytidy-dock");
+    fs::write(&fake_dock, FAKE_CTOOL_SCRIPT).unwrap();
+    fs::set_permissions(&fake_dock, std::fs::Permissions::from_mode(0o755)).unwrap();
     easytidy_core::ContainerBins {
         server: fake_server,
-        ctool: fake_ctool,
-        root_channel: fake_root_channel,
+        dock: fake_dock,
     }
 }
 
@@ -299,8 +295,8 @@ async fn identity_prepare_user_and_root_exec() {
     let uid: u32 = 1011;
     let gid: u32 = 1011;
 
-    // 假容器内二进制（server = sleep 保活；ctool = 最小 prepare 模拟——
-    // 真实 ctool 是 musl 静态二进制，e2e 不构建它）
+    // 假容器内二进制（server = sleep 保活；dock = 最小 prepare 模拟——
+    // 真实 dock 是 musl 静态二进制，e2e 不构建它）
     let bins = make_fake_bins(tmp.path());
 
     // 配置：命名用户 + 显式 uid/gid（keep-id 开——与宿主 uid 无关，

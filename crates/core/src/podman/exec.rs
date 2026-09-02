@@ -35,12 +35,12 @@ impl Podman {
     /// 与 [`exec_pty`] 区别：不分配 exec TTY——专为「exec'd 进程本身不需要
     /// TTY、其内部再起 TTY 进程」的桥接场景设计：
     ///
-    /// - root-channel client 模式：client 经 podman exec 起来，本身只需桥
+    /// - easytidy-dock client 模式：client 经 podman exec 起来，本身只需桥
     ///   stdio 到容器内 daemon socket（无 TTY 概念）；TTY 在 daemon 内由
     ///   `portable-pty` 给 bash 分配。避免 podman exec 给 client 分配 TTY
     ///   引入的 `\r\n` 转换 / 行缓冲。
     ///
-    /// `cmd` 不允许为空（client 必须指定 root-channel-client 子命令）。
+    /// `cmd` 不允许为空（client 必须指定 easytidy-dock client 子命令）。
     /// 不写 `COLUMNS/LINES` 环境变量（无 TTY 概念）。
     pub async fn exec_no_tty(
         &self,

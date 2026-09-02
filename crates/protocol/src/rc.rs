@@ -1,4 +1,4 @@
-//! root-channel 专用载荷（`easytidy-root-channel` 进程 ↔ GUI/CLI 客户端）。
+//! root-channel 专用载荷（`easytidy-dock` daemon ↔ client 进程）。
 //!
 //! 与 server 协议共用帧层（`frame.rs`）与握手（`message.rs` `hello`），
 //! op 名前缀 `rc.`。语义：每容器一个**共享 root shell**（宿主 rootless

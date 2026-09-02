@@ -1,10 +1,10 @@
-//! root 会话管理（root-channel daemon 用）。
+//! root 会话管理（easytidy-dock daemon 用）。
 //!
 //! 每个 session = 一个容器内 root bash + PTY + 输出环形缓冲 + 多客户端订阅。
 //! daemon 持有 0..N 个 session，每个 session 可被 0..N 个 client attach。
 //!
 //! 与 server Pty.rs 的 PtySession 同构（共享 ring/fan-out/replay 模式），
-//! 但本会话是 root-channel 私有不依赖 server 的最小子集。
+//! 但本会话是 easytidy-dock 私有不依赖 server 的最小子集。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

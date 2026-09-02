@@ -43,20 +43,18 @@ impl Podman {
     /// server 二进制的容器内挂载目标（容器 PID 1 入口）。
     pub const SERVER_TARGET: &str = "/run/easytidy-bin/easytidy-server";
 
-    /// ctool 二进制的容器内挂载目标（prepare_container 的 exec 目标）。
-    pub(crate) const CTOOL_TARGET: &str = "/run/easytidy-bin/easytidy-ctool";
-
-    /// root-channel 二进制的容器内挂载目标。
+    /// dock 二进制的容器内挂载目标（容器内 root 工具：prepare 容器准备 +
+    /// daemon/bootstrap/client root 终端通道，源自 root-channel + ctool 合并）。
     ///
-    /// 新设计：root-channel 跑在容器内（`bootstrap` 启动 daemon、`client`
-    /// 桥接 stdio）。宿主页通过 `podman exec --user 0` 拉起，daemon 与容器
-    /// 共生死。
+    /// - `prepare`：prepare_container 的 exec 目标（fontconfig/建号/家目录）。
+    /// - `daemon`/`bootstrap`/`client`：root 终端通道（`bootstrap` 起 daemon、
+    ///   `client` 桥 stdio）。宿主页通过 `podman exec --user 0` 拉起，daemon
+    ///   与容器共生死。
     ///
-    /// **exec 必须用容器内路径**（宿主侧 `root_channel_binary_path()` 是 dev
+    /// **exec 必须用容器内路径**（宿主侧 `dock_binary_path()` 是 dev
     /// 相对路径 `crates/core/../../target/...`，runc 在容器命名空间 stat 不到
-    /// → "no such file or directory"）。GUI/CLI 拉 root-channel 一律 exec
-    /// 本常量。
-    pub const ROOT_CHANNEL_TARGET: &str = "/run/easytidy-bin/easytidy-root-channel";
+    /// → "no such file or directory"）。GUI/CLI 一律 exec 本常量。
+    pub const DOCK_TARGET: &str = "/run/easytidy-bin/easytidy-dock";
 
     /// 连接到 rootless podman socket 并协商 API 版本。
     ///
@@ -187,13 +185,13 @@ impl Podman {
     /// 参数：
     /// - name: 容器名
     /// - image: 镜像（如 "docker.io/library/alpine:latest"）
-    /// - bins: 容器内二进制（server + ctool，宿主绝对路径，均 ro bind-mount 进容器）
+    /// - bins: 容器内二进制（server + dock，宿主绝对路径，均 ro bind-mount 进容器）
     /// - config: 容器配置（mounts + 网络模式/端口映射）
     ///
     /// 在 `create()` 的既有基础之上追加（rebuild 保留同一套基础）：
     /// - HostConfig.init = true（catatonit = PID 1）
     /// - Cmd = [<server-bin>, "--socket", "/run/easytidy/server.sock"]
-    /// - Bind mounts: server 二进制（ro）+ ctool 二进制（ro）+ socket 目录（rw）
+    /// - Bind mounts: server 二进制（ro）+ dock 二进制（ro）+ socket 目录（rw）
     ///   + config.params.mounts（宿主路径须已存在）
     /// - 标签: manager=easytidy + easytidy.name=<name>
     /// - 网络: `Host` → `network_mode = "host"`（端口映射无意义，忽略并告警）；
@@ -237,8 +235,8 @@ impl Podman {
         labels.insert("manager".to_string(), "easytidy".to_string());
         labels.insert("easytidy.name".to_string(), name.to_string());
 
-        // 构建挂载：server 二进制 + ctool 二进制 + root-channel 二进制 + socket 目录 +
-        // 用户配置的 bind mounts
+        // 构建挂载：server 二进制 + dock 二进制 + socket 目录 + 用户配置的
+        // bind mounts
         let mut mounts = vec![
             // Server 二进制（只读）
             Mount {
@@ -248,22 +246,12 @@ impl Podman {
                 read_only: Some(true),
                 ..Default::default()
             },
-            // ctool 二进制（只读）：容器内 root 一次性工具（prepare_container
-            // 的 exec 目标；musl 静态，零容器内命令依赖）
+            // dock 二进制（只读）：容器内 root 工具（prepare 容器准备 + root
+            // 终端通道 daemon/client；musl 静态，零容器内命令依赖）
             Mount {
                 typ: Some(MountTypeEnum::BIND),
-                source: Some(bins.ctool.to_string_lossy().to_string()),
-                target: Some(Self::CTOOL_TARGET.to_string()),
-                read_only: Some(true),
-                ..Default::default()
-            },
-            // root-channel 二进制（只读）：容器内 root 服务（--bootstrap 起 daemon、
-            // --client 桥 stdio）。宿主 GUI/CLI 经 `podman exec --user 0` 拉起，
-            // daemon 持 PTY master 跨 client 重连保 bash 状态。
-            Mount {
-                typ: Some(MountTypeEnum::BIND),
-                source: Some(bins.root_channel.to_string_lossy().to_string()),
-                target: Some(Self::ROOT_CHANNEL_TARGET.to_string()),
+                source: Some(bins.dock.to_string_lossy().to_string()),
+                target: Some(Self::DOCK_TARGET.to_string()),
                 read_only: Some(true),
                 ..Default::default()
             },

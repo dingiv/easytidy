@@ -145,18 +145,19 @@ pub fn server_binary_path() -> Result<PathBuf> {
     })
 }
 
-/// 解析 ctool 二进制路径（宿主侧）。
+/// 解析 dock 二进制路径（宿主侧）。
 ///
-/// 与 [`server_binary_path`] 完全同构：`CTOOL_BIN` namespace dev/prod
-/// 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。ctool 是容器内
-/// root 一次性工具（`/run/easytidy-bin/easytidy-ctool`），与 server 同为 musl
-/// 静态二进制（同一构建目标，见 CTOOL_BIN namespace 注释）。
-pub fn ctool_binary_path() -> Result<PathBuf> {
+/// 与 [`server_binary_path`] 完全同构：`DOCK_BIN` namespace dev/prod
+/// 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。dock 是容器内
+/// root 工具（`/run/easytidy-bin/easytidy-dock`：prepare 容器准备 +
+/// daemon/client root 终端通道，源自 root-channel + ctool 合并），与
+/// server 同为 musl 静态二进制（同一构建目标，见 DOCK_BIN namespace 注释）。
+pub fn dock_binary_path() -> Result<PathBuf> {
     let loader = easytidy_shared::loader!();
     let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.extend(loader.ns_candidates("CTOOL_BIN", "easytidy-ctool"));
+    candidates.extend(loader.ns_candidates("DOCK_BIN", "easytidy-dock"));
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-ctool"));
+        candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-dock"));
     }
     candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
         let tried = candidates
@@ -165,63 +166,36 @@ pub fn ctool_binary_path() -> Result<PathBuf> {
             .collect::<Vec<_>>()
             .join("\n");
         Error::Connect(format!(
-            "easytidy-ctool 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
+            "easytidy-dock 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
         ))
     })
 }
 
 /// 容器内二进制（ro bind-mount 进容器 `/run/easytidy-bin/`）：server（常驻）
-/// + ctool（root 一次性工具）+ root-channel（容器内 root 服务，daemon/client
-/// 双模式）。`create_with_config`/`rebuild` 的统一输入。
+/// + dock（容器内 root 工具：prepare 容器准备 + daemon/client root 终端
+/// 通道）。`create_with_config`/`rebuild` 的统一输入。
 #[derive(Debug, Clone)]
 pub struct ContainerBins {
     /// → `/run/easytidy-bin/easytidy-server`
     pub server: PathBuf,
-    /// → `/run/easytidy-bin/easytidy-ctool`
-    pub ctool: PathBuf,
-    /// → `/run/easytidy-bin/easytidy-root-channel`
+    /// → `/run/easytidy-bin/easytidy-dock`
     ///
-    /// 新设计（2026-09-01）：root-channel 跑在**容器内**，由宿主 GUI/CLI 通过
-    /// `podman exec --user 0 <container> <bin> --{bootstrap|client ...}` 拉起。
-    /// 容器内 daemon 持有 0..N 个 root bash + PTY session；多 client 可同时
-    /// attach 同一 session（fan-out + 128KB 回放）。daemon 与容器共死，
+    /// 2026-09-02：由 root-channel 与 ctool 合并而来，跑在**容器内**，由宿主
+    /// GUI/CLI 通过 `podman exec --user 0 <container> <bin> {prepare|bootstrap|client ...}`
+    /// 拉起。容器内 daemon 持有 0..N 个 root bash + PTY session；多 client 可
+    /// 同时 attach 同一 session（fan-out + 128KB 回放）。daemon 与容器共死，
     /// **零主机端残留**。
-    pub root_channel: PathBuf,
+    pub dock: PathBuf,
 }
 
 impl ContainerBins {
-    /// 宿主侧解析三个二进制的安装位置（纯路径解析，无副作用）。
+    /// 宿主侧解析二进制的安装位置（纯路径解析，无副作用）。
     pub fn resolve() -> Result<Self> {
         Ok(Self {
             server: server_binary_path()?,
-            ctool: ctool_binary_path()?,
-            root_channel: root_channel_binary_path()?,
+            dock: dock_binary_path()?,
         })
     }
-}
-
-/// 解析 root-channel 二进制路径（宿主侧）。
-///
-/// 与 [`server_binary_path`] 完全同构：`ROOT_CHANNEL_BIN` namespace
-/// dev/prod 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。
-/// 供 GUI/CLI `podman exec --user 0 <container> <bin> --{bootstrap|client}` 用。
-pub fn root_channel_binary_path() -> Result<PathBuf> {
-    let loader = easytidy_shared::loader!();
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    candidates.extend(loader.ns_candidates("ROOT_CHANNEL_BIN", "easytidy-root-channel"));
-    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
-        candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-root-channel"));
-    }
-    candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
-        let tried = candidates
-            .iter()
-            .map(|p| format!("  {}", p.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Error::Connect(format!(
-            "easytidy-root-channel 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
-        ))
-    })
 }
 
 #[cfg(test)]

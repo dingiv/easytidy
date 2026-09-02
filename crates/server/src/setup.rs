@@ -18,7 +18,7 @@
 //! 旧 root 容器（User=0:0）不再支持完整功能：检测到 euid==0 仅告警，
 //! 按 uid 0 身份继续（存量测试容器能跑即可，装包走宿主 root 通道）。
 //! 容器内建号/sudoers/fontconfig 等 root 操作已全部迁到宿主侧
-//! （`core::podman::user::prepare_container` → 容器内 easytidy-ctool）。
+//! （`core::podman::user::prepare_container` → 容器内 easytidy-dock prepare）。
 
 use std::fs;
 use std::sync::OnceLock;

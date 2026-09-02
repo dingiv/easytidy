@@ -162,8 +162,8 @@ enum Commands {
         command: Vec<String>,
     },
 
-    /// 查看容器内 root-channel 日志（诊断 root 终端"静默失败"）
-    RootChannelLogs {
+    /// 查看容器内 easytidy-dock 日志（诊断 root 终端"静默失败"）
+    DockLogs {
         /// 容器名
         #[arg(long)]
         container: String,
@@ -269,8 +269,8 @@ async fn main() -> Result<()> {
             let code = cmd_open(container, command, cli.config.clone()).await?;
             std::process::exit(code);
         }
-        Commands::RootChannelLogs { container, tail } => {
-            cmd_root_channel_logs(&container, tail).await?;
+        Commands::DockLogs { container, tail } => {
+            cmd_dock_logs(&container, tail).await?;
             Ok(())
         }
         Commands::Unexport {
@@ -1249,7 +1249,7 @@ async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Resu
 /// 以容器 root 身份运行。
 ///
 /// 新身份模型下容器 server 不再是 root（协议 v2 删 as_root），root 走
-/// **容器内 root 通道**（`easytidy-root-channel` daemon，exec --user 0 拉起）：
+/// **容器内 root 通道**（`easytidy-dock` daemon，exec --user 0 拉起）：
 /// - **无命令** = 附接 root 终端（与 GUI root 终端同屏互见；
 ///   CLI 退出 = **detach**，会话继续运行）
 /// - **带命令** = 一次性 root exec（`exec_oneshot`，拿真实退出码）
@@ -1276,7 +1276,7 @@ async fn cmd_run_root(podman: &Podman, container: &str, command: Vec<String>) ->
 
 /// 附接 root 终端（容器内 root 通道）。
 ///
-/// 新设计（2026-09-01）：root-channel 跑在**容器内**。本函数：
+/// 新设计（2026-09-01）：root 通道（easytidy-dock daemon）跑在**容器内**。本函数：
 /// 1. 确保容器运行（`ensure_running`）
 /// 2. bootstrap daemon（`podman exec --user 0 <bin> bootstrap`，未跑则 spawn）
 /// 3. `exec_pty` 起 client（`<bin> client new`），client 桥 stdio 到 daemon PTY
@@ -1290,13 +1290,13 @@ async fn cmd_run_root_attach(podman: &Podman, container: &str) -> Result<i32> {
     ensure_running(podman, container).await?;
 
     // Step 2: bootstrap daemon（如未跑）。exec 必须用**容器内路径**
-    // `/run/easytidy-bin/easytidy-root-channel`（宿主相对路径 runc stat 不到）。
-    let root_channel_bin = easytidy_core::podman::Podman::ROOT_CHANNEL_TARGET;
-    bootstrap_root_daemon(podman, container, root_channel_bin).await?;
+    // `/run/easytidy-bin/easytidy-dock`（宿主相对路径 runc stat 不到）。
+    let dock_bin = easytidy_core::podman::Podman::DOCK_TARGET;
+    bootstrap_dock_daemon(podman, container, dock_bin).await?;
 
     // Step 3: exec client new（TTY：client 进程有 tty → 其内部 SIGWINCH 触发 rc.resize）
     let cmd = vec![
-        root_channel_bin.to_string(),
+        dock_bin.to_string(),
         "client".to_string(),
         "new".to_string(),
         "--cols".to_string(),
@@ -1406,22 +1406,22 @@ async fn cmd_run_root_attach(podman: &Podman, container: &str) -> Result<i32> {
     Ok(0)
 }
 
-/// 查看容器内 root-channel 日志（`/run/easytidy/root-channel.log`）。
+/// 查看容器内 easytidy-dock 日志（`/run/easytidy/dock.log`）。
 /// 诊断 root 终端"静默失败"：daemon stderr 被 /dev/null，唯一线索在此文件。
-async fn cmd_root_channel_logs(container: &str, tail: usize) -> Result<()> {
+async fn cmd_dock_logs(container: &str, tail: usize) -> Result<()> {
     let podman = Podman::connect().await?;
     let cmd = vec![
         "tail".to_string(),
         "-n".to_string(),
         tail.to_string(),
-        "/run/easytidy/root-channel.log".to_string(),
+        "/run/easytidy/dock.log".to_string(),
     ];
     let out = podman
         .exec_oneshot(container, "0", cmd)
         .await
-        .context("读取 root-channel 日志失败（容器运行中？tail 可用？）")?;
+        .context("读取 easytidy-dock 日志失败（容器运行中？tail 可用？）")?;
     if out.stdout.trim().is_empty() {
-        println!("(root-channel 日志为空——daemon 可能未启动或无输出)");
+        println!("(easytidy-dock 日志为空——daemon 可能未启动或无输出)");
     } else {
         print!("{}", out.stdout);
     }
@@ -1431,15 +1431,15 @@ async fn cmd_root_channel_logs(container: &str, tail: usize) -> Result<()> {
     Ok(())
 }
 
-/// 在容器内启动 root-channel daemon（如未运行）。
-async fn bootstrap_root_daemon(
+/// 在容器内启动 easytidy-dock daemon（如未运行）。
+async fn bootstrap_dock_daemon(
     podman: &Podman,
     container: &str,
-    root_channel_bin: &str,
+    dock_bin: &str,
 ) -> Result<()> {
     // 先探测：client ping 看 daemon 是否活着
     let ping_cmd = vec![
-        root_channel_bin.to_string(),
+        dock_bin.to_string(),
         "client".to_string(),
         "ping".to_string(),
     ];
@@ -1454,13 +1454,13 @@ async fn bootstrap_root_daemon(
 
     // 未跑 → bootstrap（spawn --daemon 子进程，bootstrap 本身 fire-and-forget 退出）
     let boot_cmd = vec![
-        root_channel_bin.to_string(),
+        dock_bin.to_string(),
         "bootstrap".to_string(),
     ];
     podman
         .exec_oneshot(container, "0", boot_cmd)
         .await
-        .context("bootstrap root-channel daemon 失败")?;
+        .context("bootstrap easytidy-dock daemon 失败")?;
 
     // 等 daemon 就绪
     for _ in 0..40 {
@@ -1474,7 +1474,7 @@ async fn bootstrap_root_daemon(
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    bail!("root-channel daemon 未就绪（2s 超时）")
+    bail!("easytidy-dock daemon 未就绪（2s 超时）")
 }
 
 #[cfg(test)]

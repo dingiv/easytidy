@@ -43,17 +43,13 @@ easytidy-shared = { path = "../shared" }
 # （$XDG_DATA_HOME/easytidy/bin 作为历史兼容回退由 server_binary_path() 内部处理。）
 [package.metadata.shared]
 SERVER_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
-# 容器内 root 一次性工具（/usr/bin/easytidy-ctool）：与 server 同为 musl
-# 静态二进制（同一构建目标目录）——bind-mount 进容器后不依赖镜像内任何
-# 命令（无 sh/useradd/sed）。dev 须 `cargo build -p easytidy-ctool
-# --target x86_64-unknown-linux-musl`（gui beforeDevCommand 已含）。
-CTOOL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
-# root 通道进程（**容器内** root 服务：daemon 持 PTY + client 桥 stdio；宿主经
-# `podman exec --user 0 <container> <bin> --{bootstrap|client}` 拉起）。与 server/
-# ctool 同为 musl 静态二进制（bind-mount 进容器，不依赖镜像内 libc）。dev 须
-# `cargo build -p easytidy-root-channel --target x86_64-unknown-linux-musl`；prod
-# 随安装包发布到 /usr/bin。
-ROOT_CHANNEL_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
+# 容器内 root 工具（/run/easytidy-bin/easytidy-dock：prepare 容器准备 +
+# daemon/bootstrap/client root 终端通道，2026-09-02 由 root-channel + ctool
+# 合并）：与 server 同为 musl 静态二进制（同一构建目标目录）——bind-mount
+# 进容器后不依赖镜像内任何命令（无 sh/useradd/sed）。dev 须
+# `cargo build -p easytidy-dock --target x86_64-unknown-linux-musl`（gui
+# beforeDevCommand 已含）。
+DOCK_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
 # GUI 透传规则等内置资源（内容，非代码）：dev = 源码树 crates/gui/assets
 # （core manifest 的 ../gui/assets）；prod = 数据目录 ~/.easytidy/assets（首跑从
 # 内嵌默认播种、可被用户定制）。core 经 ASSETS_DIR:: 加载（见 gui_passthrough.rs）。

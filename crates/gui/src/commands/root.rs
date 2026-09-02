@@ -1,11 +1,11 @@
 //! root 终端命令（容器内 root 通道）。
 //!
-//! 新设计（2026-09-01）：root-channel 跑在**容器内**，由本模块通过
-//! `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel --{mode}` 拉起。
+//! 新设计（2026-09-01）：root 通道（easytidy-dock daemon/client）跑在**容器内**，由本模块通过
+//! `podman exec --user 0 <container> /run/easytidy-bin/easytidy-dock {mode}` 拉起。
 //!
 //! ## 启动流程（root_terminal_attach）
-//! 1. exec `--bootstrap`：确保 daemon 在容器内运行（不存在 → `setsid -f` 启动）
-//! 2. exec `--client new`：建新 session，返回 exec stream（stdin/stdout 桥到 daemon）
+//! 1. exec `bootstrap`：确保 daemon 在容器内运行（不存在 → `setsid -f` 启动）
+//! 2. exec `client new`：建新 session，返回 exec stream（stdin/stdout 桥到 daemon）
 //! 3. 关闭 exec stream = detach；bash 状态由 daemon 保持，可 re-attach
 //!
 //! ## 生命周期
@@ -22,31 +22,31 @@ use easytidy_protocol::rc::{RcListResp, SessionInfo};
 use crate::state::{GuiSession, PodmanState};
 use crate::state::PtyEvent;
 
-/// 容器内 root-channel 二进制路径（exec 目标）。
+/// 容器内 easytidy-dock 二进制路径（exec 目标）。
 ///
-/// 必须用**容器内路径** `/run/easytidy-bin/easytidy-root-channel`（bind-mount 目标）；
-/// 宿主侧 `root_channel_binary_path()` 是 dev 相对路径 `crates/core/../../target/...`，
+/// 必须用**容器内路径** `/run/easytidy-bin/easytidy-dock`（bind-mount 目标）；
+/// 宿主侧 `dock_binary_path()` 是 dev 相对路径 `crates/core/../../target/...`，
 /// runc 在容器命名空间 stat 不到 → "no such file or directory"。bind-mount 阶段
 /// 才用宿主路径（`create_with_config` 内部已处理）。
-fn root_channel_bin() -> &'static str {
-    easytidy_core::podman::Podman::ROOT_CHANNEL_TARGET
+fn dock_bin() -> &'static str {
+    easytidy_core::podman::Podman::DOCK_TARGET
 }
 
-/// 在容器内启动 root-channel daemon（如未运行）。
-/// 走 `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel bootstrap`。
+/// 在容器内启动 easytidy-dock daemon（如未运行）。
+/// 走 `podman exec --user 0 <container> /run/easytidy-bin/easytidy-dock bootstrap`。
 /// daemon 由 `bootstrap` 内部 spawn（setsid 独立 session）启动，本进程不持有 daemon。
-async fn bootstrap_root_channel(
+async fn bootstrap_dock(
     podman: &easytidy_core::podman::Podman,
     container: &str,
 ) -> anyhow::Result<()> {
     let cmd = vec![
-        root_channel_bin().to_string(),
+        dock_bin().to_string(),
         "bootstrap".to_string(),
     ];
     let exec = podman
         .exec_no_tty(container, "0", cmd)
         .await
-        .map_err(|e| anyhow::anyhow!("启动 root-channel daemon 失败：{e}"))?;
+        .map_err(|e| anyhow::anyhow!("启动 easytidy-dock daemon 失败：{e}"))?;
     // 等 exec 结束（bootstrap 是 fire-and-forget；产物是 daemon 子进程）。
     // bootstrap 的 stderr 也会进 output 流——收集起来，失败时随错误返回。
     let mut stream = exec.output;
@@ -68,7 +68,7 @@ async fn bootstrap_root_channel(
     Ok(())
 }
 
-/// 读取容器内 root-channel 日志（best-effort；失败返回空串）。
+/// 读取容器内 easytidy-dock 日志（best-effort；失败返回空串）。
 async fn read_root_logs(
     podman: &easytidy_core::podman::Podman,
     container: &str,
@@ -78,7 +78,7 @@ async fn read_root_logs(
         "tail".to_string(),
         "-n".to_string(),
         "50".to_string(),
-        "/run/easytidy/root-channel.log".to_string(),
+        "/run/easytidy/dock.log".to_string(),
     ];
     let exec = match podman.exec_no_tty(container, "0", cmd).await {
         Ok(e) => e,
@@ -95,12 +95,12 @@ async fn read_root_logs(
 }
 
 /// 检查 daemon 是否在运行（`client ping`，fire-and-forget）。
-async fn probe_root_channel(
+async fn probe_dock(
     podman: &easytidy_core::podman::Podman,
     container: &str,
 ) -> anyhow::Result<bool> {
     let cmd = vec![
-        root_channel_bin().to_string(),
+        dock_bin().to_string(),
         "client".to_string(),
         "ping".to_string(),
     ];
@@ -147,7 +147,7 @@ async fn open_root_session(
     on_event: tauri::ipc::Channel<PtyEvent>,
 ) -> anyhow::Result<()> {
     let mut cmd = vec![
-        root_channel_bin().to_string(),
+        dock_bin().to_string(),
         "client".to_string(),
     ];
     match target {
@@ -168,7 +168,7 @@ async fn open_root_session(
     let exec = podman
         .exec_no_tty(container, "0", cmd)
         .await
-        .map_err(|e| anyhow::anyhow!("exec root-channel client 失败：{e}"))?;
+        .map_err(|e| anyhow::anyhow!("exec easytidy-dock client 失败：{e}"))?;
 
     // 保存 exec stdin 写侧到 root_sink（root_terminal_write 用）。
     // 关键：必须持有 input 句柄——一旦 drop，podman exec 侧 stdin 立即 EOF，
@@ -210,7 +210,7 @@ async fn open_root_session(
     Ok(())
 }
 
-/// 探测 root-channel daemon 是否在运行（不拉起；只读语义）。
+/// 探测 easytidy-dock daemon 是否在运行（不拉起；只读语义）。
 #[tauri::command]
 pub async fn root_terminal_status(
     podman: tauri::State<'_, PodmanState>,
@@ -222,7 +222,7 @@ pub async fn root_terminal_status(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let name = sess.container_name.clone();
     let p = podman.get().await.map_err(|e| e.to_string())?;
-    let result = probe_root_channel(&p, &name).await;
+    let result = probe_dock(&p, &name).await;
     podman.return_podman(p).await;
     result.map_err(|e| e.to_string())
 }
@@ -253,20 +253,20 @@ pub async fn root_terminal_attach(
     let p = podman.get().await.map_err(|e| e.to_string())?;
 
     // Step 1: bootstrap（如 daemon 未跑）
-    if !probe_root_channel(&p, &container_name)
+    if !probe_dock(&p, &container_name)
         .await
         .unwrap_or(false)
     {
-        if let Err(e) = bootstrap_root_channel(&p, &container_name).await {
+        if let Err(e) = bootstrap_dock(&p, &container_name).await {
             podman.return_podman(p).await;
             return Err(format!(
-                "启动 root-channel daemon 失败：{e}\n\n提示：可执行 `easytidy root_channel_logs`（GUI 亦可）查看容器内日志 /run/easytidy/root-channel.log"
+                "启动 easytidy-dock daemon 失败：{e}\n\n提示：可执行 `easytidy dock_logs`（GUI 亦可）查看容器内日志 /run/easytidy/dock.log"
             ));
         }
         // 等 daemon 就绪（bootstrap 内部已等 socket，再 ping 一次保险）
         let mut ready = false;
         for _ in 0..20 {
-            if probe_root_channel(&p, &container_name)
+            if probe_dock(&p, &container_name)
                 .await
                 .unwrap_or(false)
             {
@@ -282,10 +282,10 @@ pub async fn root_terminal_attach(
             let logs_hint = if logs.is_empty() {
                 "(日志为空)".to_string()
             } else {
-                format!("\n--- root-channel 日志 ---\n{logs}")
+                format!("\n--- easytidy-dock 日志 ---\n{logs}")
             };
             return Err(format!(
-                "root-channel daemon 启动后 1s 内未就绪：{}",
+                "easytidy-dock daemon 启动后 1s 内未就绪：{}",
                 logs_hint
             ));
         }
@@ -308,7 +308,7 @@ pub async fn root_terminal_attach(
     result.map_err(|e| e.to_string())
 }
 
-/// 查询 root-channel 现有 session（`client list`）。失败返回空 Vec（幂等兜底：
+/// 查询 easytidy-dock 现有 session（`client list`）。失败返回空 Vec（幂等兜底：
 /// 查不到就新建，不阻塞 attach）。
 async fn list_root_sessions(
     podman: &easytidy_core::podman::Podman,
@@ -316,7 +316,7 @@ async fn list_root_sessions(
 ) -> anyhow::Result<Vec<SessionInfo>> {
     use futures::StreamExt;
     let cmd = vec![
-        root_channel_bin().to_string(),
+        dock_bin().to_string(),
         "client".to_string(),
         "list".to_string(),
     ];
@@ -419,7 +419,7 @@ pub async fn root_terminal_close(
             return Ok::<(), anyhow::Error>(());
         };
         let cmd = vec![
-            root_channel_bin().to_string(),
+            dock_bin().to_string(),
             "client".to_string(),
             "close".to_string(),
             "--session-id".to_string(),
@@ -428,7 +428,7 @@ pub async fn root_terminal_close(
         let exec = p
             .exec_no_tty(&container_name, "0", cmd)
             .await
-            .map_err(|e| anyhow::anyhow!("exec root-channel client close 失败：{e}"))?;
+            .map_err(|e| anyhow::anyhow!("exec easytidy-dock client close 失败：{e}"))?;
         use futures::StreamExt;
         let mut stream = exec.output;
         let mut buf = String::new();
@@ -449,11 +449,11 @@ pub async fn root_terminal_close(
     result.map_err(|e| e.to_string())
 }
 
-/// 读取 root-channel 日志（容器内 `/run/easytidy/root-channel.log`）。
+/// 读取 easytidy-dock 日志（容器内 `/run/easytidy/dock.log`）。
 /// 用于定位 root 终端「静默失败」：daemon stderr 被 /dev/null 丢弃，
 /// 唯一诊断线索就是这个共享日志文件。
 #[tauri::command]
-pub async fn root_channel_logs(
+pub async fn dock_logs(
     podman: tauri::State<'_, PodmanState>,
     session: tauri::State<'_, Option<GuiSession>>,
     tail: Option<usize>,
@@ -467,13 +467,13 @@ pub async fn root_channel_logs(
 
     let mut cmd = vec!["tail".to_string(), "-n".to_string()];
     cmd.push(tail.unwrap_or(100).to_string());
-    cmd.push("/run/easytidy/root-channel.log".to_string());
+    cmd.push("/run/easytidy/dock.log".to_string());
 
     let result = async {
         let exec = p
             .exec_no_tty(&name, "0", cmd)
             .await
-            .map_err(|e| format!("读取 root-channel 日志失败（tail 不可用?）：{e}"))?;
+            .map_err(|e| format!("读取 easytidy-dock 日志失败（tail 不可用?）：{e}"))?;
         let mut stream = exec.output;
         let mut buf = String::new();
         while let Some(item) = stream.next().await {
@@ -482,7 +482,7 @@ pub async fn root_channel_logs(
             }
         }
         if buf.trim().is_empty() {
-            return Ok::<_, String>("(root-channel 日志为空——daemon 可能未启动或无输出)".to_string());
+            return Ok::<_, String>("(easytidy-dock 日志为空——daemon 可能未启动或无输出)".to_string());
         }
         Ok(buf)
     }
@@ -491,7 +491,7 @@ pub async fn root_channel_logs(
     result
 }
 
-/// 列出所有 root session（经 daemon `--client list`）。
+/// 列出所有 root session（经 daemon `client list`）。
 #[tauri::command]
 pub async fn root_session_list(
     podman: tauri::State<'_, PodmanState>,
@@ -505,7 +505,7 @@ pub async fn root_session_list(
     let p = podman.get().await.map_err(|e| e.to_string())?;
 
     let cmd = vec![
-        root_channel_bin().to_string(),
+        dock_bin().to_string(),
         "client".to_string(),
         "list".to_string(),
     ];

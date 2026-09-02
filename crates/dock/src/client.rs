@@ -1,6 +1,6 @@
-//! root-channel client 模式（连 daemon + 桥 stdio 到 session 流）。
+//! easytidy-dock client 模式（连 daemon + 桥 stdio 到 session 流）。
 //!
-//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 -it <container> /run/easytidy-bin/easytidy-root-channel --client {new|attach <sid>}`
+//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 -it <container> /run/easytidy-bin/easytidy-dock client {new|attach <sid>}`
 //! 运行身份：容器内 root（因 exec --user 0；stdin/stdout 由 podman exec 接到 client 进程）
 //!
 //! 行为：
@@ -67,7 +67,7 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
     // 握手
     let hs = Handshake {
         v: PROTOCOL_VERSION,
-        client: "easytidy-root-channel-client".into(),
+        client: "easytidy-dock-client".into(),
         wants: vec!["root".into()],
     };
     framed

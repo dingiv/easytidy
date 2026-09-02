@@ -65,7 +65,7 @@ pub(crate) fn host_path_vars(host: &HostUser) -> PathVars {
 ///
 /// `image_passwd`：镜像 /etc/passwd 文本（容器侧 `${HOME}`/`${USER}` 且未配
 /// `user_name` 时由调用方探测注入）。
-/// - 有镜像 passwd → 复用单一事实源 [`resolve_identity`]，与容器内 server/ctool
+/// - 有镜像 passwd → 复用单一事实源 [`resolve_identity`]，与容器内 server/dock
 ///   算出的运行时 `$HOME` 完全一致（如 ubuntu 镜像 uid 1000 → `/home/ubuntu`）。
 /// - 无镜像 passwd → 退化：`user_name` 有 → `/home/<name>`；无 → `/home/uid<uid>`。
 pub(crate) fn container_path_vars(

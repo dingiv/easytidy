@@ -1,7 +1,7 @@
-//! root-channel 容器内文件日志。
+//! easytidy-dock 容器内文件日志。
 //!
 //! 所有模式（daemon / bootstrap / client）都写一个共享日志文件
-//! `/run/easytidy/root-channel.log`，供宿主侧 `podman exec` 读取排查。
+//! `/run/easytidy/dock.log`，供宿主侧 `podman exec` 读取排查。
 //!
 //! 为什么需要文件日志：daemon 由 bootstrap 用 `setsid -f` 拉起，其 stdio
 //! 被重定向到 /dev/null（`Stdio::null()`）——**daemon 的 stderr 完全不可见**。
@@ -18,7 +18,7 @@ use tracing_subscriber::fmt::MakeWriter;
 /// 日志目录（容器内 tmpfs，容器存活期内有效；重启即清——诊断当次会话足够）。
 pub const LOG_DIR: &str = "/run/easytidy";
 /// 共享日志文件（所有模式追加写入）。
-pub const LOG_FILE: &str = "/run/easytidy/root-channel.log";
+pub const LOG_FILE: &str = "/run/easytidy/dock.log";
 
 /// 确保日志目录存在（失败静默——文件日志是 best-effort，不因路径问题崩进程）。
 pub fn ensure_dir() {

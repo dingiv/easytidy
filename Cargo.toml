@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/protocol", "crates/core", "crates/server", "crates/cli", "crates/gui", "crates/shared", "crates/root-channel", "crates/ctool"]
+members = ["crates/protocol", "crates/core", "crates/server", "crates/cli", "crates/gui", "crates/shared", "crates/dock"]
 exclude = ["spikes/cjk-spike/src-tauri"]
 
 [workspace.package]
@@ -45,5 +45,5 @@ strip = true
 [profile.release.package.easytidy-server]
 opt-level = "z"
 
-[profile.release.package.easytidy-ctool]
+[profile.release.package.easytidy-dock]
 opt-level = "z"

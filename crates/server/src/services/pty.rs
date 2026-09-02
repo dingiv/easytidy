@@ -107,7 +107,7 @@ pub(crate) async fn handle_pty_open(
 
     // 接线常驻终端：server 按身份各持一个 attach 终端（persistent 会话，
     // 不随连接断开清理；key 恒 "user"（新模型 server 即容器默认用户，无
-    // root 会话——root 通道走宿主 easytidy-root-channel）。
+    // root 会话——root 通道走容器内 easytidy-dock）。
     // 已有 → 订阅 + 回放环形缓冲 → 复用同一 stream_id；无 → 走新建路径并登记。
     // ⚠️ guard 先取值再 await：std RwLock guard 在 if-let scrutinee 中存活
     // 整个语句，跨 await 导致 future 非 Send
@@ -162,7 +162,7 @@ pub(crate) async fn handle_pty_open(
     // 默认用户（容器 User 字段 = 配置 uid:gid，宿主侧 create_with_config），
     // 直接 exec 命令、继承 server 身份与环境；登录 env（HOME/USER 等）由
     // 下方显式覆盖（客户端 env 继承自宿主进程）。root 终端不走此通道
-    // （协议 v2 删 as_root，root 走宿主 easytidy-root-channel）。
+    // （协议 v2 删 as_root，root 走容器内 easytidy-dock）。
     let (cmd, argv) = if req.cmd.is_empty() {
         // 默认终端 = 登录 shell（-l 读 /etc/profile，HOME 由下方 env 注入）
         let shell = if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };

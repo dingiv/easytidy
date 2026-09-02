@@ -1,17 +1,26 @@
-//! easytidy-root-channel：容器内 root 服务（client ↔ daemon 桥接器）。
+//! easytidy-dock：容器内 root 工具（root 通道 + 容器准备，单二进制）。
+//!
+//! 由 `easytidy-root-channel` 与 `easytidy-ctool` 合并而来（2026-09-02）：
+//! 两个容器内 root 二进制合成一个 `easytidy-dock`，统一 bind-mount 到
+//! `/run/easytidy-bin/easytidy-dock`。
 //!
 //! ## 进程位置
-//! 跑在**容器内**（不再是宿主侧）。由 GUI/CLI 通过
-//! `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel --{mode}`
-//! 拉起。三种模式：
+//! 跑在**容器内**。由 GUI/CLI 通过
+//! `podman exec --user 0 <container> /run/easytidy-bin/easytidy-dock <mode>`
+//! 拉起。子命令：
 //!
-//! - **`--daemon`**（长驻）：bind `/run/easytidy/root-channel.sock`、管理
-//!   0..N 个 root bash session（每个 session = 独立 PTY + bash）；多 client
-//!   可同时 attach 同一 session（fan-out + 128KB 回放）。
-//! - **`--bootstrap`**（一次性）：确保 daemon 在跑（socket 可连即返回；
-//!   否则 `setsid -f` 启动 daemon）。由首次 root 操作的 GUI/CLI 触发。
-//! - **`--client {new|attach|ping}`**（短命）：连 daemon、建/attach
-//!   session、桥 stdio。生命周期 = podman exec 流（GUI 关面板即 detach）。
+//! - **`prepare`**（一次性，源自 ctool）：fontconfig 接入 + 建号（可选）+
+//!   家目录补齐（幂等）。`prepare_container` 的 exec 目标。
+//! - **`daemon`**（长驻，源自 root-channel）：bind
+//!   `/run/easytidy/root-channel.sock`、管理 0..N 个 root bash session
+//!   （每个 session = 独立 PTY + bash）；多 client 可同时 attach 同一
+//!   session（fan-out + 128KB 回放）。
+//! - **`bootstrap`**（一次性，源自 root-channel）：确保 daemon 在跑
+//!   （socket 可连即返回；否则 `setsid <exe> daemon` 启动）。由首次
+//!   root 操作的 GUI/CLI 触发。
+//! - **`client {new|attach|ping|list|close}`**（短命，源自 root-channel）：
+//!   连 daemon、建/attach session、桥 stdio。生命周期 = podman exec 流
+//!   （GUI 关面板即 detach）。
 //!
 //! ## 生命周期
 //! daemon 由 bootstrap 启动后独立 session 跑——bootstrap 退出不影响它。
@@ -35,19 +44,32 @@ mod logfile;
 mod session;
 
 #[derive(Parser)]
-#[command(name = "easytidy-root-channel")]
+#[command(name = "easytidy-dock")]
 struct Args {
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
 
-/// 默认（无子命令） = daemon（兼容历史 / 让 container-side `easytidy-root-channel`
-/// 直接跑就是 daemon；`setsid -f ... --daemon` 显式传子命令也可）。
+/// 默认（无子命令） = daemon（兼容历史 / 让容器内 `easytidy-dock`
+/// 直接跑就是 daemon；`setsid <exe> daemon` 显式传子命令也可）。
 #[derive(Subcommand)]
 enum Cmd {
+    /// 容器内准备：fontconfig 接入 + 建号（可选）+ 家目录补齐（幂等）。
+    /// 源自 easytidy-ctool（prepare_container 的 exec 目标）。
+    Prepare {
+        /// 容器默认用户 uid（与容器 User 字段一致）
+        #[arg(long)]
+        uid: u32,
+        /// 容器默认用户 gid（与容器 User 字段一致）
+        #[arg(long)]
+        gid: u32,
+        /// 配置用户名（缺省 = 不建号，仅 fontconfig + 家目录补齐）
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// 长驻 daemon：bind socket、管理 session、桥流
     Daemon,
-    /// 一次性：确保 daemon 在跑（不存在则 setsid -f 启动后等 socket）
+    /// 一次性：确保 daemon 在跑（不存在则 setsid 启动后等 socket）
     Bootstrap,
     /// 短命 client：连 daemon、建/attach session、桥 stdio
     Client {
@@ -73,18 +95,27 @@ async fn main() -> anyhow::Result<()> {
     logfile::ensure_dir();
 
     let mode = match args.cmd {
+        Some(Cmd::Prepare { .. }) => "prepare",
         Some(Cmd::Daemon) | None => "daemon",
         Some(Cmd::Bootstrap) => "bootstrap",
         Some(Cmd::Client { .. }) => "client",
     };
     // client 模式 stderr 会被 podman exec 捕获并桥进终端（残留日志污染）；
-    // 日志只进共享文件。daemon/bootstrap 保留 stderr（bootstrap 的 stderr 供
-    // GUI 错误面上化收集）。
+    // 日志只进共享文件。daemon/bootstrap/prepare 保留 stderr（prepare 的
+    // skip_reason、bootstrap 的报错都走 stderr 供宿主收集）。
     init_logging(mode != "client");
 
-    tracing::info!("root-channel {mode} starting (pid={})", std::process::id());
+    tracing::info!("easytidy-dock {mode} starting (pid={})", std::process::id());
 
     match args.cmd.unwrap_or(Cmd::Daemon) {
+        Cmd::Prepare { uid, gid, name } => {
+            let report = easytidy_core::env::prepare_in_container(uid, gid, name.as_deref())
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Some(reason) = report.skip_reason {
+                eprintln!("{reason}");
+            }
+            Ok(())
+        }
         Cmd::Daemon => daemon::run_daemon().await,
         Cmd::Bootstrap => bootstrap::run_bootstrap().await,
         Cmd::Client { cmd, session_id, cols, rows } => {
@@ -108,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-    .context("root-channel main")
+    .context("easytidy-dock main")
 }
 
 fn init_logging(to_stderr: bool) {

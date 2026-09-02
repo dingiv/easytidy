@@ -1,10 +1,10 @@
-//! root-channel bootstrap 模式（确保 daemon 在容器内运行）。
+//! easytidy-dock bootstrap 模式（确保 daemon 在容器内运行）。
 //!
-//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel bootstrap`
+//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 <container> /run/easytidy-bin/easytidy-dock bootstrap`
 //! 运行身份：容器内 root（uid=0，因 exec --user 0；server 是 uid 1000 不能拉起 root）
 //!
 //! 行为：
-//! 1. 检查 daemon socket `/run/easytidy/root-channel.sock` 是否存在
+//! 1. 检查 daemon socket `/run/easytidy/dock.sock` 是否存在
 //! 2. 不存在 → `setsid <exe> daemon` 启动 daemon（busybox setsid 无 `-f`；
 //!    setsid 创建**新 session**，podman exec 流关闭时 SIGHUP 打不到 daemon），
 //!    stdio=/dev/null
@@ -32,7 +32,7 @@ pub async fn run_bootstrap() -> anyhow::Result<()> {
         // 进一步验证 socket 可连（防 stale 文件）
         match tokio::net::UnixStream::connect(DAEMON_SOCKET).await {
             Ok(_) => {
-                tracing::info!("root-channel daemon already running");
+                tracing::info!("easytidy-dock daemon already running");
                 return Ok(());
             }
             Err(e) => {
@@ -47,9 +47,9 @@ pub async fn run_bootstrap() -> anyhow::Result<()> {
     // busybox/util-linux 的 `setsid` 都直接 setsid() + exec PROG——进程本身变
     // 成 daemon，进入**新 session**，脱离 podman exec 的进程组/控制终端。
     // bootstrap 退出 → daemon 被 PID 1 收养，独立存活（容器死才死）。
-    // stdio=/dev/null → daemon 日志只进共享文件 /run/easytidy/root-channel.log。
+    // stdio=/dev/null → daemon 日志只进共享文件 /run/easytidy/dock.log。
     let self_exe = std::env::current_exe().context("current_exe failed")?;
-    tracing::info!("spawning root-channel daemon via setsid: {} daemon", self_exe.display());
+    tracing::info!("spawning easytidy-dock daemon via setsid: {} daemon", self_exe.display());
     let spawned = std::process::Command::new("setsid")
         .arg(&self_exe)
         .arg("daemon")
@@ -78,13 +78,13 @@ pub async fn run_bootstrap() -> anyhow::Result<()> {
                 .await
                 .is_ok()
             {
-                tracing::info!("root-channel daemon ready");
+                tracing::info!("easytidy-dock daemon ready");
                 return Ok(());
             }
         }
         if Instant::now() >= deadline {
             anyhow::bail!(
-                "root-channel daemon not ready in 5s (socket {} not connectable)",
+                "easytidy-dock daemon not ready in 5s (socket {} not connectable)",
                 DAEMON_SOCKET
             );
         }

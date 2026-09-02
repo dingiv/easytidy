@@ -1,8 +1,8 @@
-//! root-channel daemon 模式（容器内常驻 root 服务）。
+//! easytidy-dock daemon 模式（容器内常驻 root 服务）。
 //!
 //! ## 职责
 //! 容器内长驻进程：
-//! - bind unix socket `/run/easytidy/root-channel.sock`
+//! - bind unix socket `/run/easytidy/dock.sock`
 //! - 接受 client 连接（多个客户端可同时 attach 同一 session）
 //! - 管理 0..N 个 session（每个 = 一个容器内 root bash + PTY）
 //! - 转发 client 的 stdin 到 bash、bash 输出 fan-out 到所有 client
@@ -36,7 +36,7 @@ use easytidy_protocol::{Frame, Handshake, HandshakeAck, Message, MsgKind, PROTOC
 use crate::session::{spawn_root_shell, RootSession};
 
 /// daemon 内部 socket 路径（容器内绝对路径——daemon 跑在容器里）
-pub const DAEMON_SOCKET: &str = "/run/easytidy/root-channel.sock";
+pub const DAEMON_SOCKET: &str = "/run/easytidy/dock.sock";
 
 /// session map 类型（session_id → session）
 type SessionMap = Arc<tokio::sync::RwLock<HashMap<u64, Arc<RootSession>>>>;
@@ -77,7 +77,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
         )
         .await;
     }
-    info!("root-channel daemon ready at {}", DAEMON_SOCKET);
+    info!("easytidy-dock daemon ready at {}", DAEMON_SOCKET);
 
     // 信号
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -143,7 +143,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     }
     drop(sessions);
     let _ = tokio::fs::remove_file(DAEMON_SOCKET).await;
-    info!("root-channel daemon exited");
+    info!("easytidy-dock daemon exited");
     Ok(())
 }
 
@@ -209,7 +209,7 @@ async fn handle_client(
         let _hs: Handshake = serde_json::from_value(msg.payload.clone())?;
         let ack = HandshakeAck {
             v: PROTOCOL_VERSION,
-            server: "easytidy-root-channel".into(),
+            server: "easytidy-dock".into(),
             capabilities: vec!["root".into()],
             session_id: format!("rc-daemon-{token}"),
         };

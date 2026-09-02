@@ -1148,12 +1148,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "easytidy-ctool"
+name = "easytidy-dock"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "easytidy-core",
+ "easytidy-protocol",
+ "futures",
+ "libc",
+ "nix 0.29.0",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1193,27 +1205,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "easytidy-root-channel"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "easytidy-core",
- "easytidy-protocol",
- "futures",
- "libc",
- "nix 0.29.0",
- "portable-pty",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

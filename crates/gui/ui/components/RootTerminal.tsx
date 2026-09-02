@@ -1,4 +1,4 @@
-// root 终端组件：xterm + 宿主 root 通道（easytidy-root-channel 进程）。
+// root 终端组件：xterm + 容器内 root 通道（easytidy-dock daemon）。
 //
 // 与用户终端（Terminal.tsx）的区别：
 // - **单例共享会话**：每容器一个 root shell（容器内父 = conmon），无
@@ -43,7 +43,7 @@ function fallbackCopy(text: string) {
 }
 
 interface RootTerminalProps {
-  /** root 会话退出（rc.exited / root-channel 退出）→ 父面板关闭 */
+  /** root 会话退出（rc.exited / easytidy-dock 退出）→ 父面板关闭 */
   onExited?: () => void;
 }
 

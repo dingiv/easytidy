@@ -21,9 +21,9 @@ invoke('env_snapshot', { name, snapshot_name: snapshotName || null });
 
 （Tauri v2 `#[tauri::command]` 默认按 camelCase 解析 JS 侧参数，Rust 参数保持 snake_case 即可。）
 
-### root-channel 容器内 spawn 的三个坑（2026-09-02 已修）
+### easytidy-dock 容器内 spawn 的三个坑（2026-09-02 已修）
 
-root-channel daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加坑**导致
+root 终端通道 daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加坑**导致
 "root 终端点了没反应、静默失败"：
 
 1. **busybox `setsid` 无 `-f`**：`setsid -f` 在 busybox 直接报 `unrecognized option: f`
@@ -36,16 +36,16 @@ root-channel daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加�
 
 另两个根因：
 - **bind-mount 钉死 inode**：容器创建时 bind-mount 单文件钉住宿主 inode，cargo 重建换新
-  inode 后**已有容器仍跑旧二进制**，必须重建容器。dev 改 root-channel 后记得重建容器。
-- **GUI 丢 exec input 句柄**：`open_new_root_session` 曾 `let _input = exec.input` 直接 drop
+  inode 后**已有容器仍跑旧二进制**，必须重建容器。dev 改 easytidy-dock 后记得重建容器。
+- **GUI 丢 exec input 句柄**：`open_root_session` 曾 `let _input = exec.input` 直接 drop
   → client stdin 立即 EOF → client 退出 → 终端没反应。input 必须存入 `root_sink`。
-- **exec 必须用容器内路径**：GUI/CLI 曾传宿主 `root_channel_binary_path()`（dev 相对路径
+- **exec 必须用容器内路径**：GUI/CLI 曾传宿主 `dock_binary_path()`（dev 相对路径
   `crates/core/../../target/...`），runc 在容器命名空间 stat 不到 → "no such file or
   directory: OCI runtime attempted to invoke a command that was not found"。一律 exec
-  `Podman::ROOT_CHANNEL_TARGET`（`/usr/bin/easytidy-root-channel`），bind-mount 阶段才用
+  `Podman::DOCK_TARGET`（`/run/easytidy-bin/easytidy-dock`），bind-mount 阶段才用
   宿主路径。
 - **`rc.ping` 的 alive 语义**：daemon 曾把 alive 当作"是否有存活 session"，无 session 时返回
-  false → GUI `probe_root_channel` 误判 daemon 未就绪 → "启动后 1s 内未就绪"误报。ping 能
+  false → GUI `probe_dock` 误判 daemon 未就绪 → "启动后 1s 内未就绪"误报。ping 能
   收到响应就说明 daemon 活着 → `alive` 恒 true；session 存活看 `rc.list`。
 - **root 终端 attach 幂等**：`root_terminal_attach` 曾每次 `client new` 新建 session——React
   StrictMode dev 双 invoke / 断线重连会生成多个 root bash（`ps aux` 见多个 `client new` +
@@ -53,7 +53,7 @@ root-channel daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加�
   `client attach <id>` 复用（daemon fan-out）、无则 `client new`」。保证每容器**一个** root
   bash。纯 GUI 改动，无需重建容器。
 - **client 日志不进 stderr**：client 模式 stderr 被 podman exec 捕获桥进终端（残留日志
-  污染）。`main.rs` 按模式决定：client 只写共享文件、daemon/bootstrap 才写 stderr。
+  污染）。`main.rs` 按模式决定：client 只写共享文件、daemon/bootstrap/prepare 才写 stderr。
 
 ### root 终端生命周期语义（detach vs close，2026-09-02）
 
@@ -72,26 +72,32 @@ root-channel daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加�
   进程 hang 在 `futex_do_wait`（实测日志已打 "main returning" 仍不退出）。修复：client
   模式桥结束后**显式 `std::process::exit()`**（0 成功 / 1 失败）。daemon/bootstrap 保持
   自然返回（长驻/一次性，无 stdin 桥）。
-- 重建容器注意：root-channel 二进制加了 Close 子命令，需 `cargo build -p
-  easytidy-root-channel --target x86_64-unknown-linux-musl` 后**重建容器**（bind-mount 钉
+- 重建容器注意：easytidy-dock 二进制改动后，需 `cargo build -p
+  easytidy-dock --target x86_64-unknown-linux-musl` 后**重建容器**（bind-mount 钉
   住 inode）。GUI/协议（`rc.rs` RcCloseReq）改动只需重启 GUI。
 
-## 容器内二进制路径：/run/easytidy-bin（2026-09-02）
+## 容器内二进制：server + easytidy-dock（2026-09-02）
 
-easytidy 三个容器内二进制（server/ctool/root-channel）的 bind-mount 目标从 `/usr/bin/`
-改为 **`/run/easytidy-bin/`**（tmpfs，学 podman-init 的 `/run/podman-init`）。进程命令行
-统一归到 `/run` 下，容器镜像不污染 `/usr/bin`。
+容器内两个二进制（server + **easytidy-dock**）bind-mount 到 **`/run/easytidy-bin/`**
+（tmpfs，学 podman-init 的 `/run/podman-init`）。进程命令行统一归到 `/run` 下，
+容器镜像不污染 `/usr/bin`。
 
-- `Podman::SERVER_TARGET` / `CTOOL_TARGET` / `ROOT_CHANNEL_TARGET` / `BIN_DIR`
+- **2026-09-02 合并**：`easytidy-root-channel`（root 终端通道 daemon/client/bootstrap）
+  与 `easytidy-ctool`（容器准备 prepare）合并为单二进制 **`easytidy-dock`**。子命令：
+  `prepare` / `daemon` / `bootstrap` / `client {new|attach|ping|list|close}`。
+  两个旧 crate 删除，新 crate `crates/dock`（git mv crates/root-channel）。
+- `Podman::SERVER_TARGET` / `DOCK_TARGET` / `BIN_DIR`
 - **不是** `/run/easytidy/bin`——`/run/easytidy` 已被宿主 socket 目录 bind-mount 占住，
   bin 放其下会落成宿主侧残留文件。
-- exec 一律用 `ROOT_CHANNEL_TARGET`（容器内路径），bind-mount 阶段才用宿主路径。
+- exec 一律用 `DOCK_TARGET`（容器内路径），bind-mount 阶段才用宿主路径。
 - 宿主侧二进制安装位（`/usr/bin`）与容器内 `/run/easytidy-bin` 无冲突，`Cargo.toml`
-  BIN namespace 的 prod `/usr/bin` 指**宿主**安装位置，不变。
+  BIN namespace 的 prod `/usr/bin` 指**宿主**安装位置，不变。core Cargo.toml namespace：
+  `SERVER_BIN` / `DOCK_BIN`（原 CTOOL_BIN + ROOT_CHANNEL_BIN 合并）。
+- 内部 socket 改名为 `/run/easytidy/dock.sock`，日志文件 `/run/easytidy/dock.log`。
 
-**诊断手段**：daemon stderr 被 /dev/null，全部日志进容器内 `/run/easytidy/root-channel.log`
-（daemon/bootstrap/client 都写）。查看：CLI `easytidy root-channel-logs --container <n>` 或
-GUI `root_channel_logs` 命令 / bootstrap 失败时错误信息里附日志尾。
+**诊断手段**：daemon stderr 被 /dev/null，全部日志进容器内 `/run/easytidy/dock.log`
+（daemon/bootstrap/client 都写）。查看：CLI `easytidy dock-logs --container <n>` 或
+GUI `dock_logs` 命令 / bootstrap 失败时错误信息里附日志尾。
 
 ## 架构：core `env` 模块族（2026-09-01 已收敛）
 
@@ -103,13 +109,13 @@ core/src/env/
   mod.rs           —— 模块声明 + 便捷再导出（inject_passthrough / resolve_identity / Identity / ...）
   host.rs          —— 宿主侧（创建期）：inject_passthrough / inject_gui_passthrough / inject_gpu_passthrough
   gui.rs           —— GUI 透传规则（ASSETS_DIR::gui-passthrough.yaml 资源驱动：load_rule / apply）
-  incontainer.rs   —— 容器侧：resolve_identity（server/ctool 共用身份单一事实源）
+  incontainer.rs   —— 容器侧：resolve_identity（server/dock 共用身份单一事实源）
                       + self_uid_gid / fixup_xdg_data_dirs_value / probe_xauthority（纯探测）
-                      + 容器内准备（passwd/group/home/fontconfig，ctool 执行）
+                      + 容器内准备（passwd/group/home/fontconfig，dock prepare 执行）
 ```
 
 **关键约束**（重构时守住的边界）：
-- 宿主进程（GUI/CLI 创建容器）→ `env::host` / `env::gui`；容器内进程（server/ctool
+- 宿主进程（GUI/CLI 创建容器）→ `env::host` / `env::gui`；容器内进程（server/dock
   启动）→ `env::incontainer`。
 - server 的**进程级副作用**（`std::env::set_var`、`USER_MAP`/`INJECTED_ENV` static、
   `finalize_injected_env`）留在 `server/src/setup.rs`，**不下沉**；server 只调 core 纯

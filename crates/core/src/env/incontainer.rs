@@ -1,8 +1,8 @@
-//! 容器内 root 一次性准备（`easytidy-ctool` 二进制执行，宿主侧 exec --user 0）。
+//! 容器内 root 一次性准备（`easytidy-dock prepare` 执行，宿主侧 exec --user 0）。
 //!
 //! 纯 Rust 实现，**零容器内命令依赖**（无 sh/useradd/sed/awk/getent/chown）：
 //! 二进制由宿主 bind-mount 进容器，与 server 同前提——容器能跑 server
-//! 就能跑 ctool，不依赖镜像里是否存在任何特定工具。
+//! 就能跑 easytidy-dock，不依赖镜像里是否存在任何特定工具。
 //!
 //! 内容（全部幂等）：
 //! - fontconfig 宿主字体接入（写 `/etc/fonts/local.conf`）
@@ -12,7 +12,7 @@
 //!
 //! 分层（plan/apply）：
 //! - [`resolve_identity`] / [`plan_prepare`] 纯函数——**身份语义单一事实源**
-//!   （server 身份自发现与 ctool ensure-home 共用，同一 uid/passwd 必然
+//!   （server 身份自发现与 dock ensure-home 共用，同一 uid/passwd 必然
 //!   同结果）；宿主侧可单测
 //! - [`apply_plan`] / [`prepare_in_container`] IO——容器内 root 执行
 
@@ -37,7 +37,7 @@ const FONTCONF_XML: &str = "<?xml version=\"1.0\"?>\n\
   <dir>/mnt/host/.local/share/fonts</dir>\n\
 </fontconfig>\n";
 
-// ── 身份（单一事实源：server 身份自发现 + ctool ensure-home 共用）────────────
+// ── 身份（单一事实源：server 身份自发现 + dock ensure-home 共用）────────────
 
 /// 容器默认用户身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +53,7 @@ pub struct Identity {
 /// 名字优先级：配置用户名 → passwd 反查 → `uid<uid>`。
 ///
 /// HOME 优先级（与名字同源，2026-08-28 定案）：
-/// 1. 配置用户名 → `/home/<name>`（ctool 建号/ensure-home 建目录，不依赖
+/// 1. 配置用户名 → `/home/<name>`（dock 建号/ensure-home 建目录，不依赖
 ///    建号执行时序）
 /// 2. 未配置 + passwd 条目 home **有效**（非 `/`）→ 该条目 home（容器
 ///    默认用户自身家目录，如 ubuntu 的 /home/ubuntu）
@@ -239,7 +239,7 @@ pub struct PreparePlan {
     pub add_group: Option<String>,
     /// ensure-home 目标目录（恒执行：缺失则创建 + chown uid:gid + chmod 750）
     pub home: String,
-    /// 建号跳过原因（uid 被他人占用等；ctool 输出 stderr 提示）
+    /// 建号跳过原因（uid 被他人占用等；easytidy-dock 输出 stderr 提示）
     pub skip_reason: Option<String>,
 }
 
@@ -312,7 +312,7 @@ pub struct IncontainerPaths {
     pub fontconf_dir: PathBuf,
 }
 
-/// 准备结果报告（ctool 据此输出提示）。
+/// 准备结果报告（easytidy-dock 据此输出提示）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PrepareReport {
     /// 是否新增 passwd 条目（false = 同名已存在或被跳过）
@@ -339,12 +339,12 @@ pub fn apply_plan(plan: &PreparePlan, paths: &IncontainerPaths) -> Result<()> {
     Ok(())
 }
 
-/// 容器内准备入口（ctool `prepare` 子命令；容器内 root 执行）。
+/// 容器内准备入口（easytidy-dock `prepare` 子命令；容器内 root 执行）。
 ///
 /// 读 /etc/passwd + /etc/group → [`plan_prepare`]（纯）→ [`apply_plan`]（IO）。
 /// 幂等，重复调用无害。
 pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Result<PrepareReport> {
-    // 登录 shell 容器内探测（/bin/bash 存在优先；ctool 本身不依赖任何 shell）
+    // 登录 shell 容器内探测（/bin/bash 存在优先；dock 本身不依赖任何 shell）
     let shell = if Path::new("/bin/bash").exists() {
         "/bin/bash"
     } else {

@@ -1,15 +1,15 @@
-//! 容器内用户准备（宿主侧以 root 一次性 exec 容器内 ctool 二进制）。
+//! 容器内用户准备（宿主侧以 root 一次性 exec 容器内 easytidy-dock）。
 //!
 //! 新身份模型下容器直接以配置的 uid/gid 运行（无 init 镜像烘焙）。
 //! 准备逻辑本身是**纯 Rust**（[`crate::env::incontainer`]）：容器内的
-//! `easytidy-ctool` 二进制（ro bind-mount，musl 静态）执行 fontconfig
+//! `easytidy-dock` 二进制（ro bind-mount，musl 静态）执行 fontconfig
 //! 接入 / 建号（行式读写 /etc/passwd、/etc/group）/ 家目录补齐——
 //! **零容器内命令依赖**（无 sh/useradd/sed/awk/getent，alpine/busybox
 //! 与 debian 同一路径）。
 //!
 //! 本模块只负责宿主侧 exec：[`Podman::prepare_container`] 经
 //! [`Podman::exec_oneshot`]（零 podman CLI）以 root 运行
-//! `easytidy-ctool prepare`，校验退出码。
+//! `easytidy-dock prepare`，校验退出码。
 
 use crate::error::{Error, Result};
 use crate::models::ContainerParams;
@@ -22,7 +22,7 @@ impl Podman {
     /// - 建号（仅 `params.user_name` 有值；home = `/home/<name>`）
     /// - 家目录补齐（**恒执行**：缺失则创建、属主/权限纠正为 uid:gid/750）
     ///
-    /// 实现：exec 容器内 `/run/easytidy-bin/easytidy-ctool prepare --uid --gid
+    /// 实现：exec 容器内 `/run/easytidy-bin/easytidy-dock prepare --uid --gid
     /// [--name]`（argv 直传，不经 shell）——逻辑见
     /// [`crate::env::incontainer::prepare_in_container`]。
     ///
@@ -32,7 +32,7 @@ impl Podman {
         let (uid, gid) =
             crate::podman::resolve_container_user(params, crate::userenv::host_user().as_ref())?;
         let mut argv = vec![
-            Self::CTOOL_TARGET.to_string(),
+            Self::DOCK_TARGET.to_string(),
             "prepare".to_string(),
             "--uid".to_string(),
             uid.to_string(),
