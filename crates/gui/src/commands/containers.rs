@@ -123,6 +123,78 @@ pub async fn inspect_container(
         .ok_or_else(|| format!("容器不存在：{}", name))
 }
 
+/// 容器启动失败展示用信息：状态 + 退出码 + 错误 + 容器日志（podman logs 等价）。
+///
+/// 用于 Worker GUI 启动时检测到容器未连接时呈现给用户（替代当前静默吞错的
+/// "从工具栏打开面板…" 误导文案）。`tail_lines = 0` → 全部日志（上限 10000 行）。
+#[derive(Debug, Clone, Serialize)]
+pub struct ContainerFailureInfo {
+    /// 容器是否存在于 podman（false = 已被删除/从未创建）
+    pub exists: bool,
+    /// 是否运行中（与 status=="running" 一致；启动失败时为 false）
+    pub running: bool,
+    /// podman 原生状态字符串（"running" / "exited" / "created" / "configured"）
+    pub status: String,
+    /// 退出码（仅 exited 容器有值）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i64>,
+    /// podman 上报的失败原因（OCI hook / device 不可用 / 镜像损坏等）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 容器日志（stdout + stderr 合并；有损 UTF-8；按 tail_lines 取尾）
+    pub logs: String,
+}
+
+#[tauri::command]
+pub async fn container_failure_info(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+    tail_lines: Option<usize>,
+) -> Result<ContainerFailureInfo, String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let tail = tail_lines.unwrap_or(200);
+    let result = fetch_failure_info_inner(&p, &name, tail).await;
+    podman.return_podman(p).await;
+    result
+}
+
+async fn fetch_failure_info_inner(
+    p: &easytidy_core::podman::Podman,
+    name: &str,
+    tail_lines: usize,
+) -> Result<ContainerFailureInfo, String> {
+    let state = p.container_state(name).await.map_err(|e| e.to_string())?;
+    let Some(state) = state else {
+        // 容器在 podman 中已不存在（被外部清理或从未真正创建成功）
+        return Ok(ContainerFailureInfo {
+            exists: false,
+            running: false,
+            status: "missing".into(),
+            exit_code: None,
+            error: Some(format!("容器 {name} 在 podman 中不存在（可能已被清理或创建失败后未保留）")),
+            logs: String::new(),
+        });
+    };
+    // 仅在非运行状态下拉取日志：运行中的容器 Worker 不会进此分支，
+    // 但保险起见（启动竞态）running 时也允许拉（不报错即可）。
+    let logs = match p.container_logs(name, tail_lines).await {
+        Ok(s) => s,
+        Err(e) => {
+            // 日志拉取失败不该阻断 status 展示（如容器从未启动过 → 无日志）
+            tracing::debug!("拉取容器 {name} 日志失败（忽略）：{e}");
+            String::new()
+        }
+    };
+    Ok(ContainerFailureInfo {
+        exists: true,
+        running: state.running,
+        status: state.status,
+        exit_code: state.exit_code,
+        error: state.error,
+        logs,
+    })
+}
+
 // ============================================================================
 // 环境语义面板命令（docs/13-mutable-env-paradigm.md）
 //

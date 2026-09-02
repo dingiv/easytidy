@@ -88,6 +88,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::restart_container,
             commands::containers::remove_container,
             commands::containers::inspect_container,
+            commands::containers::container_failure_info,
             commands::containers::open_container_window,
             commands::containers::container_shutdown,
             // 镜像管理

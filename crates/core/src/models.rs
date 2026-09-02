@@ -255,6 +255,21 @@ pub struct ContainerConfigView {
     pub userns_mode: Option<String>,
 }
 
+/// 容器当前详细状态（启动失败展示用）：来源 `podman inspect` 的 `State` 字段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerStateView {
+    /// 是否运行中（与 `status == "running"` 一致）
+    pub running: bool,
+    /// podman 原生状态字符串（"running" / "exited" / "created" / "configured" / "stopped"）
+    pub status: String,
+    /// 退出码（仅 exited 容器有值）
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    /// podman 上报的错误信息（如 OCI hook 失败、镜像损坏、device 不可用等）
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

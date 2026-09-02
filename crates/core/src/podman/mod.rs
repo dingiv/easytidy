@@ -792,6 +792,85 @@ impl Podman {
         Ok(info.state.and_then(|s| s.running).unwrap_or(false))
     }
 
+    /// 容器详细状态（启动失败展示用）：`running` / `status` / `exit_code` / `error`。
+    ///
+    /// 取 `podman inspect` 的 `State` 字段（Docker compat API 标准字段，对应
+    /// `docker inspect` 的 `State.Status/ExitCode/Error`）。容器不存在 → None。
+    pub async fn container_state(
+        &self,
+        name: &str,
+    ) -> Result<Option<crate::models::ContainerStateView>> {
+        let info = match self.docker.inspect_container(name, None).await {
+            Ok(i) => i,
+            Err(e) => {
+                // bollard 对不存在的容器返回 404；按"不存在"返回 None 而非错误
+                let msg = e.to_string();
+                if msg.contains("404") || msg.contains("No such") || msg.contains("not found") {
+                    return Ok(None);
+                }
+                return Err(Error::Connect(format!("检查容器状态失败：{e}")));
+            }
+        };
+        let Some(state) = info.state else {
+            return Ok(None);
+        };
+        // bollard 的 ContainerStateStatusEnum 是封闭枚举，通过 Debug 取大写变体名
+        // （如 "Running" / "Exited" / "Created"）→ 转小写得到 podman 原生状态字符串。
+        // 比硬编码 match 列表更鲁棒（bollard 新增变体时自动兼容）。
+        let status_str = state
+            .status
+            .map(|s| format!("{:?}", s).to_lowercase())
+            .unwrap_or_else(|| "unknown".into());
+
+        Ok(Some(crate::models::ContainerStateView {
+            running: state.running.unwrap_or(false),
+            status: status_str,
+            exit_code: state.exit_code,
+            error: state.error.filter(|s| !s.is_empty()),
+        }))
+    }
+
+    /// 容器日志（podman logs 等价）：合并 stdout + stderr，按 `tail_lines` 取尾。
+    ///
+    /// `tail_lines = 0` → bollard 传 "all"（全部历史日志）。容器不存在 / 已删除
+    /// → 返回 Err（调用方按"不存在"处理）。`tail_lines` 上限 10000 行避免单次返回过大。
+    pub async fn container_logs(&self, name: &str, tail_lines: usize) -> Result<String> {
+        use bollard::container::{LogOutput, LogsOptions};
+        use futures::StreamExt;
+
+        let tail = if tail_lines == 0 {
+            "all".to_string()
+        } else {
+            tail_lines.min(10000).to_string()
+        };
+        let opts = Some(LogsOptions {
+            stdout: true,
+            stderr: true,
+            follow: false,
+            since: 0,
+            until: 0,
+            timestamps: false,
+            tail,
+        });
+
+        let mut stream = self.docker.logs(name, opts);
+        let mut output = String::new();
+        while let Some(item) = stream.next().await {
+            match item {
+                Ok(LogOutput::StdOut { message })
+                | Ok(LogOutput::StdErr { message })
+                | Ok(LogOutput::Console { message })
+                | Ok(LogOutput::StdIn { message }) => {
+                    output.push_str(&String::from_utf8_lossy(&message));
+                }
+                Err(e) => {
+                    return Err(Error::Connect(format!("读取容器日志失败：{e}")));
+                }
+            }
+        }
+        Ok(output)
+    }
+
     /// 提交容器当前层为镜像（bind mount 不入 commit）。
     pub(crate) async fn commit_container(&self, name: &str, image_ref: &str) -> Result<()> {
         use bollard::container::Config;

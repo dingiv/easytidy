@@ -857,6 +857,71 @@ button:disabled {
   font-size: 0.9rem;
 }
 
+/* 容器状态面板（Worker 启动失败时呈现） */
+.container-status-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 1.2rem 1.5rem;
+  overflow: auto;
+  box-sizing: border-box;
+}
+
+.container-status-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid #313244;
+}
+
+.container-status-logs {
+  flex: 1;
+  min-height: 200px;
+  max-height: calc(100vh - 360px);
+  overflow: auto;
+  background: #11111b;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  padding: 0.8rem 1rem;
+  font-size: 0.75rem;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
+  color: #cdd6f4;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
+/* 容器未连接占位（各 pane 显示「容器未连接」时用） */
+.pane-disconnected {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 0.6rem;
+  color: #6c7086;
+  font-size: 0.9rem;
+  padding: 2rem;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.pane-disconnected .pane-disconnected-title {
+  color: #cdd6f4;
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+.pane-disconnected .pane-disconnected-hint {
+  color: #6c7086;
+  font-size: 0.8rem;
+  max-width: 420px;
+}
+
 /* passthrough 头部操作组 */
 .passthrough-header-actions {
   display: flex;

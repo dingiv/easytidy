@@ -164,6 +164,23 @@ export interface HostUser {
   home: string;
 }
 
+/// 容器启动失败展示用信息（Worker 检测到容器未运行时呈现）。
+/// 后端对应 `commands::containers::container_failure_info`。
+export interface ContainerFailureInfo {
+  /// 容器是否存在于 podman（false = 已被外部清理或创建失败后未保留）
+  exists: boolean;
+  /// 是否运行中（与 status==\"running\" 一致；启动失败时为 false）
+  running: boolean;
+  /// podman 原生状态字符串（\"running\" / \"exited\" / \"created\" / \"configured\" / \"missing\"）
+  status: string;
+  /// 退出码（仅 exited 容器有值）
+  exitCode?: number;
+  /// podman 上报的失败原因（OCI hook / device 不可用 / 镜像损坏等）
+  error?: string;
+  /// 容器日志（stdout + stderr 合并；有损 UTF-8）
+  logs: string;
+}
+
 /// Podman inspect 投影：当前生效状态（不复用 ContainerConfig——view 本无
 /// entry/silent_boot/persistent；env 含系统注入，对比需过滤后子集比较）
 export interface ContainerConfigView {

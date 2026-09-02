@@ -17,6 +17,7 @@ import {
   CodeOutlined,
   DownOutlined,
   ExportOutlined,
+  InfoCircleOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   SettingOutlined,
@@ -25,7 +26,12 @@ import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import { useTerminalStore } from '../stores/terminalStore';
 import { useUiStore } from '../stores/uiStore';
-import type { PassthroughState, PinnedApp, TerminalInfo } from '../types';
+import type {
+  ContainerFailureInfo,
+  PassthroughState,
+  PinnedApp,
+  TerminalInfo,
+} from '../types';
 import logo from '../assets/logo.png';
 import { PinnedAppIcon } from './PinnedAppIcon';
 import { Terminal } from './Terminal';
@@ -35,6 +41,7 @@ import { FileEditor } from './FileEditor';
 import { ImageViewer } from './ImageViewer';
 import { PassthroughManager } from './PassthroughManager';
 import { ConfigManager } from './ConfigManager';
+import { ContainerStatusPane } from './ContainerStatusPane';
 
 interface WorkerViewProps {
   containerName: string;
@@ -43,7 +50,7 @@ interface WorkerViewProps {
 /** 打开的面板 */
 interface Pane {
   id: string;
-  kind: 'terminal' | 'root' | 'passthrough' | 'config' | 'editor' | 'image';
+  kind: 'terminal' | 'root' | 'passthrough' | 'config' | 'editor' | 'image' | 'status';
   title: string;
   /** 用户终端会话 stream_id（null = 尚未建立/新开；attach 重连用）。
    *  root 终端单例共享会话，无 stream_id（流 ID 恒 ROOT_STREAM_ID） */
@@ -60,8 +67,40 @@ function terminalTitle(t: TerminalInfo): string {
   return cmd.length > 24 ? `${cmd.slice(0, 24)}…` : cmd;
 }
 
+/** pane kind → tab 标题（status pane 仅作标题展示，openPaneTitle 单点） */
+function openPaneTitle(kind: Pane['kind']): string {
+  switch (kind) {
+    case 'passthrough':
+      return 'Passthrough';
+    case 'config':
+      return '容器配置';
+    case 'status':
+      return '容器状态';
+    case 'terminal':
+    case 'root':
+    case 'editor':
+    case 'image':
+      return kind;
+  }
+}
+
 /** root 面板 id（单例：每容器一个共享 root 会话） */
 const ROOT_PANE_ID = 'root-terminal';
+
+/** 容器未连接时的 pane 占位（terminal / passthrough / config 等依赖 server 的面板）。
+ *  Worker 检测到容器未运行（启动失败 / 已停止 / 已丢失）时，由调用方传 `connected=false`
+ *  渲染此占位替代原 pane——避免无效 invoke 报错刷屏 + 给用户清晰指引。 */
+function DisconnectedPlaceholder({ paneName }: { paneName: string }) {
+  return (
+    <div className="pane-disconnected">
+      <div className="pane-disconnected-title">{paneName}：容器未连接</div>
+      <div className="pane-disconnected-hint">
+        此面板需要容器 server 运行。请先通过工具栏「容器状态」面板查看启动失败详情/容器日志，
+        修复后点击「刷新」重连，或关闭当前 Worker 窗口回到主界面重新打开容器。
+      </div>
+    </div>
+  );
+}
 
 function WorkerViewInner({ containerName }: WorkerViewProps) {
   const { message } = AntApp.useApp();
@@ -73,10 +112,17 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
   const [panes, setPanes] = useState<Pane[]>([]);
   const [sessionReady, setSessionReady] = useState(false);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
+  // 容器启动失败/未运行时呈现的状态信息（null = 容器正常或尚未探测）
+  const [failure, setFailure] = useState<ContainerFailureInfo | null>(null);
   // 初始激活第一个 pane（惰性：首个渲染后设置）
   const activeId = activePaneId ?? panes[0]?.id ?? null;
+  const connected = failure === null || failure.running;
 
   // 打开容器的会话初始化（握手 + 数据同步）：
+  // 0. container_failure_info 检测容器是否运行中——不运行则设 failure 状态
+  //    并默认打开「容器状态」面板呈现给用户（替代当前静默吞错的
+  //    "从工具栏打开面板…" 误导文案）。其余握手步骤在容器未运行时也会失败，
+  //    但都通过 `connected` 标记由各 pane 自己处理「容器未连接」状态。
   // 1. get_terminals 触发共享 socket 连接（hello 握手）→ 活跃用户终端
   //    列表，各恢复一个面板（附接重连，回放当前屏幕）
   // 2. passthrough_state 同步收藏（工具栏不依赖面板打开）
@@ -86,6 +132,29 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
   // 4. 无活跃用户终端 → 默认单个用户终端（新建持久会话）
   useEffect(() => {
     (async () => {
+      // Step 0: 检测容器状态（先于握手——未运行时直接呈现失败页）
+      try {
+        const fi = await invoke<ContainerFailureInfo>('container_failure_info', {
+          name: containerName,
+          tailLines: 200,
+        });
+        setFailure(fi);
+        if (!fi.running) {
+          // 容器未运行：默认打开「容器状态」面板作为用户第一个看到的面板
+          const statusPane: Pane = {
+            id: useUiStore.getState().nextPaneId(),
+            kind: 'status',
+            title: '容器状态',
+          };
+          setPanes([statusPane]);
+          setActivePaneId(statusPane.id);
+          setSessionReady(true);
+          return;
+        }
+      } catch (err) {
+        console.error('container_failure_info 失败（继续正常握手）:', err);
+      }
+
       const [terminalsRes, stateRes, rootRes] = await Promise.allSettled([
         invoke<TerminalInfo[]>('get_terminals'),
         invoke<PassthroughState>('passthrough_state'),
@@ -139,7 +208,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
       setActivePaneId(null); // 激活第一个
       setSessionReady(true);
     })();
-  }, []);
+  }, [containerName]);
 
   // 侧边栏：折叠 + 宽度（拖拽调宽，低于 200px 自动折叠）
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -276,7 +345,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
         setActivePaneId(existing.id);
         return prev;
       }
-      const title = kind === 'passthrough' ? 'Passthrough' : '容器配置';
+      const title = openPaneTitle(kind);
       const pane: Pane = {
         id: useUiStore.getState().nextPaneId(),
         kind,
@@ -286,6 +355,9 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
       return [...prev, pane];
     });
   };
+
+  /** 打开「容器状态」面板（status pane 与 passthrough/config 同级，单例） */
+  const openStatusPane = () => openPane('status');
 
   /** 终端会话建立后回填面板（新开路径拿到 stream_id） */
   const bindTerminalStream = (paneId: string, sid: number) => {
@@ -416,6 +488,11 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                   <ExportOutlined />
                 </button>
               </Tooltip>
+              <Tooltip title="打开容器状态（日志/启动失败）" mouseEnterDelay={4}>
+                <button className="tool-button" onClick={openStatusPane}>
+                  <InfoCircleOutlined />
+                </button>
+              </Tooltip>
               <Tooltip title="打开配置" mouseEnterDelay={4}>
                 <button className="tool-button" onClick={() => openPane('config')}>
                   <SettingOutlined />
@@ -489,15 +566,43 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                 }}
               >
                 {p.kind === 'terminal' && (
-                  <Terminal
-                    streamId={p.streamId ?? null}
-                    onStream={(sid) => bindTerminalStream(p.id, sid)}
-                    onExit={() => closePane(p.id)}
+                  connected ? (
+                    <Terminal
+                      streamId={p.streamId ?? null}
+                      onStream={(sid) => bindTerminalStream(p.id, sid)}
+                      onExit={() => closePane(p.id)}
+                    />
+                  ) : (
+                    <DisconnectedPlaceholder paneName="终端" />
+                  )
+                )}
+                {p.kind === 'root' && (
+                  connected ? (
+                    <RootTerminal onExited={() => closePane(p.id)} />
+                  ) : (
+                    <DisconnectedPlaceholder paneName="终端 (root)" />
+                  )
+                )}
+                {p.kind === 'passthrough' && (
+                  connected ? (
+                    <PassthroughManager />
+                  ) : (
+                    <DisconnectedPlaceholder paneName="Passthrough" />
+                  )
+                )}
+                {p.kind === 'status' && (
+                  <ContainerStatusPane
+                    containerName={containerName}
+                    initialInfo={failure}
                   />
                 )}
-                {p.kind === 'root' && <RootTerminal onExited={() => closePane(p.id)} />}
-                {p.kind === 'passthrough' && <PassthroughManager />}
-                {p.kind === 'config' && <ConfigManager containerName={containerName} />}
+                {p.kind === 'config' && (
+                  connected ? (
+                    <ConfigManager containerName={containerName} />
+                  ) : (
+                    <DisconnectedPlaceholder paneName="容器配置" />
+                  )
+                )}
                 {p.kind === 'editor' && p.path && (
                   <FileEditor
                     path={p.path}
