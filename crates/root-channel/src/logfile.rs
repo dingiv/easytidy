@@ -13,8 +13,6 @@
 //! 用 `OpenOptions::append(true)`（O_APPEND）+ 每次写打开即关，保证单条
 //! 日志原子追加、无跨进程 buffering 串扰。
 
-use std::io::Write;
-
 use tracing_subscriber::fmt::MakeWriter;
 
 /// 日志目录（容器内 tmpfs，容器存活期内有效；重启即清——诊断当次会话足够）。

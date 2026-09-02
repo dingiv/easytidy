@@ -2,7 +2,7 @@
 //!
 //! ## 进程位置
 //! 跑在**容器内**（不再是宿主侧）。由 GUI/CLI 通过
-//! `podman exec --user 0 <container> /usr/bin/easytidy-root-channel --{mode}`
+//! `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel --{mode}`
 //! 拉起。三种模式：
 //!
 //! - **`--daemon`**（长驻）：bind `/run/easytidy/root-channel.sock`、管理
@@ -88,13 +88,24 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Daemon => daemon::run_daemon().await,
         Cmd::Bootstrap => bootstrap::run_bootstrap().await,
         Cmd::Client { cmd, session_id, cols, rows } => {
-            client::run_client(ClientArgs {
+            // 短命 client：桥结束后必须显式 exit——实测 bridge 返回后若靠
+            // tokio runtime 自然退出会卡住（`tokio::io::stdin()` 的阻塞读
+            // 线程不随 runtime 回收，进程残留）。显式 exit 保证 close 后
+            // 容器内不残留 client 进程。
+            let result = client::run_client(ClientArgs {
                 cmd,
                 session_id,
                 cols,
                 rows,
             })
-            .await
+            .await;
+            match result {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    tracing::error!("client error: {e:#}");
+                    std::process::exit(1);
+                }
+            }
         }
     }
     .context("root-channel main")

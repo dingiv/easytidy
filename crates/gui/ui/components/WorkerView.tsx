@@ -15,6 +15,7 @@ import { App as AntApp, Dropdown, Tooltip } from 'antd';
 import {
   CloseOutlined,
   CodeOutlined,
+  DisconnectOutlined,
   DownOutlined,
   ExportOutlined,
   InfoCircleOutlined,
@@ -368,7 +369,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
 
   /** 关闭面板：关闭后激活相邻面板。
    *  用户终端 = pty.close 终结会话（生命周期由 server 持有）；
-   *  root 终端 = root_terminal_close（kill 容器内 root shell + root 通道退出）
+   *  root 终端 = root_terminal_close（**kill** 容器内 root bash + session 移除）
    *  ——root 会话是共享的，关面板即关会话（与用户终端一致的产品语义） */
   const closePane = (id: string) => {
     const pane = panes.find((p) => p.id === id);
@@ -383,6 +384,23 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
         console.error('root_terminal_close failed:', err),
       );
     }
+    removePane(id);
+  };
+
+  /** detach root 终端面板：断开本面板桥，**后台 root bash 会话继续存在**。
+   *  与 close 的区别：close 真杀会话，detach 保留（重开「打开 root 终端」复用）。 */
+  const detachPane = (id: string) => {
+    const pane = panes.find((p) => p.id === id);
+    if (pane && pane.kind === 'root') {
+      invoke('root_terminal_detach').catch((err) =>
+        console.error('root_terminal_detach failed:', err),
+      );
+    }
+    removePane(id);
+  };
+
+  /** 从标签栏移除面板（共用：关闭/分离都移除 tab） */
+  const removePane = (id: string) => {
     setPanes((prev) => {
       const idx = prev.findIndex((p) => p.id === id);
       if (idx === -1) return prev;
@@ -540,8 +558,19 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                   title={p.title}
                 >
                   <span className="pane-tab-title">{p.title}</span>
+                  {p.kind === 'root' && (
+                    <DisconnectOutlined
+                      className="pane-tab-detach"
+                      title="分离（后台会话保留）"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        detachPane(p.id);
+                      }}
+                    />
+                  )}
                   <CloseOutlined
                     className="pane-tab-close"
+                    title="关闭（终止会话）"
                     onClick={(e) => {
                       e.stopPropagation();
                       closePane(p.id);

@@ -1290,7 +1290,7 @@ async fn cmd_run_root_attach(podman: &Podman, container: &str) -> Result<i32> {
     ensure_running(podman, container).await?;
 
     // Step 2: bootstrap daemon（如未跑）。exec 必须用**容器内路径**
-    // `/usr/bin/easytidy-root-channel`（宿主相对路径 runc stat 不到）。
+    // `/run/easytidy-bin/easytidy-root-channel`（宿主相对路径 runc stat 不到）。
     let root_channel_bin = easytidy_core::podman::Podman::ROOT_CHANNEL_TARGET;
     bootstrap_root_daemon(podman, container, root_channel_bin).await?;
 

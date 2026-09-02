@@ -32,8 +32,19 @@ pub struct Podman {
 }
 
 impl Podman {
+    /// easytidy 容器内二进制的挂载目录（tmpfs `/run` 下，学 podman-init）。
+    ///
+    /// 用 `/run/easytidy-bin/`（**不是** `/run/easytidy/bin`）——`/run/easytidy`
+    /// 已被宿主 socket 目录 bind-mount 占住，bin 放其下会落成宿主侧残留文件。
+    /// 三个二进制都 bind-mount 到此处，容器镜像不污染 `/usr/bin`，进程命令行
+    /// 统一归到 `/run` 下。
+    pub const BIN_DIR: &str = "/run/easytidy-bin";
+
+    /// server 二进制的容器内挂载目标（容器 PID 1 入口）。
+    pub const SERVER_TARGET: &str = "/run/easytidy-bin/easytidy-server";
+
     /// ctool 二进制的容器内挂载目标（prepare_container 的 exec 目标）。
-    pub(crate) const CTOOL_TARGET: &str = "/usr/bin/easytidy-ctool";
+    pub(crate) const CTOOL_TARGET: &str = "/run/easytidy-bin/easytidy-ctool";
 
     /// root-channel 二进制的容器内挂载目标。
     ///
@@ -45,7 +56,7 @@ impl Podman {
     /// 相对路径 `crates/core/../../target/...`，runc 在容器命名空间 stat 不到
     /// → "no such file or directory"）。GUI/CLI 拉 root-channel 一律 exec
     /// 本常量。
-    pub const ROOT_CHANNEL_TARGET: &str = "/usr/bin/easytidy-root-channel";
+    pub const ROOT_CHANNEL_TARGET: &str = "/run/easytidy-bin/easytidy-root-channel";
 
     /// 连接到 rootless podman socket 并协商 API 版本。
     ///
@@ -233,7 +244,7 @@ impl Podman {
             Mount {
                 typ: Some(MountTypeEnum::BIND),
                 source: Some(bins.server.to_string_lossy().to_string()),
-                target: Some("/usr/bin/easytidy-server".to_string()),
+                target: Some(Self::SERVER_TARGET.to_string()),
                 read_only: Some(true),
                 ..Default::default()
             },
@@ -366,7 +377,7 @@ impl Podman {
         // /run/easytidy 下的日志文件，方便开发期 `tail` 容器外看 server
         // 内部报错（不依赖 `podman logs`，且容器重启不丢历史）。
         let mut server_cmd = vec![
-            "/usr/bin/easytidy-server".to_string(),
+            Self::SERVER_TARGET.to_string(),
             "--socket".to_string(),
             "/run/easytidy/server.sock".to_string(),
             "--log-file".to_string(),
@@ -465,7 +476,7 @@ impl Podman {
     ///
     /// **加在 `expand_user_mounts` 末尾**：路径变量已展开为绝对路径，比较无歧义；
     /// 在 mount 进入 `host_config.mounts` 之前 → podman 不会再因重复 destination
-    /// 报 HTTP 500。引擎保留目标（`/usr/bin/easytidy-server` 等）由后续 push 阶段
+    /// 报 HTTP 500。引擎保留目标（`/run/easytidy-bin/easytidy-server` 等）由后续 push 阶段
     /// 处理（用户 mount 撞引擎目标会让 podman 拒——这是预期行为，不在此去重）。
     fn dedup_mounts(mounts: &mut Vec<MountConfig>) {
         let mut seen: HashSet<String> = HashSet::with_capacity(mounts.len());

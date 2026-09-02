@@ -140,6 +140,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::root::root_terminal_attach,
             commands::root::root_terminal_write,
             commands::root::root_terminal_resize,
+            commands::root::root_terminal_detach,
             commands::root::root_terminal_close,
             commands::root::root_session_list,
             commands::root::root_channel_logs,

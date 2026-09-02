@@ -1,6 +1,6 @@
 //! easytidy-ctool —— 容器内 root 一次性工具。
 //!
-//! 由宿主 ro bind-mount 进容器（`/usr/bin/easytidy-ctool`），与
+//! 由宿主 ro bind-mount 进容器（`/run/easytidy-bin/easytidy-ctool`），与
 //! easytidy-server 并列的第二个容器内二进制。以 root（exec --user 0）
 //! 运行，**零容器内命令依赖**（无 sh/useradd/sed/awk）：全部逻辑为纯
 //! Rust（`easytidy_core::env::incontainer`），alpine/busybox/debian 通吃。

@@ -55,6 +55,40 @@ root-channel daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个叠加�
 - **client 日志不进 stderr**：client 模式 stderr 被 podman exec 捕获桥进终端（残留日志
   污染）。`main.rs` 按模式决定：client 只写共享文件、daemon/bootstrap 才写 stderr。
 
+### root 终端生命周期语义（detach vs close，2026-09-02）
+
+- **detach**（新按钮 / 关面板断连）：只断开面板与 root 会话的桥（drop exec input →
+  client 退出），**后台 bash 会话保留**在 daemon，可重新 attach 复用。GUI = `root_terminal_detach`。
+- **close**（✕ 按钮）：**真杀会话**。GUI = `root_terminal_close` → 断开桥 + `client close
+  --session-id <sid>` → daemon `rc.close` → `session.kill()` 发 **SIGHUP 到 bash 进程组**
+  （bash 是 PTY slave 的 session leader，PGID==PID）→ session 从 map 移除。此前 `kill()`
+  只置 dead 不真杀（bash 残留）。
+- 验证：close 后 `client list` 空、无 pts bash；detach 后 session 仍 alive。
+- **zombie 收割**：daemon 是 bash 的直接父进程（portable-pty spawn），bash 被 SIGHUP
+  kill 后若 daemon 不 waitpid 会残留 `<defunct>` zombie。SIGCHLD 处理器现在先
+  `waitpid(-1, WNOHANG)` 循环收割所有子进程，再清理 session map。
+- **client 进程残留（close 后不退出）**：client 桥循环结束（收到 rc.exited）后，靠
+  tokio runtime 自然退出会卡住——`tokio::io::stdin()` 的阻塞读线程不随 runtime 回收，
+  进程 hang 在 `futex_do_wait`（实测日志已打 "main returning" 仍不退出）。修复：client
+  模式桥结束后**显式 `std::process::exit()`**（0 成功 / 1 失败）。daemon/bootstrap 保持
+  自然返回（长驻/一次性，无 stdin 桥）。
+- 重建容器注意：root-channel 二进制加了 Close 子命令，需 `cargo build -p
+  easytidy-root-channel --target x86_64-unknown-linux-musl` 后**重建容器**（bind-mount 钉
+  住 inode）。GUI/协议（`rc.rs` RcCloseReq）改动只需重启 GUI。
+
+## 容器内二进制路径：/run/easytidy-bin（2026-09-02）
+
+easytidy 三个容器内二进制（server/ctool/root-channel）的 bind-mount 目标从 `/usr/bin/`
+改为 **`/run/easytidy-bin/`**（tmpfs，学 podman-init 的 `/run/podman-init`）。进程命令行
+统一归到 `/run` 下，容器镜像不污染 `/usr/bin`。
+
+- `Podman::SERVER_TARGET` / `CTOOL_TARGET` / `ROOT_CHANNEL_TARGET` / `BIN_DIR`
+- **不是** `/run/easytidy/bin`——`/run/easytidy` 已被宿主 socket 目录 bind-mount 占住，
+  bin 放其下会落成宿主侧残留文件。
+- exec 一律用 `ROOT_CHANNEL_TARGET`（容器内路径），bind-mount 阶段才用宿主路径。
+- 宿主侧二进制安装位（`/usr/bin`）与容器内 `/run/easytidy-bin` 无冲突，`Cargo.toml`
+  BIN namespace 的 prod `/usr/bin` 指**宿主**安装位置，不变。
+
 **诊断手段**：daemon stderr 被 /dev/null，全部日志进容器内 `/run/easytidy/root-channel.log`
 （daemon/bootstrap/client 都写）。查看：CLI `easytidy root-channel-logs --container <n>` 或
 GUI `root_channel_logs` 命令 / bootstrap 失败时错误信息里附日志尾。

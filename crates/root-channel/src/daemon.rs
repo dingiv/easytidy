@@ -28,8 +28,8 @@ use tracing::{debug, error, info, warn};
 
 use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::rc::{
-    RcAttach, RcAttachAck, RcListResp, RcNew, RcNewAck, RcPing, RcPingResp, RcResize,
-    SessionInfo, ROOT_STREAM_ID,
+    RcAttach, RcAttachAck, RcCloseReq, RcListResp, RcNew, RcNewAck, RcPing, RcPingResp,
+    RcResize, SessionInfo, ROOT_STREAM_ID,
 };
 use easytidy_protocol::{Frame, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION, RpcError};
 
@@ -84,12 +84,12 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let mut sigchld = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::child())?;
 
-    // 启动会话清理任务（SIGCHLD 触发时扫描并清理已死 session）
+    // 启动会话清理任务（SIGCHLD 触发时：waitpid 收割 zombie + 清理已死 session）
     let cleanup_state = state.clone();
     let cleanup_task = tokio::spawn(async move {
-        // SIGCHLD 循环：每次信号触发时清一次
         loop {
             sigchld.recv().await;
+            reap_zombie_children();
             reap_dead_sessions(&cleanup_state).await;
         }
     });
@@ -145,6 +145,26 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     let _ = tokio::fs::remove_file(DAEMON_SOCKET).await;
     info!("root-channel daemon exited");
     Ok(())
+}
+
+/// waitpid(-1, WNOHANG) 收割所有 zombie 子进程（bash 由 portable-pty 直接
+/// spawn，daemon 是它们的父进程——bash 死时必须 waitpid 回收，否则残留
+/// `<defunct>` zombie）。循环收割直到没有更多子进程退出。
+fn reap_zombie_children() {
+    use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+    use nix::unistd::Pid;
+    loop {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => break,
+            Ok(status) => {
+                debug!("reaped child: {status:?}");
+            }
+            Err(e) => {
+                debug!("waitpid error: {e}");
+                break;
+            }
+        }
+    }
 }
 
 /// SIGCHLD 触发时清理已死的 session（bash 退出 → session.alive=false → 广播 + 删除）
@@ -326,6 +346,36 @@ async fn handle_client(
                 })
                 .await?;
             return attach_session(&mut framed, state.clone(), session, token, cmd.id).await;
+        }
+        "rc.close" => {
+            // standalone 关闭指定 session（GUI 终端"关闭"按钮）：
+            // kill bash → 从 map 移除 → 广播 exited → ack。
+            let req: RcCloseReq = serde_json::from_value(cmd.payload)?;
+            info!("client (token={}) requests close session {}", token, req.session_id);
+            let removed = {
+                let mut sessions = state.sessions.write().await;
+                sessions.remove(&req.session_id)
+            };
+            match removed {
+                Some(s) => {
+                    s.kill();
+                    s.broadcast_exited();
+                    info!("session {} closed", req.session_id);
+                    framed
+                        .send(resp(cmd.id, "rc.close", &serde_json::Value::Null, None))
+                        .await?;
+                }
+                None => {
+                    framed
+                        .send(resp_err(
+                            cmd.id,
+                            "rc.close",
+                            &format!("session {} not found", req.session_id),
+                        ))
+                        .await?;
+                }
+            }
+            Ok(())
         }
         other => {
             framed

@@ -1,6 +1,6 @@
 //! root-channel client 模式（连 daemon + 桥 stdio 到 session 流）。
 //!
-//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 -it <container> /usr/bin/easytidy-root-channel --client {new|attach <sid>}`
+//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 -it <container> /run/easytidy-bin/easytidy-root-channel --client {new|attach <sid>}`
 //! 运行身份：容器内 root（因 exec --user 0；stdin/stdout 由 podman exec 接到 client 进程）
 //!
 //! 行为：
@@ -24,7 +24,8 @@ use tracing::{debug, info};
 
 use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::rc::{
-    RcAttach, RcAttachAck, RcNew, RcNewAck, RcPing, RcPingResp, RcResize, ROOT_STREAM_ID,
+    RcAttach, RcAttachAck, RcCloseReq, RcNew, RcNewAck, RcPing, RcPingResp, RcResize,
+    ROOT_STREAM_ID,
 };
 use easytidy_protocol::{Frame, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION};
 
@@ -41,6 +42,8 @@ pub enum ClientCmd {
     Ping,
     /// 列出所有 session（发完即断）
     List,
+    /// 关闭指定 session（kill bash，发完即断）
+    Close,
 }
 
 pub struct ClientArgs {
@@ -100,6 +103,15 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
             "rc.list".into(),
             serde_json::Value::Null,
         ),
+        ClientCmd::Close => {
+            let sid = args
+                .session_id
+                .ok_or_else(|| anyhow::anyhow!("close requires session_id"))?;
+            (
+                "rc.close".into(),
+                serde_json::to_value(RcCloseReq { session_id: sid })?,
+            )
+        }
         ClientCmd::New => (
             "rc.new".into(),
             serde_json::to_value(RcNew {
@@ -126,6 +138,7 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
     let id = match args.cmd {
         ClientCmd::Ping => 2,
         ClientCmd::List => 2,
+        ClientCmd::Close => 2,
         ClientCmd::New => 2,
         ClientCmd::Attach => 2,
     };
@@ -171,6 +184,22 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if matches!(args.cmd, ClientCmd::Close) {
+        // close：读 ack，退出（session 已被 daemon kill）
+        let resp = framed
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("close resp empty"))??;
+        let Frame::Json(msg) = resp else {
+            anyhow::bail!("close resp should be JSON");
+        };
+        if let Some(err) = msg.err {
+            anyhow::bail!("rc.close failed: {} {}", err.code, err.message);
+        }
+        tracing::info!("session closed");
+        return Ok(());
+    }
+
     // new/attach：读 ack（含 stream_id）+ 进入桥流
     let resp = framed
         .next()
@@ -199,6 +228,7 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
         }
         ClientCmd::Ping => unreachable!(),
         ClientCmd::List => unreachable!(),
+        ClientCmd::Close => unreachable!(),
     };
     info!("attached, stream_id={}", _stream_id);
 

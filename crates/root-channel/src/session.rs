@@ -182,11 +182,21 @@ impl RootSession {
         let _ = w.flush();
     }
 
-    /// 主动关闭 session（drop writer → bash EOF → bash exit）。
+    /// 主动关闭 session：SIGHUP 到 bash 进程组（bash 是 PTY slave 的
+    /// session leader，PGID==PID）+ 标记 dead。bash 退出后 reader task 读到
+    /// EOF → 广播 `rc.exited` + 由 SIGCHLD 清理移除。
     pub fn kill(&self) {
-        // 写 EOF：让 master 写入端 drop 即可让 PTY slave 侧收到 EOF（bash 退出）。
-        // 这里用 take_writer 取新写侧不实际 — portable-pty 设计是 writer 持锁
-        // 与 master 同生命周期。简化做法：标记 alive=false + 后续由 owner drop。
+        // SIGHUP 到进程组：终端关闭语义（bash 及前台进程组收到挂断 → 退出）
+        if self.spawn_pid > 0 {
+            if let Err(e) = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(self.spawn_pid as i32),
+                nix::sys::signal::Signal::SIGHUP,
+            ) {
+                tracing::warn!("session {} killpg({}) failed: {e}", self.id, self.spawn_pid);
+            } else {
+                tracing::info!("session {} sent SIGHUP to pgid {}", self.id, self.spawn_pid);
+            }
+        }
         self.set_dead();
     }
 }

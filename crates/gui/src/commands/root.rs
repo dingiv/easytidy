@@ -1,7 +1,7 @@
 //! root 终端命令（容器内 root 通道）。
 //!
 //! 新设计（2026-09-01）：root-channel 跑在**容器内**，由本模块通过
-//! `podman exec --user 0 <container> /usr/bin/easytidy-root-channel --{mode}` 拉起。
+//! `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel --{mode}` 拉起。
 //!
 //! ## 启动流程（root_terminal_attach）
 //! 1. exec `--bootstrap`：确保 daemon 在容器内运行（不存在 → `setsid -f` 启动）
@@ -24,7 +24,7 @@ use crate::state::PtyEvent;
 
 /// 容器内 root-channel 二进制路径（exec 目标）。
 ///
-/// 必须用**容器内路径** `/usr/bin/easytidy-root-channel`（bind-mount 目标）；
+/// 必须用**容器内路径** `/run/easytidy-bin/easytidy-root-channel`（bind-mount 目标）；
 /// 宿主侧 `root_channel_binary_path()` 是 dev 相对路径 `crates/core/../../target/...`，
 /// runc 在容器命名空间 stat 不到 → "no such file or directory"。bind-mount 阶段
 /// 才用宿主路径（`create_with_config` 内部已处理）。
@@ -33,7 +33,7 @@ fn root_channel_bin() -> &'static str {
 }
 
 /// 在容器内启动 root-channel daemon（如未运行）。
-/// 走 `podman exec --user 0 <container> /usr/bin/easytidy-root-channel bootstrap`。
+/// 走 `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel bootstrap`。
 /// daemon 由 `bootstrap` 内部 spawn（setsid 独立 session）启动，本进程不持有 daemon。
 async fn bootstrap_root_channel(
     podman: &easytidy_core::podman::Podman,
@@ -375,18 +375,78 @@ pub async fn root_terminal_resize(
 }
 
 /// 主动关闭 root 会话（drop exec stream → client exit → daemon 保留 bash）。
+/// **detach**：仅断开本面板与 root 会话的桥（drop exec input → client 退出），
+/// **后台 bash 继续存在**（daemon 保留 session，可重新 attach 复用）。
 #[tauri::command]
-pub async fn root_terminal_close(
+pub async fn root_terminal_detach(
     session: tauri::State<'_, Option<GuiSession>>,
 ) -> Result<(), String> {
     let sess = session
         .inner()
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-    // detach 语义：清 root_sink。drop exec input 句柄 → podman exec 侧 stdin
-    // EOF → client exit → daemon 保留 bash。root 终端输出流也会随之关闭。
+    // 清 root_sink：drop exec input 句柄 → podman exec 侧 stdin EOF → client
+    // exit → daemon 保留 bash（detach 语义，会话后台继续存在）。
     *sess.root_sink.lock().await = None;
+    tracing::info!("root terminal detached（会话后台保留）");
     Ok(())
+}
+
+/// **关闭**：真正 kill root bash 会话（`client close <sid>` → daemon SIGHUP
+/// bash 进程组 → session 移除）。与 detach 的区别：detach 保留后台会话、close
+/// 彻底终结。
+#[tauri::command]
+pub async fn root_terminal_close(
+    podman: tauri::State<'_, PodmanState>,
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<(), String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container_name = sess.container_name.clone();
+
+    // Step 1: 断开当前 client 桥（防 close 时 bash 输出打到已卸载面板）
+    *sess.root_sink.lock().await = None;
+
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+
+    // Step 2: 找既有 alive session → client close（daemon kill bash）
+    let result = async {
+        let sessions = list_root_sessions(&p, &container_name).await?;
+        let Some(sid) = sessions.iter().find(|s| s.alive).map(|s| s.id) else {
+            tracing::info!("root_terminal_close: 无存活 session，无需关闭");
+            return Ok::<(), anyhow::Error>(());
+        };
+        let cmd = vec![
+            root_channel_bin().to_string(),
+            "client".to_string(),
+            "close".to_string(),
+            "--session-id".to_string(),
+            sid.to_string(),
+        ];
+        let exec = p
+            .exec_no_tty(&container_name, "0", cmd)
+            .await
+            .map_err(|e| anyhow::anyhow!("exec root-channel client close 失败：{e}"))?;
+        use futures::StreamExt;
+        let mut stream = exec.output;
+        let mut buf = String::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(bytes) = item {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        // client close 出错时 stderr 进 buf，返回提示
+        if buf.contains("Error") || buf.contains("failed") {
+            tracing::warn!("root_terminal_close 输出：{buf}");
+        }
+        tracing::info!("root session {sid} closed");
+        Ok(())
+    }
+    .await;
+    podman.return_podman(p).await;
+    result.map_err(|e| e.to_string())
 }
 
 /// 读取 root-channel 日志（容器内 `/run/easytidy/root-channel.log`）。

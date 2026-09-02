@@ -22,7 +22,7 @@ impl Podman {
     /// - 建号（仅 `params.user_name` 有值；home = `/home/<name>`）
     /// - 家目录补齐（**恒执行**：缺失则创建、属主/权限纠正为 uid:gid/750）
     ///
-    /// 实现：exec 容器内 `/usr/bin/easytidy-ctool prepare --uid --gid
+    /// 实现：exec 容器内 `/run/easytidy-bin/easytidy-ctool prepare --uid --gid
     /// [--name]`（argv 直传，不经 shell）——逻辑见
     /// [`crate::env::incontainer::prepare_in_container`]。
     ///

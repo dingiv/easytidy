@@ -1,6 +1,6 @@
 //! root-channel bootstrap 模式（确保 daemon 在容器内运行）。
 //!
-//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 <container> /usr/bin/easytidy-root-channel bootstrap`
+//! 调用入口：宿主 GUI/CLI → `podman exec --user 0 <container> /run/easytidy-bin/easytidy-root-channel bootstrap`
 //! 运行身份：容器内 root（uid=0，因 exec --user 0；server 是 uid 1000 不能拉起 root）
 //!
 //! 行为：

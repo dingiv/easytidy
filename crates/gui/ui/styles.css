@@ -848,6 +848,20 @@ button:disabled {
   color: #f38ba8;
 }
 
+/* detach（分离）按钮：非破坏性，hover 用中性蓝而非红 */
+.pane-tab-detach {
+  font-size: 0.7rem;
+  padding: 2px;
+  border-radius: 4px;
+  opacity: 0.6;
+}
+
+.pane-tab-detach:hover {
+  opacity: 1;
+  background: #89b4fa55;
+  color: #89b4fa;
+}
+
 .pane-empty {
   display: flex;
   align-items: center;

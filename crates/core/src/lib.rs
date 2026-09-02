@@ -149,7 +149,7 @@ pub fn server_binary_path() -> Result<PathBuf> {
 ///
 /// 与 [`server_binary_path`] 完全同构：`CTOOL_BIN` namespace dev/prod
 /// 候选 + `$XDG_DATA_HOME/easytidy/bin` 历史兼容回退。ctool 是容器内
-/// root 一次性工具（`/usr/bin/easytidy-ctool`），与 server 同为 musl
+/// root 一次性工具（`/run/easytidy-bin/easytidy-ctool`），与 server 同为 musl
 /// 静态二进制（同一构建目标，见 CTOOL_BIN namespace 注释）。
 pub fn ctool_binary_path() -> Result<PathBuf> {
     let loader = easytidy_shared::loader!();
@@ -170,16 +170,16 @@ pub fn ctool_binary_path() -> Result<PathBuf> {
     })
 }
 
-/// 容器内二进制（ro bind-mount 进容器）：server（常驻）+ ctool（root
-/// 一次性工具）+ root-channel（容器内 root 服务，daemon/client 双模式）。
-/// `create_with_config`/`rebuild` 的统一输入。
+/// 容器内二进制（ro bind-mount 进容器 `/run/easytidy-bin/`）：server（常驻）
+/// + ctool（root 一次性工具）+ root-channel（容器内 root 服务，daemon/client
+/// 双模式）。`create_with_config`/`rebuild` 的统一输入。
 #[derive(Debug, Clone)]
 pub struct ContainerBins {
-    /// → `/usr/bin/easytidy-server`
+    /// → `/run/easytidy-bin/easytidy-server`
     pub server: PathBuf,
-    /// → `/usr/bin/easytidy-ctool`
+    /// → `/run/easytidy-bin/easytidy-ctool`
     pub ctool: PathBuf,
-    /// → `/usr/bin/easytidy-root-channel`
+    /// → `/run/easytidy-bin/easytidy-root-channel`
     ///
     /// 新设计（2026-09-01）：root-channel 跑在**容器内**，由宿主 GUI/CLI 通过
     /// `podman exec --user 0 <container> <bin> --{bootstrap|client ...}` 拉起。

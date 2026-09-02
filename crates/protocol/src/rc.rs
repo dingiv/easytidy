@@ -50,6 +50,16 @@ pub struct RcResize {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RcClose;
 
+/// 主动关闭指定 session（client → daemon，standalone 不 attach）。
+///
+/// 与 attach 路径内的 `rc.close` 不同：这是独立的一次性命令（`client close
+/// --session-id N`），GUI 点终端"关闭"按钮时经它 kill 后台 bash。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RcCloseReq {
+    /// 要关闭的 daemon session_id
+    pub session_id: u64,
+}
+
 /// 存活探测（root_terminal_status 用；无需 attach 订阅）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RcPing;
