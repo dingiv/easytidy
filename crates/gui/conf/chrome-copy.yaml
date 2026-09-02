@@ -23,11 +23,11 @@ persistent: true
 keep_id: true
 
 # ---- GPU 透传（NVIDIA Container Toolkit）----
-# gpu 值格式 <vendor>[=<spec>]：nvidia / nvidia=all / nvidia=0 / nvidia=device=<uuid>
-# / amd / amd=all / amd=0 / all（向后兼容 → nvidia）。展开时经 <vendor>.com/gpu=<spec>
-# CDI 引用注入设备节点；NVIDIA 另注入 NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES
-# env。需宿主已装对应 Container Toolkit 且已生成 CDI spec。
-gpu: nvidia
+# gpu 快捷项：展开时经 nvidia.com/gpu=<值> CDI 引用注入设备节点（/dev/nvidia* +
+# /dev/dri/*）+ NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES env。需宿主已装
+# NVIDIA Container Toolkit 且已生成 CDI spec（/var/run/cdi/nvidia.yaml 或 /etc/cdi/）。
+# 通用能力在 core（inject_gpu_passthrough），具体值在此声明。值：all / 设备名 / device=<uuid>
+gpu: all
 # 额外设备直通（GUI 自动化用 uinput 造输入设备；裸设备 "宿主:容器[:权限]"）
 devices:
   - /dev/uinput:/dev/uinput

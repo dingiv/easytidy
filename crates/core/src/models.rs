@@ -146,10 +146,14 @@ pub struct ContainerParams {
     /// 实时探测注入（见 `inject_gui_passthrough`）。旧配置缺省 false。
     #[serde(default)]
     pub gui: bool,
-    /// GPU 透传（意图字段）：值为 "all" / 设备名 / "device=<uuid>"；展开/重建时经
-    /// `nvidia.com/gpu=<值>` CDI 引用注入设备节点 + NVIDIA_VISIBLE_DEVICES/
-    /// NVIDIA_DRIVER_CAPABILITIES env。需宿主 NVIDIA Container Toolkit 已生成 CDI
-    /// spec。None = 不透传。通用能力，具体值由配置/flavor 声明。
+    /// GPU 透传（意图字段）。值格式 `<vendor>[=<spec>]`：
+    /// - `nvidia` / `nvidia=all` / `nvidia=0` / `nvidia=device=<uuid>`
+    /// - `amd` / `amd=all` / `amd=0`
+    /// - `all` / `0` / `device=<uuid>`（向后兼容 → 视为 nvidia）
+    ///
+    /// 展开/重建时经 `<vendor>.com/gpu=<spec>` CDI 引用注入设备节点；NVIDIA 另注入
+    /// `NVIDIA_VISIBLE_DEVICES` / `NVIDIA_DRIVER_CAPABILITIES` env。需宿主已装对应
+    /// Container Toolkit 并生成 CDI spec。None = 不透传。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<String>,
     /// 设备直通（podman `--device` 列表；裸设备 "host:container[:perms]"，

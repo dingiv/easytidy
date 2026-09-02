@@ -155,8 +155,7 @@ mod tests {
 
     #[test]
     fn test_conf_template_gpu_expand() {
-        // gpu: all → 展开后 params.gpu = "all" + 注入 NVIDIA_* env（仅设备+env,
-        // 不隐式加 security_opts）
+        // gpu: all → 向后兼容 → NVIDIA：params.gpu = "all" + 注入 NVIDIA_* env
         let json = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
             "entry":"google-chrome-stable","entry_args":[],
@@ -170,10 +169,36 @@ mod tests {
         assert_eq!(cfg.params.gpu.as_deref(), Some("all"));
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
-        // 仅设备+env:不隐式注入 security_opts
         assert!(cfg.params.security_opts.is_empty(), "gpu 不应隐式加 security_opts");
 
-        // 未设 gpu → 不透传,不注入 NVIDIA env
+        // gpu: nvidia → 显式 vendor：params.gpu = "nvidia" + NVIDIA_* env
+        let json_n = r#"{
+            "name":"c3","image":"alpine","entry_args":[],
+            "mounts":[],"network":{"mode":"host","ports":[]},
+            "env":[],"silent_boot":false,"persistent":true,
+            "gpu":"nvidia"
+        }"#;
+        let tn: ConfTemplate = serde_json::from_str(json_n).unwrap();
+        let cfgn = tn.build_config("c3");
+        assert_eq!(cfgn.params.gpu.as_deref(), Some("nvidia"));
+        assert!(cfgn.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+
+        // gpu: amd → AMD：params.gpu = "amd"，无 NVIDIA_* env
+        let json_a = r#"{
+            "name":"c4","image":"alpine","entry_args":[],
+            "mounts":[],"network":{"mode":"host","ports":[]},
+            "env":[],"silent_boot":false,"persistent":true,
+            "gpu":"amd"
+        }"#;
+        let ta: ConfTemplate = serde_json::from_str(json_a).unwrap();
+        let cfga = ta.build_config("c4");
+        assert_eq!(cfga.params.gpu.as_deref(), Some("amd"));
+        assert!(
+            !cfga.env.iter().any(|e| e.starts_with("NVIDIA_")),
+            "AMD 不应注入 NVIDIA_* env"
+        );
+
+        // 未设 gpu → 不透传
         let json2 = r#"{
             "name":"c2","image":"alpine","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},

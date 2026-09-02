@@ -19,7 +19,10 @@ pub mod host;
 pub mod incontainer;
 
 pub use gui::{GuiPassthroughMount, GuiPassthroughRule};
-pub use host::{inject_gpu_passthrough, inject_gui_passthrough, inject_passthrough};
+pub use host::{
+    inject_gpu_passthrough, inject_gui_passthrough, inject_passthrough, parse_gpu_value,
+    GpuVendor,
+};
 pub use incontainer::{
     fixup_xdg_data_dirs_value, prepare_in_container, probe_xauthority, resolve_identity,
     self_uid_gid, Identity,

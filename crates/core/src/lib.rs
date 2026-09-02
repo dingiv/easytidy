@@ -8,9 +8,7 @@
 //! 铁律：不调用任何 podman CLI（见 docs/08-requirements.md L2）。
 
 use std::path::PathBuf;
-use crate::configfile::ConfigFile;
 use crate::error::{Error, Result};
-use crate::models::ContainerConfig;
 
 /// 宿主导出 .desktop 的 Exec 前缀（passthrough 机制）
 pub const EXEC_PREFIX: &str = "easytidy --container";
@@ -34,41 +32,22 @@ pub mod root_channel;
 pub mod systemd;
 pub mod userenv;
 
-/// 宿主侧 socket 目录的哈希后缀：基于容器「最终配置文件字符串」（`ContainerConfig`
-/// 的 canonical JSON 序列化）计算的确定性短哈希（FNV-1a-64 → 8 位小写 hex）。
+/// host socket 目录 = `$XDG_RUNTIME_DIR/easytidy/<name>`。
 ///
-/// 目录命名的意义：目录名 = `<name>-<hash>`，不裸用容器名；同一容器因配置变化
-/// 重建时目录名跟着变，避免派生/重建目录混淆。各进程凭同一 config 可复算同一路径。
-fn socket_dir_hash(config: &ContainerConfig) -> Result<String> {
-    let serialized = serde_json::to_string(config)
-        .map_err(|e| Error::Config(format!("序列化容器配置失败：{e}")))?;
-    // 取 FNV-1a-64 高 32 位 → 恰好 8 位小写 hex（`{:08x}` 只保证≥8，需截断）
-    Ok(format!("{:016x}", fnv1a64(serialized.as_bytes()))[..8].to_string())
-}
-
-/// FNV-1a 64-bit。确定性哈希（std `DefaultHasher` 带随机种子，不可用于跨进程路径派生）。
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
-}
-
-/// 由容器名 + 最终配置计算 **host socket 目录**（`$XDG_RUNTIME_DIR/easytidy/<name>-<hash>`）。
-///
-/// 供 `create_with_config`（bind-mount 源，须先于容器存在）与 rebuild 换代清理共用。
-pub(crate) fn socket_dir_for(name: &str, config: &ContainerConfig) -> Result<PathBuf> {
+/// **按容器名寻址，不依赖 config**——一个容器一个 socket 目录，容器名唯一即路径
+/// 唯一。不掺 config hash（曾按 `<name>-<config-hash>` 命名，但 `env` 是 session
+/// 耦合的解析快照（DISPLAY/XDG_RUNTIME_DIR 等），hash 随会话漂移，而容器 source 在
+/// 创建时固化为死值 → 两者分叉，重启后 `podman start` 挂不上的死源 → 500，
+/// 2026-09-01 chrome 实例实测）。容器 source 与 [`host_socket_path`] /
+/// `ensure_socket_dir` 都只依赖 name，永远一致。
+pub(crate) fn socket_dir_for(name: &str) -> Result<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
-    let hash = socket_dir_hash(config)?;
-    Ok(PathBuf::from(runtime_dir)
-        .join("easytidy")
-        .join(format!("{name}-{hash}")))
+    Ok(PathBuf::from(runtime_dir).join("easytidy").join(name))
 }
 
-/// 列出某容器名下所有已存在的 socket 目录（`$XDG_RUNTIME_DIR/easytidy/` 下以
-/// `<name>-` 开头、或 == `<name>` 旧格式），按 mtime 降序（最新代在前）。
+/// 列出某容器名下所有已存在的 socket 目录（`$XDG_RUNTIME_DIR/easytidy/` 下
+/// `== <name>`（新格式，纯 name）或以 `<name>-` 开头（旧 `<name>-<hash>` 格式，
+/// 兼容存量容器），按 mtime 降序（最新代在前）。
 ///
 /// 目录不存在/读不到 → 空列表（不报错：开机 XDG_RUNTIME_DIR 重建后目录本就可能缺席）。
 fn resolve_socket_dirs(name: &str) -> Vec<PathBuf> {
@@ -113,17 +92,15 @@ pub fn host_socket_path(name: &str) -> Result<PathBuf> {
     // 缺失时给出 NoXdgRuntime —— 不可落到 config 分支才报 Connect）
     let _runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
 
-    // 1. 现有目录优先（首启时 autostart 在 config 注册前触发，只能走这里）
+    // 1. 现有目录优先（首启时 autostart 在 config 注册前触发，只能走这里；
+    //    resolve 兼容旧 `<name>-<hash>` 格式的存量容器）
     if let Some(dir) = resolve_socket_dirs(name).into_iter().next() {
         return Ok(dir.join("server.sock"));
     }
 
-    // 2. 无目录（开机目录被清、容器已注册）→ 按 configfile 重算 hash
-    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
-    let config = config_file.get_container(name)?.ok_or_else(|| {
-        Error::Connect(format!("socket 目录不存在：容器 {name} 未注册且无现有目录"))
-    })?;
-    Ok(socket_dir_for(name, &config)?.join("server.sock"))
+    // 2. 无目录（开机 XDG_RUNTIME_DIR 重建后）→ 按容器名直接定位
+    // （socket 目录 = easytidy/<name>，纯 name 寻址，不依赖 config 注册时序）
+    Ok(socket_dir_for(name)?.join("server.sock"))
 }
 
 /// 清理某容器名**所有代**的 socket 目录（尽力而为：失败仅告警）。
@@ -356,18 +333,19 @@ mod tests {
     }
 
     #[test]
-    fn test_socket_dir_hash_deterministic() {
-        let a = ContainerConfig { name: "chrome".into(), ..Default::default() };
-        let b = ContainerConfig { name: "chrome".into(), ..Default::default() };
-        let h_a = socket_dir_hash(&a).unwrap();
-        let h_b = socket_dir_hash(&b).unwrap();
-        assert_eq!(h_a, h_b, "相同配置应得相同 hash");
-        assert_eq!(h_a.len(), 8, "hash 应为 8 位 hex");
-
-        let mut diff = b;
-        diff.params.image = "example.com/other:latest".into();
-        let h_diff = socket_dir_hash(&diff).unwrap();
-        assert_ne!(h_a, h_diff, "不同配置应得不同 hash");
+    fn test_socket_dir_for_uses_container_name() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // socket 目录 = easytidy/<name>，纯 name 寻址（不依赖 config，避免漂移）
+        let original = std::env::var("XDG_RUNTIME_DIR").ok();
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path());
+        let dir = socket_dir_for("chrome").unwrap();
+        assert!(dir.ends_with("easytidy/chrome"), "应为 $XDG_RUNTIME_DIR/easytidy/chrome：{dir:?}");
+        if let Some(val) = original {
+            std::env::set_var("XDG_RUNTIME_DIR", val);
+        } else {
+            std::env::remove_var("XDG_RUNTIME_DIR");
+        }
     }
 
     #[test]

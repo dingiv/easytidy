@@ -204,17 +204,17 @@ function MasterViewInner() {
             />
             <hr className="master-sidebar-divider" />
             <SidebarIcon
-              label="配置编辑器"
-              icon={<PlusOutlined />}
-              active={isActive('new-container')}
-              onClick={() => openPane('new-container')}
-            />
-            <hr className="master-sidebar-divider" />
-            <SidebarIcon
               label="模板管理"
               icon={<AppstoreOutlined />}
               active={isActive('flavors')}
               onClick={() => openPane('flavors')}
+            />
+            <hr className="master-sidebar-divider" />
+            <SidebarIcon
+              label="新增容器"
+              icon={<PlusOutlined />}
+              active={isActive('new-container')}
+              onClick={() => openPane('new-container')}
             />
           </nav>
         </aside>

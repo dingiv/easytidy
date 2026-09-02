@@ -22,6 +22,12 @@ silent_boot: false
 persistent: true
 user_home: true
 
+# GPU 透传（NVIDIA Container Toolkit）：值格式 <vendor>[=<spec>]
+gpu: nvidia
+security_opts:
+  - label=disable
+  - apparmor=unconfined
+
 mounts:
   # X11 socket（Wayland 会话下兜底兼容 X11 应用）
   - host_path: /tmp/.X11-unix

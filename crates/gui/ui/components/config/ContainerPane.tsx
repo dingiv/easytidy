@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Input, Space, Switch, Tag, Typography } from 'antd';
+import { Input, Select, Space, Switch, Tag, Typography } from 'antd';
 import type { ContainerConfig, ImageSummary } from '../../types';
 import { ImageSelect } from './ImageSelect';
 
@@ -110,23 +110,43 @@ export function ContainerPane({
       <div className="config-field">
         <label>GPU 透传</label>
         <Space>
-          <Switch
-            checked={!!edit.gpu}
-            onChange={(v) => onGpuChange(v ? 'all' : null)}
-            checkedChildren="开"
-            unCheckedChildren="关"
+          <Select
+            style={{ width: 120 }}
+            value={(() => {
+              if (!edit.gpu) return '';
+              const v = edit.gpu.split('=')[0];
+              return v === 'nvidia' || v === 'amd' ? v : 'nvidia';
+            })()}
+            onChange={(vendor: string) => onGpuChange(vendor || null)}
+            options={[
+              { value: '', label: '关闭' },
+              { value: 'nvidia', label: 'NVIDIA' },
+              { value: 'amd', label: 'AMD' },
+            ]}
           />
           {edit.gpu && (
             <Input
               style={{ width: 200 }}
-              value={edit.gpu}
-              onChange={(e) => onGpuChange(e.target.value.trim() || 'all')}
+              value={(() => {
+                const idx = edit.gpu!.indexOf('=');
+                return idx === -1 ? 'all' : edit.gpu!.slice(idx + 1);
+              })()}
+              onChange={(e) => {
+                const spec = e.target.value.trim() || 'all';
+                const vendor = edit.gpu!.split('=')[0];
+                const v = vendor === 'nvidia' || vendor === 'amd' ? vendor : 'nvidia';
+                onGpuChange(spec === 'all' ? v : `${v}=${spec}`);
+              }}
               placeholder="all / 0 / device=<uuid>"
             />
           )}
         </Space>
         <Typography.Text type="secondary" className="section-hint">
-          经 nvidia.com/gpu=&lt;值&gt; 注入设备节点 + NVIDIA_* env（见「环境变量」页只读项）；需宿主已装 NVIDIA Container Toolkit 并生成 CDI spec
+          经 &lt;vendor&gt;.com/gpu=&lt;值&gt; 注入设备节点
+          {edit.gpu && edit.gpu.startsWith('nvidia')
+            ? ' + NVIDIA_* env'
+            : ''}
+          （见「环境变量」页只读项）；需宿主已装对应 Container Toolkit 并生成 CDI spec
         </Typography.Text>
       </div>
       {edit.flavor && (

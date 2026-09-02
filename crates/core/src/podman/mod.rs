@@ -10,6 +10,7 @@
 //!
 //! 铁律：零 podman CLI 调用（见 docs/08-requirements.md L2）。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use bollard::Docker;
 use crate::error::{Error, Result};
@@ -201,10 +202,9 @@ impl Podman {
             )));
         }
 
-        // 创建宿主 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<config-hash>；
-        // bind-mount 源须先于容器存在，目录名由最终配置哈希派生——同一容器因
-        // 配置变化换代时目录名跟着变，各代互不混淆）
-        let socket_host_dir = crate::socket_dir_for(name, config)?;
+        // 创建宿主 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>；bind-mount 源须
+        // 先于容器存在，按容器名寻址——纯 name 不依赖 config，避免 config 漂移分叉）
+        let socket_host_dir = crate::socket_dir_for(name)?;
 
         tokio::fs::create_dir_all(&socket_host_dir).await
             .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
@@ -436,6 +436,38 @@ impl Podman {
         Ok(id)
     }
 
+    /// 挂载去重（最后一道防墙）：按 `container_path` 去重，保留先出现的；同目标
+    /// 不同 host_path 或 read_only 不同的告警（用户最可能需要知道）。空
+    /// `container_path` 视为无效丢弃（libpod 会拒绝）。
+    ///
+    /// **加在 `expand_user_mounts` 末尾**：路径变量已展开为绝对路径，比较无歧义；
+    /// 在 mount 进入 `host_config.mounts` 之前 → podman 不会再因重复 destination
+    /// 报 HTTP 500。引擎保留目标（`/usr/bin/easytidy-server` 等）由后续 push 阶段
+    /// 处理（用户 mount 撞引擎目标会让 podman 拒——这是预期行为，不在此去重）。
+    fn dedup_mounts(mounts: &mut Vec<MountConfig>) {
+        let mut seen: HashSet<String> = HashSet::with_capacity(mounts.len());
+        let original_len = mounts.len();
+        mounts.retain(|m| {
+            if m.container_path.is_empty() {
+                tracing::warn!("挂载去重：container_path 为空，已丢弃（host_path={:?}）", m.host_path);
+                return false;
+            }
+            if seen.insert(m.container_path.clone()) {
+                true
+            } else {
+                tracing::warn!(
+                    "挂载去重：container_path={} 重复，跳过后续定义（host_path={:?}, read_only={}）",
+                    m.container_path, m.host_path, m.read_only
+                );
+                false
+            }
+        });
+        let dropped = original_len - mounts.len();
+        if dropped > 0 {
+            tracing::debug!("挂载去重：丢弃 {dropped} 项（保留 {} 项）", mounts.len());
+        }
+    }
+
     /// 展开用户配置的挂载路径变量（`${HOME}`/`${USER}`/`${UID}`/`${GID}`）。
     ///
     /// 宿主侧/容器侧上下文相关：同一变量名在 `host_path` 取宿主值、在
@@ -461,7 +493,9 @@ impl Podman {
             .iter()
             .any(|m| m.host_path.contains("${") || m.container_path.contains("${"))
         {
-            return Ok(mounts.to_vec());
+            let mut out = mounts.to_vec();
+            Self::dedup_mounts(&mut out);
+            return Ok(out);
         }
 
         // 宿主侧：仅当 host_path 实际用到变量时才需要宿主用户（否则空占位，
@@ -492,7 +526,9 @@ impl Podman {
         };
         let container_pv = container_path_vars(uid, gid, user_name, image_passwd.as_deref());
 
-        expand_mounts(mounts, &host_pv, &container_pv)
+        let mut out = expand_mounts(mounts, &host_pv, &container_pv)?;
+        Self::dedup_mounts(&mut out);
+        Ok(out)
     }
 
     /// 探测镜像的 /etc/passwd（建一次性普通容器 → 读 archive → 删除）。
@@ -605,8 +641,8 @@ impl Podman {
         config: &ContainerConfig,
         bins: &crate::ContainerBins,
     ) -> Result<String> {
-        // 先记下现有 socket 目录（重建会以新 hash 换代命名；成功后清理旧代孤儿。
-        // config 未变时新旧同名——按新目录做白名单，见第 6 步）
+        // 先记下现有 socket 目录（重建后 socket 目录 = easytidy/<name>；成功后清理
+        // 旧代孤儿 `<name>-<hash>`。纯 name 目录即当前代——按新目录做白名单，见第 6 步）
         let legacy_socket_dirs = crate::resolve_socket_dirs(name);
 
         // 1. commit 当前容器层（bind mount 不入镜像）
@@ -640,9 +676,10 @@ impl Podman {
             )));
         }
 
-        // 6. 清理旧代 socket 目录（新代已由 create 以新 hash 命名；config 未变时
-        //    新旧同名 → 跳过当前代，避免误删正在使用的目录）
-        let new_socket_dir = crate::socket_dir_for(name, config)?;
+        // 6. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建；旧
+        //    `<name>-<hash>` 代目录清理，纯 name 目录即当前代 → 跳过，避免误删
+        //    正在使用的目录）
+        let new_socket_dir = crate::socket_dir_for(name)?;
         for legacy in legacy_socket_dirs {
             if legacy != new_socket_dir {
                 tracing::debug!("重建后清理旧代 socket 目录：{}", legacy.display());
@@ -1318,6 +1355,8 @@ mod tests {
         assert!(body.get("selinux_opts").is_none());
         assert!(body.get("seccomp_profile_path").is_none());
         assert_eq!(body["init"], true);
+        // entrypoint 始终置空（清镜像 ENTRYPOINT；command 即 PID 1 字面命令）
+        assert_eq!(body["entrypoint"], serde_json::json!([]));
 
         // gpu = "all" → nvidia.com/gpu=all CDI 引用（与 podman --gpus all 等价）
         let body = make(Vec::new(), Some("all"), None, Vec::new());
@@ -1331,6 +1370,18 @@ mod tests {
         let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), Some("0"), None, Vec::new());
         assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
         assert_eq!(body["devices"][1]["path"], "nvidia.com/gpu=0");
+
+        // gpu = "nvidia" → nvidia.com/gpu=all（显式 vendor 前缀）
+        let body = make(Vec::new(), Some("nvidia"), None, Vec::new());
+        assert_eq!(body["devices"][0]["path"], "nvidia.com/gpu=all");
+
+        // gpu = "amd" → amd.com/gpu=all（AMD CDI）
+        let body = make(Vec::new(), Some("amd"), None, Vec::new());
+        assert_eq!(body["devices"][0]["path"], "amd.com/gpu=all");
+
+        // gpu = "amd=0" → amd.com/gpu=0
+        let body = make(Vec::new(), Some("amd=0"), None, Vec::new());
+        assert_eq!(body["devices"][0]["path"], "amd.com/gpu=0");
 
         // pid = host → pidns.nsmode = host 且 init 禁用（catatonit 无法进 host PID ns）
         let body = make(Vec::new(), None, Some("host"), Vec::new());
@@ -1425,5 +1476,90 @@ mod tests {
             .expect("展开应成功");
         assert_eq!(out2[0].host_path, "/home/div/workspace");
         assert_eq!(out2[0].container_path, "/workspace");
+    }
+
+    #[test]
+    fn test_dedup_mounts_keeps_first() {
+        // 同 container_path 重复 → 保留第一条，后条被丢弃（warn 日志）
+        let mut mounts = vec![
+            MountConfig {
+                host_path: "/data/a".into(),
+                container_path: "/home/ubuntu/foo".into(),
+                read_only: false,
+            },
+            MountConfig {
+                host_path: "/data/b".into(),
+                container_path: "/home/ubuntu/foo".into(),
+                read_only: true,
+            },
+            MountConfig {
+                host_path: "/data/c".into(),
+                container_path: "/home/ubuntu/bar".into(),
+                read_only: false,
+            },
+        ];
+        Podman::dedup_mounts(&mut mounts);
+        assert_eq!(mounts.len(), 2, "重复 container_path 应被丢弃");
+        assert_eq!(mounts[0].host_path, "/data/a", "保留先出现的");
+        assert_eq!(mounts[1].host_path, "/data/c");
+    }
+
+    #[test]
+    fn test_dedup_mounts_drops_empty_container_path() {
+        let mut mounts = vec![
+            MountConfig {
+                host_path: "/data/a".into(),
+                container_path: "".into(),
+                read_only: false,
+            },
+            MountConfig {
+                host_path: "/data/b".into(),
+                container_path: "/valid".into(),
+                read_only: false,
+            },
+        ];
+        Podman::dedup_mounts(&mut mounts);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].container_path, "/valid");
+    }
+
+    #[test]
+    fn test_dedup_mounts_all_unique() {
+        let mut mounts = vec![
+            MountConfig {
+                host_path: "/data/a".into(),
+                container_path: "/foo".into(),
+                read_only: false,
+            },
+            MountConfig {
+                host_path: "/data/b".into(),
+                container_path: "/bar".into(),
+                read_only: false,
+            },
+        ];
+        Podman::dedup_mounts(&mut mounts);
+        assert_eq!(mounts.len(), 2, "无重复时不动");
+    }
+
+    #[test]
+    fn test_dedup_mounts_fast_path_dedup() {
+        // fast-path（无 ${}）也走 dedup_mounts：直接验证 dedup_mounts 对
+        // 无变量 mount 同样生效（expand_user_mounts 的 fast-path 返回前调用）。
+        // 这里不调 expand_user_mounts（需 Podman 实例），仅覆盖 dedup 本身。
+        let mut mounts = vec![
+            MountConfig {
+                host_path: "/data/a".into(),
+                container_path: "/x".into(),
+                read_only: false,
+            },
+            MountConfig {
+                host_path: "/data/b".into(),
+                container_path: "/x".into(),
+                read_only: true,
+            },
+        ];
+        Podman::dedup_mounts(&mut mounts);
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host_path, "/data/a");
     }
 }

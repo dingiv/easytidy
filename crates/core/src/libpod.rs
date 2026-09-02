@@ -273,8 +273,8 @@ pub fn keep_id_create_body(
     keep_id: bool,
     // 设备直通：裸设备 "host:container[:perms]" 列表（SpecGenerator devices 的 Path）
     devices: Vec<String>,
-    // GPU 透传："all" 或设备名 / "device=<uuid>"；经 nvidia.com/gpu=<值> CDI 引用注入
-    // 设备节点。None = 无 GPU
+    // GPU 透传：`<vendor>[=<spec>]`（nvidia / amd）；经 `<vendor>.com/gpu=<spec>`
+    // CDI 引用注入设备节点。None = 无 GPU
     gpu: Option<&str>,
     // PID 命名空间模式（"host" 等）；None = private。非 private 时禁用 init
     pid: Option<&str>,
@@ -343,9 +343,9 @@ pub fn keep_id_create_body(
     };
 
     // 设备直通：SpecGenerator 的 devices 字段是 []spec.LinuxDevice，其 Path 既能是
-    // 裸设备串（"host:container[:perms]"）也能是 CDI 引用（"nvidia.com/gpu=all"）——
-    // podman CLI 的 --device 与 --gpus 都归一化成此（见 FillOutSpecGen：
-    // --gpus 逐值拼 "nvidia.com/gpu=<值>" 追加进 devices）。GPU 由此经 CDI 注入设备节点。
+    // 裸设备串（"host:container[:perms]"）也能是 CDI 引用（"nvidia.com/gpu=all" /
+    // "amd.com/gpu=all"）——podman CLI 的 --device 与 --gpus 都归一化成此。
+    // GPU 由此经 CDI 注入设备节点；vendor 由 `gpu` 值前缀决定（nvidia/amd）。
     let mut device_list: Vec<Value> = Vec::new();
     for d in &devices {
         if !d.trim().is_empty() {
@@ -353,7 +353,8 @@ pub fn keep_id_create_body(
         }
     }
     if let Some(gpu) = gpu.map(str::trim).filter(|g| !g.is_empty()) {
-        device_list.push(json!({ "path": format!("nvidia.com/gpu={gpu}") }));
+        let (vendor, spec) = crate::env::parse_gpu_value(gpu);
+        device_list.push(json!({ "path": format!("{}.com/gpu={}", vendor.cdi_prefix(), spec) }));
     }
 
     // PID 命名空间：SpecGenerator 的 pidns.nsmode。默认即 private（省略该字段），
@@ -402,6 +403,11 @@ pub fn keep_id_create_body(
         "portmappings": portmappings,
         "working_dir": working_dir,
     });
+    // 清空镜像 ENTRYPOINT：libpod 语义下 `command` 是追加到 ENTRYPOINT 之后的参数
+    // （非「替换」），镜像若设 ENTRYPOINT（如 mysql/postgres/redis 的 `bash -c`、
+    // 各类带 ENTRYPOINT 的镜像）会包住我们的 command → server 启动失败（参数被消费）。
+    // 显式置空数组 → 镜像 ENTRYPOINT 不生效，`command` 即为 PID 1 的字面命令。
+    body["entrypoint"] = json!([]);
     // libpod 专属：keep-id 用户命名空间。注意：字段放**顶层** userns
     // （实测 namespaces.userns 被忽略）。
     // 真实映射语义（实测文件属主，2026-08-07；/proc/self/uid_map 字面
