@@ -41,16 +41,24 @@ pub struct ConfTemplate {
     pub setup: Vec<String>,
 }
 
-/// 模板列表项：[`ConfTemplate`] + 磁盘路径。
+/// 模板列表项：[`ConfTemplate`] + 磁盘身份。
 ///
 /// `#[serde(flatten)]` 平铺模板字段（与 `ConfTemplate` JSON 形状一致）,另加
-/// `path`——仅运行时填充,供 GUI 展示文件位置;`ConfTemplate` 本身保持纯
-/// YAML 形状（路径不入文件,避免 `conf_save_template` 序列化时污染）。
+/// `id` / `path`——仅运行时填充,供 GUI 展示与**按文件名定位**;`ConfTemplate`
+/// 本身保持纯 YAML 形状（身份/路径不入文件,避免 `conf_save_template`
+/// 序列化时污染）。
+///
+/// **身份语义（2026-09-02 修复）**：模板的文件 stem（`id`）才是稳定身份——
+/// 不是 YAML 内 `config.name`（= 默认容器名，复制不重写时会撞名）。
+/// GUI 增删改用 `id`，杜绝「删 copy 删到原文件」。
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfTemplateInfo {
     #[serde(flatten)]
     pub template: ConfTemplate,
-    /// 模板在磁盘上的绝对路径（`<conf_dir>/<name>.yaml`）
+    /// 模板身份 = 文件名 stem（`chrome.yaml` → `chrome`；含 `.copy` 等后缀）。
+    /// 增删改/展开一律用它定位文件（`<conf_dir>/<id>.yaml`）。
+    pub id: String,
+    /// 模板在磁盘上的绝对路径（`<conf_dir>/<id>.yaml`）
     pub path: String,
 }
 

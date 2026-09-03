@@ -5,7 +5,7 @@
 # (见 core::conf_template::ConfTemplate::build_config + inject_gui_passthrough)。
 #
 # GUI 透传开关 = gui: true（展开时宿主 env 自动注入 + 字体图标只读挂载 + /tmp/.X11-unix +
-# $XDG_RUNTIME_DIR 挂载 + 强开 keep_id）。
+# $XDG_RUNTIME_DIR 挂载 + user_home 强开 keep-id）。
 # entry_args 加 --ozone-platform=wayland：Wayland 会话下 Chrome 走 Wayland 而非 X11,
 # 避免 X11 链路上的 XAUTHORITY 不可达 / dbus 系统总线缺失导致的初始化失败。
 #
@@ -20,25 +20,13 @@ entry_args:
   - --ozone-platform=wayland  # Wayland 会话下避免 X11 初始化失败
 silent_boot: false
 persistent: true
-keep_id: true
+user_home: true
 
-# ---- GPU 透传（NVIDIA Container Toolkit）----
-# gpu 值格式 <vendor>[=<spec>]：nvidia / nvidia=all / nvidia=0 / nvidia=device=<uuid>
-# / amd / amd=all / amd=0 / all（向后兼容 → nvidia）。展开时经 <vendor>.com/gpu=<spec>
-# CDI 引用注入设备节点；NVIDIA 另注入 NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES
-# env。需宿主已装对应 Container Toolkit 且已生成 CDI spec。
+# GPU 透传（NVIDIA Container Toolkit）：值格式 <vendor>[=<spec>]
 gpu: nvidia
-# 额外设备直通（GUI 自动化用 uinput 造输入设备；裸设备 "宿主:容器[:权限]"）
-devices:
-  - /dev/uinput:/dev/uinput
-# 安全选项：防 SELinux/AppArmor 拦截 GPU 设备节点（label=disable 在无 SELinux 宿主上为无害 no-op）
 security_opts:
   - label=disable
   - apparmor=unconfined
-# 可选：PID 命名空间共享宿主。注意与 init(catatonit) 互斥——启用时容器不再注入
-# init，server 直接作为进程运行（孤儿进程由宿主 init 回收）。Chrome 本身不需要，
-# 仅特定 GUI 应用需要时取消注释：
-# pid: host
 
 mounts:
   # X11 socket（Wayland 会话下兜底兼容 X11 应用）
@@ -56,10 +44,6 @@ mounts:
   - host_path: /usr/share/icons
     container_path: /mnt/host/icons
     read_only: true
-  # 宿主系统 dbus socket（部分 GUI 应用经系统总线通信；静态宿主路径,非 session 耦合）
-  - host_path: /run/dbus/system_bus_socket
-    container_path: /run/dbus/system_bus_socket
-    read_only: false
 
 network:
   mode: host
@@ -67,7 +51,7 @@ network:
 
 # XDG_DATA_DIRS 非 session 耦合（gdk-pixbuf loader cache 需要宿主目录追加在系统默认之前）,
 # 保留在模板里。DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR 在展开时按宿主 env
-# 动态注入,模板里不写。NVIDIA_* env 由 gpu 快捷项在展开时注入,模板里不写。
+# 动态注入,模板里不写。
 env:
   - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
 

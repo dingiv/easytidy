@@ -210,6 +210,13 @@ fn conf_dir() -> Result<std::path::PathBuf, String> {
     Ok(dir)
 }
 
+/// 从模板文件路径取身份 stem（`chrome.copy.yaml` → `chrome.copy`）。
+/// 列表展示的 `id` 即此值——GUI 增删改用它定位文件，与 YAML 内 `config.name`
+/// 解耦（后者可能因历史复制不改名而撞车）。
+fn template_stem(p: &std::path::Path) -> &str {
+    p.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+}
+
 /// 简易 IO 句柄：读写 conf 模板文件（YAML 文本存取，解析在本命令层）。
 ///
 /// 目录走 [`conf_dir`]（双轨制）。从 core 迁入（2026-08-26）：conf 域 GUI 独占
@@ -217,46 +224,92 @@ fn conf_dir() -> Result<std::path::PathBuf, String> {
 struct ConfTemplateStore;
 
 impl ConfTemplateStore {
+    /// 规范化模板名 → 文件名 stem：`chrome`/`chrome.yaml`/`chrome.yml` → `chrome`。
+    ///
+    /// 模板身份 = 文件 stem（非 YAML 内 `config.name`）。防止调用方带扩展名
+    /// 导致 `chrome.yaml.yaml` 这类错位路径。
+    fn stem(name: &str) -> String {
+        let n = name.trim();
+        let stem = n
+            .strip_suffix(".yaml")
+            .or_else(|| n.strip_suffix(".yml"))
+            .unwrap_or(n);
+        stem.to_string()
+    }
+
     /// 读模板文件原文（YAML 字符串）。模板不存在 → Err。
     fn read_yaml(name: &str) -> Result<String, String> {
-        let path = conf_dir()?.join(format!("{name}.yaml"));
-        if !path.exists() {
-            return Err(format!("模板不存在：{name}"));
-        }
-        std::fs::read_to_string(&path).map_err(|e| format!("读取模板 {name} 失败：{e}"))
+        Self::read_yaml_in(&conf_dir()?, name)
     }
 
-    /// 写回模板（原子写；目录由 conf_dir 确保存在）。
+    /// 在指定目录下读（测试注入临时目录用；逻辑与 [`Self::read_yaml`] 一致）。
+    fn read_yaml_in(dir: &std::path::Path, name: &str) -> Result<String, String> {
+        let stem = Self::stem(name);
+        let path = dir.join(format!("{stem}.yaml"));
+        if !path.exists() {
+            return Err(format!("模板不存在：{stem}"));
+        }
+        std::fs::read_to_string(&path).map_err(|e| format!("读取模板 {stem} 失败：{e}"))
+    }
+
+    /// 写回模板（原子写；目录由 conf_dir 确保存在）。文件名 = stem（与
+    /// 编辑器 nameLocked 一致：`config.name` == stem，二者不分离）。
     fn write_yaml(name: &str, yaml: &str) -> Result<(), String> {
         let dir = conf_dir()?;
-        let target = dir.join(format!("{name}.yaml"));
-        let tmp = target.with_extension("yaml.tmp");
-        std::fs::write(&tmp, yaml).map_err(|e| format!("写入模板 {name} 临时文件失败：{e}"))?;
-        std::fs::rename(&tmp, &target).map_err(|e| format!("保存模板 {name} 失败：{e}"))
+        Self::write_yaml_in(&dir, name, yaml)
     }
 
-    /// 删除模板文件。
+    fn write_yaml_in(dir: &std::path::Path, name: &str, yaml: &str) -> Result<(), String> {
+        let stem = Self::stem(name);
+        let target = dir.join(format!("{stem}.yaml"));
+        let tmp = target.with_extension("yaml.tmp");
+        std::fs::write(&tmp, yaml).map_err(|e| format!("写入模板 {stem} 临时文件失败：{e}"))?;
+        std::fs::rename(&tmp, &target).map_err(|e| format!("保存模板 {stem} 失败：{e}"))
+    }
+
+    /// 删除模板文件（按 stem 定位，与列表展示的 `id` 一致）。
     fn delete(name: &str) -> Result<(), String> {
-        let path = conf_dir()?.join(format!("{name}.yaml"));
+        Self::delete_in(&conf_dir()?, name)
+    }
+
+    fn delete_in(dir: &std::path::Path, name: &str) -> Result<(), String> {
+        let stem = Self::stem(name);
+        let path = dir.join(format!("{stem}.yaml"));
         if !path.exists() {
-            return Err(format!("模板不存在：{name}"));
+            return Err(format!("模板不存在：{stem}"));
         }
-        std::fs::remove_file(&path).map_err(|e| format!("删除模板 {name} 失败：{e}"))
+        std::fs::remove_file(&path).map_err(|e| format!("删除模板 {stem} 失败：{e}"))
     }
 
     /// 复制模板为新的名字（`to` 已存在时报错防覆盖，同 flavor::duplicate）。
+    ///
+    /// **复制即改写内部 `config.name` = 新 stem**（2026-09-02 修复）：原实现
+    /// 逐字节拷贝，新文件的 `config.name` 仍是源名（如 `chrome`）→ 列表出现
+    /// 两个同名模板、删除按名撞到源文件、复制品「使用」预填的容器名与源冲突。
+    /// 改写后 `config.name` == stem，模板身份与默认容器名始终对齐。
     fn duplicate(from: &str, to: &str) -> Result<(), String> {
-        if to.trim().is_empty() || to == from {
+        Self::duplicate_in(&conf_dir()?, from, to)
+    }
+
+    fn duplicate_in(dir: &std::path::Path, from: &str, to: &str) -> Result<(), String> {
+        let from_stem = Self::stem(from);
+        let to_stem = Self::stem(to);
+        if to_stem.is_empty() || to_stem == from_stem {
             return Err("复制目标名无效".to_string());
         }
-        let dir = conf_dir()?;
-        let dst = dir.join(format!("{to}.yaml"));
+        let dst = dir.join(format!("{to_stem}.yaml"));
         if dst.exists() {
-            return Err(format!("模板 {to} 已存在，不能覆盖"));
+            return Err(format!("模板 {to_stem} 已存在，不能覆盖"));
         }
-        std::fs::copy(dir.join(format!("{from}.yaml")), &dst)
-            .map_err(|e| format!("复制模板 {from} → {to} 失败：{e}"))?;
-        Ok(())
+        let src = dir.join(format!("{from_stem}.yaml"));
+        let yaml = std::fs::read_to_string(&src)
+            .map_err(|e| format!("读取模板 {from_stem} 失败：{e}"))?;
+        let mut tpl: ConfTemplate =
+            serde_yaml::from_str(&yaml).map_err(|e| format!("解析模板 {from_stem} 失败：{e}"))?;
+        tpl.config.name = to_stem.clone();
+        let out = serde_yaml::to_string(&tpl)
+            .map_err(|e| format!("序列化模板 {to_stem} 失败：{e}"))?;
+        Self::write_yaml_in(dir, &to_stem, &out)
     }
 }
 
@@ -287,6 +340,7 @@ pub fn conf_templates() -> Result<Vec<ConfTemplateInfo>, String> {
         match serde_yaml::from_str::<ConfTemplate>(&yaml) {
             Ok(t) => out.push(ConfTemplateInfo {
                 template: t,
+                id: template_stem(&p).to_string(),
                 path: p.to_string_lossy().into_owned(),
             }),
             Err(e) => warn!("模板 {:?} 解析失败：{e}", p.file_name()),
@@ -939,5 +993,69 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "列表应按名排序");
+    }
+
+    /// 模板名 stem 规范化（增删改用 stem 定位文件，杜绝 `chrome.yaml.yaml`）。
+    #[test]
+    fn test_conf_template_stem_normalizes_extension() {
+        assert_eq!(ConfTemplateStore::stem("chrome"), "chrome");
+        assert_eq!(ConfTemplateStore::stem("chrome.yaml"), "chrome");
+        assert_eq!(ConfTemplateStore::stem("chrome.yml"), "chrome");
+        assert_eq!(ConfTemplateStore::stem(" chrome-copy.yaml "), "chrome-copy");
+        assert_eq!(ConfTemplateStore::stem("chrome-copy"), "chrome-copy");
+        assert_eq!(ConfTemplateStore::stem("a.b.yaml"), "a.b");
+    }
+
+    /// 回归（2026-09-02）：删「带 copy 的模板」不得误删源模板。
+    ///
+    /// 旧实现按 YAML 内 `config.name` 定位文件——复制不改名时 `chrome.yaml` 与
+    /// `chrome-copy.yaml` 内部都是 `name: chrome`，删 copy 会删到源文件。
+    /// 修复：身份 = 文件 stem，且复制改写内部 `config.name` = 新 stem。
+    #[test]
+    fn test_delete_by_stem_does_not_hit_source() {
+        let temp = TempDir::new().unwrap();
+        // 模拟历史缺陷产物：两个文件内部 name 都是 chrome（复制逐字节拷贝）
+        let chrome_yaml =
+            "name: chrome\nimage: alpine\nsilent_boot: true\npersistent: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n";
+        std::fs::write(temp.path().join("chrome.yaml"), chrome_yaml).unwrap();
+        std::fs::write(
+            temp.path().join("chrome-copy.yaml"),
+            "name: chrome\nimage: alpine\nsilent_boot: true\npersistent: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n",
+        )
+        .unwrap();
+
+        // 删「带 copy 的」→ 只删 chrome-copy.yaml，源文件保留
+        ConfTemplateStore::delete_in(temp.path(), "chrome-copy").unwrap();
+        assert!(!temp.path().join("chrome-copy.yaml").exists(), "copy 应被删除");
+        assert!(
+            temp.path().join("chrome.yaml").exists(),
+            "源模板 chrome.yaml 不应被误删"
+        );
+
+        // 扩展名调用同样定位正确
+        ConfTemplateStore::delete_in(temp.path(), "chrome.yaml").unwrap();
+        assert!(!temp.path().join("chrome.yaml").exists());
+    }
+
+    /// 复制后内部 `config.name` 必须改写为新 stem——否则复制品「使用」预填的
+    /// 容器名与源冲突，且再次删除会撞名。
+    #[test]
+    fn test_duplicate_rewrites_internal_name_to_stem() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(
+            temp.path().join("chrome.yaml"),
+            "name: chrome\nimage: alpine\nsilent_boot: true\npersistent: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n",
+        )
+        .unwrap();
+
+        ConfTemplateStore::duplicate_in(temp.path(), "chrome", "chrome-copy").unwrap();
+        let copy_yaml = std::fs::read_to_string(temp.path().join("chrome-copy.yaml")).unwrap();
+        assert!(
+            copy_yaml.contains("name: chrome-copy"),
+            "复制品内部 config.name 应为新 stem，实际：{copy_yaml}"
+        );
+        // 复制品可被独立删除（按 stem），不会误伤源
+        ConfTemplateStore::delete_in(temp.path(), "chrome-copy").unwrap();
+        assert!(temp.path().join("chrome.yaml").exists(), "源模板应保留");
     }
 }

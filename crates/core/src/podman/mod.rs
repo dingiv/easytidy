@@ -469,21 +469,31 @@ impl Podman {
     fn dedup_mounts(mounts: &mut Vec<MountConfig>) {
         let mut seen: HashSet<String> = HashSet::with_capacity(mounts.len());
         let original_len = mounts.len();
+        // 保留**最后**出现的一项（2026-09-02）：容器创建的挂载顺序是
+        // [模板声明…, GUI 注入…, 用户手动添加…]——用户手动项在最后。按
+        // container_path 去重时若「用户手动覆盖模板同路径」应让用户赢。
+        // 此前保留先出现的 → 模板/GUI 项静默压过用户手动项（手动挂载「没生效」）。
+        // 反向迭代 + retain 改最后一条命中。
+        mounts.reverse();
         mounts.retain(|m| {
             if m.container_path.is_empty() {
-                tracing::warn!("挂载去重：container_path 为空，已丢弃（host_path={:?}）", m.host_path);
+                tracing::warn!(
+                    "挂载去重：container_path 为空，已丢弃（host_path={:?}）",
+                    m.host_path
+                );
                 return false;
             }
             if seen.insert(m.container_path.clone()) {
                 true
             } else {
                 tracing::warn!(
-                    "挂载去重：container_path={} 重复，跳过后续定义（host_path={:?}, read_only={}）",
+                    "挂载去重：container_path={} 重复，跳过先前定义（host_path={:?}, read_only={}）——用户手动添加的（靠后）优先",
                     m.container_path, m.host_path, m.read_only
                 );
                 false
             }
         });
+        mounts.reverse();
         let dropped = original_len - mounts.len();
         if dropped > 0 {
             tracing::debug!("挂载去重：丢弃 {dropped} 项（保留 {} 项）", mounts.len());
@@ -1580,8 +1590,9 @@ mod tests {
     }
 
     #[test]
-    fn test_dedup_mounts_keeps_first() {
-        // 同 container_path 重复 → 保留第一条，后条被丢弃（warn 日志）
+    fn test_dedup_mounts_keeps_last() {
+        // 同 container_path 重复 → 保留**最后**一条（用户手动添加的靠后，应赢过
+        // 模板/GUI 注入的先前定义），先出现的被丢弃（warn 日志）
         let mut mounts = vec![
             MountConfig {
                 host_path: "/data/a".into(),
@@ -1601,7 +1612,7 @@ mod tests {
         ];
         Podman::dedup_mounts(&mut mounts);
         assert_eq!(mounts.len(), 2, "重复 container_path 应被丢弃");
-        assert_eq!(mounts[0].host_path, "/data/a", "保留先出现的");
+        assert_eq!(mounts[0].host_path, "/data/b", "保留最后出现的（用户手动项优先）");
         assert_eq!(mounts[1].host_path, "/data/c");
     }
 
@@ -1661,6 +1672,6 @@ mod tests {
         ];
         Podman::dedup_mounts(&mut mounts);
         assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].host_path, "/data/a");
+        assert_eq!(mounts[0].host_path, "/data/b", "保留最后出现的（用户手动项优先）");
     }
 }

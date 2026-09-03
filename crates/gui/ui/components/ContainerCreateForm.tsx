@@ -52,7 +52,14 @@ function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreat
         name,
         containerName: resolvedName,
       });
-      setConfig(expanded);
+      // 保留用户手动添加的挂载（2026-09-02 修复）：模板（重新）展开若整体覆盖
+      // config，会把用户在表单里手动加的 mount 静默抹掉 → 创建后挂载「没生效」。
+      // 按 container_path 合并：模板已声明的以模板为准，其余保留用户的手动项。
+      const expandedTargets = new Set((expanded.mounts ?? []).map((m) => m.container_path));
+      const manual = (config.mounts ?? []).filter(
+        (m) => !expandedTargets.has(m.container_path),
+      );
+      setConfig({ ...expanded, mounts: [...(expanded.mounts ?? []), ...manual] });
       setSelectedTemplate(name);
     } catch (err: any) {
       message.error(errMsg(err, `展开模板 ${name} 失败`));
@@ -135,7 +142,10 @@ function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreat
               onClear={handleTemplateClear}
               allowClear
               disabled={!nameReady}
-              options={templates.map((t) => ({ value: t.name, label: t.name }))}
+              options={templates.map((t) => ({
+                  value: t.id ?? t.name,
+                  label: t.id ?? t.name,
+                }))}
               notFoundContent="暂无可用模板"
             />
           )

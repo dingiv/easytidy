@@ -45,6 +45,13 @@ function nextCopyName(base: string, existing: string[]): string {
   return `${base}-copy${i}`;
 }
 
+/** 模板身份 = 文件 stem（conf_templates 返回的 `id`）。增删改/展开/血缘一律
+ *  用它定位文件——**不是** YAML 内 `config.name`（= 默认容器名，复制不改名时
+ *  会撞车：两个 `chrome.yaml` 同名，删 copy 会误删原文件）。 */
+function tplId(t: ConfTemplate): string {
+  return t.id ?? t.name;
+}
+
 interface FlavorsPanelProps {
   /** 模板卡「使用」：打开配置编辑器并预填该模板（创建新容器） */
   onLaunch(templateName: string): void;
@@ -90,16 +97,17 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
   }, [refreshTick]);
 
   const handleDelete = (t: ConfTemplate) => {
+    const id = tplId(t);
     modal.confirm({
-      title: `删除模板 ${t.name}?`,
+      title: `删除模板 ${id}?`,
       content: '已创建的容器不受影响（血缘仍保留），仅删除模板。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
         try {
-          await invoke('conf_rm_template', { name: t.name });
-          message.success(`已删除：${t.name}`);
+          await invoke('conf_rm_template', { name: id });
+          message.success(`已删除：${id}`);
           await load();
         } catch (err: any) {
           message.error(errMsg(err, '删除失败'));
@@ -116,19 +124,20 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
       return next;
     });
   const clearSelection = () => setSelected(new Set());
-  const selectedNames = () => templates.filter((t) => selected.has(t.name)).map((t) => t.name);
-  const allSelected = templates.length > 0 && templates.every((t) => selected.has(t.name));
+  const selectedNames = () =>
+    templates.filter((t) => selected.has(tplId(t))).map(tplId);
+  const allSelected = templates.length > 0 && templates.every((t) => selected.has(tplId(t)));
 
   const handleToggleSelectAll = () => {
     if (allSelected) clearSelection();
-    else setSelected(new Set(templates.map((t) => t.name)));
+    else setSelected(new Set(templates.map(tplId)));
   };
 
   /** 复制：一键生成不冲突的「name-copy」→ 后端复制 → 刷新列表 */
   const handleCopy = async (t: ConfTemplate) => {
-    const to = nextCopyName(t.name, templates.map((x) => x.name));
+    const to = nextCopyName(tplId(t), templates.map(tplId));
     try {
-      await invoke('conf_duplicate_template', { from: t.name, to });
+      await invoke('conf_duplicate_template', { from: tplId(t), to });
       message.success(`已复制为「${to}」`);
       await load();
     } catch (err: any) {
@@ -178,10 +187,11 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
 
   /** 批量同步：把模板当前声明重新展开到全部派生容器（逐个重建） */
   const handleSyncAll = (t: ConfTemplate) => {
-    const derived = lineage[t.name] ?? [];
+    const id = tplId(t);
+    const derived = lineage[id] ?? [];
     if (derived.length === 0) return;
     modal.confirm({
-      title: `按模板「${t.name}」重新同步全部派生容器？`,
+      title: `按模板「${id}」重新同步全部派生容器？`,
       content: (
         <div>
           <p>以下 {derived.length} 个容器将按模板当前声明重新展开并逐个重建（本地的自启/常驻设置保留，其余本地修改被模板覆盖）：</p>
@@ -192,7 +202,7 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
       okButtonProps: { danger: true },
       cancelText: '取消',
       onOk: async () => {
-        setSyncingTemplate(t.name);
+        setSyncingTemplate(id);
         const failures: string[] = [];
         try {
           for (const name of derived) {
@@ -210,7 +220,7 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
               okText: '知道了',
             });
           } else {
-            message.success(`已按模板「${t.name}」同步 ${derived.length} 个容器`);
+            message.success(`已按模板「${id}」同步 ${derived.length} 个容器`);
           }
           await load();
         } finally {
@@ -290,21 +300,22 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
           )}
           <div className="flavor-list">
           {templates.map((t) => {
-            const derived = lineage[t.name] ?? [];
+            const id = tplId(t);
+            const derived = lineage[id] ?? [];
             return (
               <div
-                key={t.name}
-                className={`flavor-item${selected.has(t.name) ? ' selected' : ''}`}
+                key={id}
+                className={`flavor-item${selected.has(id) ? ' selected' : ''}`}
               >
                 <Checkbox
                   className="flavor-check"
-                  checked={selected.has(t.name)}
-                  onChange={() => toggleSelect(t.name)}
-                  title={`选择 ${t.name}`}
+                  checked={selected.has(id)}
+                  onChange={() => toggleSelect(id)}
+                  title={`选择 ${id}`}
                 />
                 <div className="flavor-main">
                   <div className="flavor-title">
-                    <span className="flavor-name">{t.name}</span>
+                    <span className="flavor-name">{id}</span>
                     {t.gui && <Tag color="blue">GUI 透传</Tag>}
                     {t.setup.length > 0 && <Tag color="purple">setup ×{t.setup.length}</Tag>}
                     {t.mounts.length > 0 && (
@@ -329,7 +340,7 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                     <Button
                       type="primary"
                       icon={<RocketOutlined />}
-                      onClick={() => onLaunch(t.name)}
+                      onClick={() => onLaunch(id)}
                     >
                       使用
                     </Button>
@@ -352,7 +363,7 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                     >
                       <Button
                         icon={<SyncOutlined />}
-                        loading={syncingTemplate === t.name}
+                        loading={syncingTemplate === id}
                         onClick={() => handleSyncAll(t)}
                         title="同步派生"
                       />

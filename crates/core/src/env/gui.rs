@@ -119,16 +119,21 @@ pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>) {
 
     // mounts：两侧展开；host 路径为空（session 变量未设）跳过；require_exists 且
     // 宿主路径缺失跳过；已声明同 container_path 跳过
+    //
+    // 跳过检查用**展开后**的 container_path 比较（2026-09-02 修复）：原实现拿规则
+    // 原文（如 `${XDG_RUNTIME_DIR}`）与已有挂载（已展开的 `/run/user/1000`）比对，
+    // 恒不相等 → 注入重复项 → 后续 `dedup_mounts` 静默丢一条（用户手动挂载也可能
+    // 被误丢）。两侧都展开后再判重，注入才真正幂等。
     for m in &rule.mounts {
-        if existing_mount_targets.contains(&m.container_path) {
-            continue;
-        }
         let host_path = expand_host_vars(&m.host_path, &vars);
         let container_path = expand_host_vars(&m.container_path, &vars);
         if host_path.is_empty() || container_path.is_empty() {
             continue;
         }
         if m.require_exists && !Path::new(&host_path).exists() {
+            continue;
+        }
+        if existing_mount_targets.contains(&container_path) {
             continue;
         }
         params.mounts.push(MountConfig {
@@ -202,6 +207,37 @@ mod tests {
         v.insert("XDG_RUNTIME_DIR".into(), "/run/user/1000".into());
         v.insert("DISPLAY".into(), String::new()); // 未设
         v
+    }
+
+    /// 回归（2026-09-02）：规则里的 `${XDG_RUNTIME_DIR}` 展开后与已声明的
+    /// `/run/user/1000` 相同 → 必须跳过（否则注入重复项、后续被 dedup 静默丢）。
+    #[test]
+    fn apply_skips_existing_expanded_target() {
+        let mut params = ContainerParams::default();
+        // 模板已声明 /run/user/1000 → /run/user/1000
+        params.mounts.push(MountConfig {
+            host_path: "/run/user/1000".into(),
+            container_path: "/run/user/1000".into(),
+            read_only: false,
+        });
+        let mut env = Vec::new();
+        apply(&mut params, &mut env);
+        let run_count = params
+            .mounts
+            .iter()
+            .filter(|m| m.container_path == "/run/user/1000")
+            .count();
+        assert_eq!(
+            run_count, 1,
+            "展开后同 container_path 应跳过（避免注入重复 /run/user/1000）：{:?}",
+            params.mounts
+        );
+        // 其余新增（字体/图标等）仍应注入
+        assert!(
+            params.mounts.iter().any(|m| m.container_path == "/mnt/host/fonts"),
+            "字体挂载应注入：{:?}",
+            params.mounts
+        );
     }
 
     #[test]

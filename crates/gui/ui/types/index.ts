@@ -258,6 +258,10 @@ export interface ServerEnvItem {
 export interface ConfTemplate extends ContainerConfig {
   /// 创建后按序执行的安装命令（本轮只存不执行；执行链路下一步接入）
   setup: string[];
+  /// 模板身份 = 文件名 stem（conf_templates 返回；如 `chrome` / `chrome-copy`）。
+  /// 增删改/展开/血缘一律用它定位文件（**不是** `config.name`——后者是默认
+  /// 容器名，复制不改名时会与源文件撞名）。conf_template_get 等单取场景缺省。
+  id?: string;
   /// 模板在磁盘上的绝对路径（conf_templates 返回时填充；conf_template_get 等
   /// 单取场景可能缺省）。GUI 用于展示文件位置。
   path?: string;
