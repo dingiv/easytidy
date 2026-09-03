@@ -44,6 +44,10 @@ pub enum ClientCmd {
     List,
     /// 关闭指定 session（kill bash，发完即断）
     Close,
+    /// 调整 root PTY 尺寸（独立 exec，发完即断；GUI 调整 xterm 时经此
+    /// 把新 cols/rows 推到 daemon，让 bash 收到 SIGWINCH 重绘提示符——避免
+    /// 仅清 xterm cols 而 bash 仍按旧宽度排版导致提示符 wrap）
+    Resize,
 }
 
 pub struct ClientArgs {
@@ -132,6 +136,13 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
                 })?,
             )
         }
+        ClientCmd::Resize => (
+            "rc.resize".into(),
+            serde_json::to_value(RcResize {
+                cols: args.cols,
+                rows: args.rows,
+            })?,
+        ),
     };
     tracing::info!("client sending op={op}");
 
@@ -141,6 +152,7 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
         ClientCmd::Close => 2,
         ClientCmd::New => 2,
         ClientCmd::Attach => 2,
+        ClientCmd::Resize => 2,
     };
     framed
         .send(Frame::Json(Message {
@@ -200,6 +212,27 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if matches!(args.cmd, ClientCmd::Resize) {
+        // resize：独立 exec 一次性推 cols/rows 到 daemon（GUI 调 xterm.fit
+        // 时使用），读 ack 后退出。daemon 改 PTY 尺寸 → 内核给 bash 进程组
+        // 发 SIGWINCH → bash 重绘 prompt。**关键**：单改 xterm.cols 而
+        // bash 还在旧宽度 = 提示符 wrap（GUI 仅在 client 路径有显式
+        // `rc.resize`，attach 路径下 SIGWINCH 由 client 端捕获并转发；
+        // 独立 resize exec 就是给 attach 路径之外的 GUI 改尺寸用）。
+        let resp = framed
+            .next()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("resize resp empty"))??;
+        let Frame::Json(msg) = resp else {
+            anyhow::bail!("resize resp should be JSON");
+        };
+        if let Some(err) = msg.err {
+            anyhow::bail!("rc.resize failed: {} {}", err.code, err.message);
+        }
+        tracing::info!("resize ack (cols={} rows={})", args.cols, args.rows);
+        return Ok(());
+    }
+
     // new/attach：读 ack（含 stream_id）+ 进入桥流
     let resp = framed
         .next()
@@ -229,6 +262,7 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
         ClientCmd::Ping => unreachable!(),
         ClientCmd::List => unreachable!(),
         ClientCmd::Close => unreachable!(),
+        ClientCmd::Resize => unreachable!(),
     };
     info!("attached, stream_id={}", _stream_id);
 

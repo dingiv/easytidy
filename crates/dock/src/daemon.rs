@@ -377,6 +377,48 @@ async fn handle_client(
             }
             Ok(())
         }
+        "rc.resize" => {
+            // 独立 resize（GUI xterm.fit 时经一次性 `client resize` exec
+            // 触发）：找唯一 alive session → master.resize → 内核自动给
+            // 前台进程组发 SIGWINCH → bash 重绘 prompt。**关键**：仅改
+            // xterm.cols 而 bash 还在旧宽度 = 提示符 wrap（root 终端的
+            // `~ ` 与 ` $ ` 错行显示）。attach 路径下的 `rc.resize` 由
+            // `attach_session` 内的消息循环处理，不走这里。
+            let req: RcResize = serde_json::from_value(cmd.payload)?;
+            info!(
+                "client (token={}) requests resize {}x{}",
+                token, req.cols, req.rows
+            );
+            let session = {
+                let sessions = state.sessions.read().await;
+                sessions.values().find(|s| s.alive()).cloned()
+            };
+            match session {
+                Some(s) => {
+                    if let Ok(mut m) = s.master.lock() {
+                        let _ = m.resize(portable_pty::PtySize {
+                            rows: req.rows,
+                            cols: req.cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
+                    framed
+                        .send(resp(cmd.id, "rc.resize", &serde_json::Value::Null, None))
+                        .await?;
+                }
+                None => {
+                    framed
+                        .send(resp_err(
+                            cmd.id,
+                            "rc.resize",
+                            "no alive root session (root 终端未挂载)",
+                        ))
+                        .await?;
+                }
+            }
+            Ok(())
+        }
         other => {
             framed
                 .send(resp_err(

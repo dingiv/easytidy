@@ -362,16 +362,69 @@ pub async fn root_terminal_write(
     Ok(())
 }
 
-/// 调整 root 会话 TTY 尺寸（PoC 占位）。
+/// 调整 root 会话 TTY 尺寸（GUI xterm.fit 后回调）。
+///
+/// 走独立 `podman exec --user 0 <container> /run/easytidy-bin/easytidy-dock
+/// client resize --cols X --rows Y`：连 daemon 发 `rc.resize` → daemon 改
+/// PTY 尺寸 → 内核自动给 bash 进程组 SIGWINCH → bash 重绘 prompt。
+///
+/// **为什么是独立 exec 而不是 attach 内 SIGWINCH 转发**：root 终端走
+/// `podman exec`（无 TTY，`exec_no_tty`），client 进程没有控制终端，
+/// 收到 SIGWINCH 后 `terminal_size()` 从 stdout ioctl 取不到值（不是 TTY）；
+/// 走 daemon 协议直接传 cols/rows 是唯一可靠路径。
+///
+/// **关键**：仅改 xterm.cols 而 bash 还在旧宽度 = 提示符 wrap（GUI 显示
+/// `root ➜ ~\r\n $ ` 错行）。这一路是 GUI xterm.fit → bash 同步收口的
+/// 最后一公里；之前是 no-op，关 worker GUI 后再次进入的 wrap 视觉问题
+/// 部分根因就在此。
 #[tauri::command]
 pub async fn root_terminal_resize(
-    _session: tauri::State<'_, Option<GuiSession>>,
-    _cols: u16,
-    _rows: u16,
+    podman: tauri::State<'_, PodmanState>,
+    session: tauri::State<'_, Option<GuiSession>>,
+    cols: u16,
+    rows: u16,
 ) -> Result<(), String> {
-    // TODO: 给 exec'd client 进程发 SIGWINCH（client 内 ioctl → rc.resize）；
-    // 或经 daemon 协议（client 重启后收到 SIGWINCH 自动转发）。
-    Ok(())
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container_name = sess.container_name.clone();
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+
+    let result = async {
+        let cmd = vec![
+            dock_bin().to_string(),
+            "client".to_string(),
+            "resize".to_string(),
+            "--cols".to_string(),
+            cols.to_string(),
+            "--rows".to_string(),
+            rows.to_string(),
+        ];
+        let exec = p
+            .exec_no_tty(&container_name, "0", cmd)
+            .await
+            .map_err(|e| anyhow::anyhow!("exec easytidy-dock client resize 失败：{e}"))?;
+        use futures::StreamExt;
+        let mut stream = exec.output;
+        while let Some(item) = stream.next().await {
+            if let Err(e) = item {
+                return Err::<(), anyhow::Error>(anyhow::anyhow!("resize 流错误：{e}"));
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    }
+    .await;
+    podman.return_podman(p).await;
+    // 失败时不阻断 GUI：resize 是 best-effort，PTY 不同步仅造成视觉 wrap，
+    // 不影响输入/输出；记录警告便于诊断即可。
+    match result {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            tracing::warn!("root_terminal_resize 失败（不阻断 GUI）：{e:#}");
+            Ok(())
+        }
+    }
 }
 
 /// 主动关闭 root 会话（drop exec stream → client exit → daemon 保留 bash）。

@@ -85,7 +85,6 @@ function RootTerminalInner({ onExited }: RootTerminalProps) {
 
     try {
       term.open(terminalEl);
-      fitAddon.fit();
     } catch (e) {
       console.error('xterm open failed:', e);
       const err = document.createElement('pre');
@@ -168,7 +167,34 @@ function RootTerminalInner({ onExited }: RootTerminalProps) {
       });
     };
 
-    attach(null);
+    // 初始 attach 延迟到布局稳定（双 rAF + 150ms 防抖），与 ResizeObserver
+    // 共用同一节奏。
+    //
+    // 原因：WorkerView 挂载瞬间 main-panel 从 pane-empty 切到 tab-pane（含
+    // RootTerminal），flex 链 `.app > .per-layout > .per-right > .main-panel
+    // > .tab-pane > .terminal-wrapper > .terminal-container` 要算高度。
+    // useEffect 同步 fit 时容器可能还在过渡态（0 → 部分 → 全），拿到的是
+    // 偏小的 cols。把这个偏小值传到 daemon = PTY resize 到小宽度 + 回放
+    // 按小宽度渲染 + bash 按小宽度排版 = 提示符 wrap（`root ➜ ~\r\n $ `）。
+    //
+    // xterm 不回溯已渲染内容：迟到的 ResizeObserver 二次 fit 把 xterm 调大
+    // 后，老的 wrap 仍留在屏幕上；bash 已经在小宽度下重绘过 prompt，新
+    // 提示符也按小宽度出。直到再次 SIGWINCH 才会重绘。
+    //
+    // 推迟 attach + 重新 fit 取稳定值是 root 终端的关键（用户终端同款问题
+    // 由首次建流 + SIGWINCH 自动重绘覆盖，因为新会话没有遗留 ring 内容；
+    // root 走 attach 到已有 session + 回放历史 → wrap 视觉持久化）。
+    let initialAttachTimer: ReturnType<typeof setTimeout> | null = null;
+    const doInitialAttach = () => {
+      if (cancelled) return;
+      fitAddon.fit();
+      attach(null);
+    };
+    initialAttachTimer = setTimeout(() => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(doInitialAttach);
+      });
+    }, 150);
 
     // 焦点管理（与 Terminal.tsx 同款）
     const restoreFocus = () => {
@@ -261,6 +287,7 @@ function RootTerminalInner({ onExited }: RootTerminalProps) {
         writeRaf = null;
       }
       if (resizeTimeout) clearTimeout(resizeTimeout);
+      if (initialAttachTimer) clearTimeout(initialAttachTimer);
       document.removeEventListener('visibilitychange', restoreFocus);
       window.removeEventListener('focus', restoreFocus);
       terminalEl.removeEventListener('pointerdown', forceFocus);

@@ -2,6 +2,40 @@
 
 ## 开发约定
 
+### 挂载去重 / 模板展开不丢手动挂载（2026-09-02）
+
+「从模板创建 + 手动加挂载，创建后手动挂载没生效」三层修复：
+
+1. **前端模板展开合并手动挂载**：`ContainerCreateForm.handleTemplateSelect` 曾
+   `setConfig(expanded)` 整体覆盖 → 用户在表单里手动加的 mount 被模板重新展开静默
+   抹掉。修复：展开后按 container_path 合并——模板已声明的以模板为准，其余保留
+   用户手动项。模板 Select 也改用文件 stem（`t.id ?? t.name`）作身份。
+2. **gui.rs 注入判重按展开后路径**：原实现拿规则原文（`${XDG_RUNTIME_DIR}`）与已
+   展开的 `/run/user/1000` 比对恒不等 → 注入重复项 → 后续被 dedup 静默丢。
+   修复：两侧展开后再判重。回归测试 `apply_skips_existing_expanded_target`。
+3. **`dedup_mounts` 保留最后一项**：挂载顺序 = [模板…, GUI 注入…, 用户手动…]，
+   用户手动在最后。同 container_path 去重时保留最后 → 用户手动覆盖模板生效（原来
+   保留先出现的，模板/GUI 静默压过用户）。测试改 `test_dedup_mounts_keeps_last`。
+
+backend create 路径实测（含 keep-id / gui / host|mapped 网络 / 模板+手动挂载）全部
+正确落挂载；问题出在「模板展开覆盖」与「注入/去重顺序」。
+
+### 模板身份 = 文件 stem，不是 config.name（2026-09-02）
+
+conf 模板的稳定身份是**文件名 stem**（`chrome.yaml` → `chrome`），**不是** YAML 内
+`config.name`（= 默认容器名）。
+
+- 曾踩坑：`conf_duplicate_template` 逐字节拷贝 → `chrome-copy.yaml` 内部 `name: chrome`
+  仍与源相同 → 列表两个「chrome」、删「带 copy 的」按名定位删到**源文件**。
+- 修复：`ConfTemplateInfo` 新增 `id`（文件 stem）；GUI 增删改/展开/血缘一律用 `id`
+  （`tplId(t) = t.id ?? t.name`）；后端 `ConfTemplateStore` 全量按 stem 定位并加
+  `stem()` 规范化（剥 `.yaml`/`.yml`）；**复制时改写内部 `config.name` = 新 stem**
+  （复制品「使用」预填容器名不冲突）。
+- 编辑器 `nameLocked`（编辑既有模板禁改名）保证 `config.name` == stem 不分离；
+  唯一破坏者就是复制（已修）。
+- 回归测试：`test_delete_by_stem_does_not_hit_source` /
+  `test_duplicate_rewrites_internal_name_to_stem`（tempdir 注入，不碰真实 conf 目录）。
+
 ### Tauri 命令参数必须用驼峰（camelCase）
 
 前端 `invoke` 调用 `#[tauri::command]` 时，**参数名必须用驼峰**（与 Rust 侧 snake_case 自动对应）：
@@ -75,6 +109,65 @@ root 终端通道 daemon 由 bootstrap 在容器内 `setsid` 拉起，**三个�
 - 重建容器注意：easytidy-dock 二进制改动后，需 `cargo build -p
   easytidy-dock --target x86_64-unknown-linux-musl` 后**重建容器**（bind-mount 钉
   住 inode）。GUI/协议（`rc.rs` RcCloseReq）改动只需重启 GUI。
+
+### root 终端提示符 wrap：关闭 worker GUI 后再次进入排版错乱（2026-09-03）
+
+症状：worker GUI 里开着 root 终端 → 整个 worker GUI 窗口关掉 → 重开
+worker GUI（自动恢复 root pane）→ root 终端的 bash 提示符从中间折断
+显示成 `root ➜ ~` 换行 ` $ `，并且 `ls` 等输出也跟着按错误宽度换行。
+
+两层根因：
+
+1. **`root_terminal_resize` 是 no-op**：`commands/root.rs` 该命令原本只
+   `Ok(())` 占位（注释留了 TODO）。xterm.fit() 改完 `term.cols` 后调
+   backend 想同步 PTY 大小，结果什么也没发生——bash 继续按上次 attach
+   时的宽度排版。关 worker GUI 重开时，新 xterm 首次 fit 拿到偏小
+   cols，attach 把小 cols 推给 daemon 改了 PTY，bash 立即按小宽度
+   重绘提示符并 wrap；后续 ResizeObserver 二次 fit 把 xterm 调大也
+   不回溯已渲染内容，bash 也没新 SIGWINCH 触发，wrap 视觉持续。
+
+2. **初始 fit 取到过渡态 cols**：WorkerView 挂载瞬间 `main-panel` 从
+   `pane-empty` 切到含 RootTerminal 的 `tab-pane`（`height: 100%`），
+   flex 链 `.app > .per-layout > .per-right > .main-panel > .tab-pane
+   > .terminal-wrapper > .terminal-container` 在算高度。useEffect 同步
+   `fitAddon.fit()` 时容器可能还在 `0 → 部分 → 全` 过渡，拿到偏小值
+   立刻传给 attach。attach 走的是「**已有 session** → 改 PTY 尺寸 +
+   回放历史 ring」路径——历史 ring 在新宽度下渲染就 wrap，xterm 不
+   回溯，bug 持久化。
+
+修复（两层都堵）：
+
+- **Backend（dock + GUI）**：
+  - `dock/client.rs`：`ClientCmd` 加 `Resize`，独立 exec 一句话发
+    `rc.resize` 到 daemon 后退出（不进入桥流）。
+  - `dock/daemon.rs::handle_client`：顶层加 `rc.resize` 分支（找唯一
+    alive session → `master.resize` → 内核给 bash 进程组 SIGWINCH →
+    bash 重绘）。attach 内消息循环的 `rc.resize` 分支保持原样。
+  - `commands/root.rs::root_terminal_resize`：从 no-op 改为 spawn
+    `podman exec easytidy-dock client resize --cols X --rows Y`，失
+    败 best-effort 仅记 warning（resize 不同步不阻断 GUI 输入/输出）。
+- **Frontend（RootTerminal.tsx）**：
+  - `term.open` 后**不立即** `fitAddon.fit()`；把首次 `attach(null)`
+    推到双 rAF + 150ms 防抖后（同 ResizeObserver 节奏），attach 前
+    再 fit 一次取稳定 cols。
+  - 卸载时清理 `initialAttachTimer`，避免 unmount 后回调触发已
+    dispose 的 term。
+
+验证：关 worker GUI → 重开 → root 终端提示符单行不折；手动拖窗口
+改宽度 → bash 提示符实时按新宽度重绘（SIGWINCH 路径走通）。
+
+为什么用户终端（Terminal.tsx）同款 fit 时序问题没爆出来：用户终端
+attach 的是 **新会话**（或死会话换新），没有遗留 ring 内容；新会话
+创建时 bash 第一次画 prompt 就以新 cols 出，加上 server 端
+`pty_resize` 是真活，SIGWINCH 自动重绘，wrap 视觉不会持久化。root
+走 attach 到已有 session + 回放历史 ring——wrap 视觉持久化，必须
+「初始 fit 取稳定值 + 后续 resize 真同步 PTY」双管齐下。
+
+重建容器注意：`easytidy-dock` 改动（client Resize / daemon 顶层
+rc.resize）需要 `cargo build -p easytidy-dock --target
+x86_64-unknown-linux-musl` 后重建容器（bind-mount 钉 inode）。
+`commands/root.rs::root_terminal_resize` 与 `RootTerminal.tsx` 改动
+只需重启 GUI。
 
 ## 容器内二进制：server + easytidy-dock（2026-09-02）
 
