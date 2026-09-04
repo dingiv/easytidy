@@ -224,6 +224,9 @@ enum EnvCmd {
         /// 快照名（最终镜像 = easytidy/snapshot/<name>[:<tag>]；默认=<容器名>-<YYYYmmdd-HHMM>）
         #[arg(long)]
         snapshot: Option<String>,
+        /// 普通 commit（保留分层历史）；默认 squash 单层
+        #[arg(long)]
+        no_squash: bool,
     },
     /// 运行环境（细粒度控制，与创建/销毁分离）
     Start { name: String },
@@ -318,9 +321,11 @@ async fn main() -> Result<()> {
                         image,
                     } => cmd_env_new(podman, name, flavor, image).await,
                     EnvCmd::Rm { name } => cmd_env_rm(podman, name).await,
-                    EnvCmd::Snapshot { name, snapshot } => {
-                        cmd_env_snapshot(podman, name, snapshot).await
-                    }
+                    EnvCmd::Snapshot {
+                        name,
+                        snapshot,
+                        no_squash,
+                    } => cmd_env_snapshot(podman, name, snapshot, !no_squash).await,
                     EnvCmd::Start { name } => cmd_env_start(podman, name).await,
                     EnvCmd::Stop { name } => cmd_env_stop(podman, name).await,
                     EnvCmd::List => cmd_env_list(podman).await,
@@ -439,7 +444,8 @@ async fn cmd_create(
 
 /// 重建容器（M4 前置：mount/网络映射配置变更后生效）。
 ///
-/// 从 configfile 读取容器配置 → `Podman::rebuild`（commit 当前层 → 删旧 → 同名重建 → 启动）→
+/// 从 configfile 读取容器配置 → `Podman::rebuild`（commit 当前层 → 保留旧容器 →
+/// 用新配置重建并启动 → 确认新容器就绪后才删旧；失败自动回滚，环境不中断）→
 /// 打印新 ID。改配置的途径：直接编辑 `~/.config/easytidy/config.toml` 或后续 GUI。
 async fn cmd_rebuild(podman: Podman, container: String) -> Result<()> {
     info!("重建容器：{}", container);
@@ -630,8 +636,14 @@ async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
 
 /// 快照：commit 当前容器层（仅文件系统层，bind mount 不入快照）。
 /// 未提供 --snapshot 时 core 兜底为可读默认名 <容器名>-<YYYYmmdd-HHMM>。
-async fn cmd_env_snapshot(podman: Podman, name: String, snapshot: Option<String>) -> Result<()> {
-    let image_ref = podman.snapshot(&name, snapshot.as_deref()).await?;
+/// `squash` = true 单层（默认）/ false 保留分层历史（--no-squash）。
+async fn cmd_env_snapshot(
+    podman: Podman,
+    name: String,
+    snapshot: Option<String>,
+    squash: bool,
+) -> Result<()> {
+    let image_ref = podman.snapshot(&name, snapshot.as_deref(), squash).await?;
     println!("环境 {name} 快照完成：{image_ref}");
     Ok(())
 }

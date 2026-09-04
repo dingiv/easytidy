@@ -638,17 +638,18 @@ impl Podman {
         parse_passwd_from_tar(&buf)
     }
 
-    /// 环境快照:以 `commit --squash` 把运行中容器打成扁平镜像
-    /// `easytidy/snapshot/<snapshot_name>`（`snapshot_name` 即用户输入的全名，
-    /// 不再拼环境名前缀——命名即用户意图，容器来源由 commit 决定；
-    /// 未提供时兜底为可读默认名 `<容器名>-<YYYYmmdd-HHMM>`）。
+    /// 环境快照:把运行中容器 commit 成镜像 `easytidy/snapshot/<snapshot_name>`
+    /// （`snapshot_name` 即用户输入的全名，不再拼环境名前缀——命名即用户意图，
+    /// 容器来源由 commit 决定；未提供时兜底为可读默认名 `<容器名>-<YYYYmmdd-HHMM>`）。
     ///
-    /// 实现:走 libpod 直连(`libpod::commit_squash`),与项目既有的 keep-id
+    /// 实现:走 libpod 直连(`libpod::commit`),与项目既有的 keep-id
     /// 创建路径走同一条 podman socket 直连栈。
     ///
-    /// 选用 `--squash` 的语义:扁平文件系统镜像(单层),不保留容器原本的分层历史。
-    /// 与早期 `commit_container`(多层)相比,体积更小、fork 出新容器时不再
-    /// 叠加源容器的所有中间层,适合作为"环境快照"语义使用。
+    /// `squash` 决定镜像形态:
+    /// - `true`（**默认**）= `commit --squash`:扁平文件系统镜像(单层),不保留容器
+    ///   原本的分层历史。与多层相比体积更小、fork 出新容器时不再叠加源容器的
+    ///   所有中间层,作为"环境快照"的默认语义。
+    /// - `false` = 普通 commit:保留源容器的分层历史（体积 = 源镜像层 + 增量层）。
     ///
     /// 已知限制:
     /// - **运行中容器不保证快照一致性**(`commit` 配合 `pause=true` 默认,
@@ -658,7 +659,12 @@ impl Podman {
     ///
     /// 快照是独立资产,删除环境不删快照(可被 fork 复用)。
     /// 见 docs/13-mutable-env-paradigm.md。
-    pub async fn snapshot(&self, name: &str, snapshot_name: Option<&str>) -> Result<String> {
+    pub async fn snapshot(
+        &self,
+        name: &str,
+        snapshot_name: Option<&str>,
+        squash: bool,
+    ) -> Result<String> {
         // 未提供（或空白）→ 可读默认名 <容器名>-<YYYYmmdd-HHMM>（本地时间）
         let snapshot_name = match snapshot_name {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
@@ -689,10 +695,16 @@ impl Podman {
         );
 
         let change_refs: Vec<&str> = changes.iter().map(|s| s.as_str()).collect();
+        // OCI history 备注按形态区分，便于 podman inspect 溯源
+        let message = if squash {
+            "easytidy snapshot via commit --squash"
+        } else {
+            "easytidy snapshot via commit"
+        };
         libpod
-            .commit_squash(name, &snap_repo, snap_tag.as_deref(), "easytidy snapshot via commit --squash", &change_refs)
+            .commit(name, &snap_repo, snap_tag.as_deref(), squash, message, &change_refs)
             .await?;
-        tracing::info!("环境 {} 快照完成:{}", name, image_ref);
+        tracing::info!("环境 {} 快照完成（squash={}）:{}", name, squash, image_ref);
         Ok(image_ref)
     }
 
@@ -722,17 +734,22 @@ impl Podman {
 
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
     ///
-    /// 流程：
+    /// 「新容器确认就绪后才删旧」的安全流程（旧容器全程保留到确认，失败自动回滚）：
     /// 1. `commit_container` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
-    ///    （仅容器层；bind mount 不入 commit —— 正是所需）
-    /// 2. stop（若运行中）→ remove（force）
-    /// 3. `create_with_config`（同名，commit 的镜像 + 新配置，保留 Init/server-mount/labels）
-    /// 4. start
-    /// 5. 返回新容器 ID
+    ///    （仅容器层；bind mount 不入 commit —— 正是所需）——**数据保险**
+    /// 2. `rename` 旧容器为临时名 `<name>-old-<tag>`（**保留**！释放正式名，
+    ///    旧容器数据仍在容器层 + 镜像双重保存）
+    /// 3. `stop` 旧（释放 socket——旧 dock daemon 退出，`dock.sock` 让出给新容器；
+    ///    这是重建必然的短暂中断）
+    /// 4. `create_with_config`（正式名 `<name>`，commit 的镜像 + 新配置，label/
+    ///    socket/server 注册全按 `<name>` 绑定）
+    /// 5. `start_and_confirm`（start + 确认容器 running 且 dock daemon 就绪）
+    /// 6. **确认就绪** → `remove` 旧（此时安全：新容器已起、数据已在新容器）
+    /// 7. 返回新容器 ID
     ///
-    /// 错误处理：任一步失败给出中文可读错误；create 成功但 start 失败时
-    /// 尽力删除新容器，不留下孤儿容器。调用方负责在成功后把 `config`
-    /// 回写 configfile（GUI apply / CLI rebuild 均执行）。
+    /// 错误处理：第 4 / 5 步任一失败 → **回滚**（删未就绪的新容器，把旧容器
+    /// rename 回正式名并重新 start，环境恢复运行）；数据始终有 commit 镜像兜底。
+    /// 调用方负责在成功后把 `config` 回写 configfile（GUI apply / CLI rebuild 均执行）。
     pub async fn rebuild(
         &self,
         name: &str,
@@ -740,41 +757,49 @@ impl Podman {
         bins: &crate::ContainerBins,
     ) -> Result<String> {
         // 先记下现有 socket 目录（重建后 socket 目录 = easytidy/<name>；成功后清理
-        // 旧代孤儿 `<name>-<hash>`。纯 name 目录即当前代——按新目录做白名单，见第 6 步）
+        // 旧代孤儿 `<name>-<hash>`。纯 name 目录即当前代——按新目录做白名单，见第 7 步）
         let legacy_socket_dirs = crate::resolve_socket_dirs(name);
 
-        // 1. commit 当前容器层（bind mount 不入镜像）
+        // 1. commit 当前容器层（bind mount 不入镜像）→ 数据保险
         let tag = Self::rebuild_image_tag(name);
         let image_ref = format!("localhost/easytidy-rebuild:{tag}");
         self.commit_container(name, &image_ref).await?;
 
-        // 2. stop（若运行中）
-        if self.is_running(name).await? {
-            self.stop(name).await?;
+        // 2. rename 旧容器为临时名（保留！释放 <name> 的名字）
+        let old_name = format!("{name}-old-{tag}");
+        self.rename(name, &old_name).await?;
+
+        // 3. stop 旧（释放 socket——旧 dock daemon 退出，dock.sock 让出给新容器）
+        if self.is_running(&old_name).await? {
+            self.stop(&old_name).await?;
         }
 
-        // 3. remove（force）
-        self.remove(name, true).await?;
+        // 4. create 新容器（正式名 <name>；失败 → 回滚，旧容器数据未损）
+        let id = match self.create_with_config(name, &image_ref, bins, config).await {
+            Ok(id) => id,
+            Err(e) => {
+                self.rollback(&old_name, name).await;
+                return Err(Error::Connect(format!(
+                    "重建失败：创建新容器未成功（已回滚，旧容器已恢复运行）：{e}"
+                )));
+            }
+        };
 
-        // 4. create（同名；失败时旧容器已删除，错误信息附带可恢复的镜像引用）
-        let id = self
-            .create_with_config(name, &image_ref, bins, config)
-            .await
-            .map_err(|e| {
-                Error::Connect(format!(
-                    "重建失败：创建新容器未成功（旧容器已删除，可从镜像 {image_ref} 恢复）：{e}"
-                ))
-            })?;
-
-        // 5. start；失败则尽力清理新容器（不留下孤儿）
-        if let Err(e) = self.start(name).await {
-            let _ = self.remove(name, true).await;
+        // 5. start + 确认新容器真正就绪（running + dock daemon）；失败 → 回滚
+        if let Err(e) = self.start_and_confirm(name).await {
+            let _ = self.remove(name, true).await; // 清理未就绪的新容器
+            self.rollback(&old_name, name).await; // 恢复旧容器运行
             return Err(Error::Connect(format!(
-                "重建失败：新容器创建成功但启动失败（已尽力清理）：{e}"
+                "重建失败：新容器未能确认就绪（已回滚，旧容器已恢复运行）：{e}"
             )));
         }
 
-        // 6. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建；旧
+        // 6. 新容器确认就绪 → 删旧（安全：新已起、数据已在新容器）
+        if let Err(e) = self.remove(&old_name, true).await {
+            tracing::warn!("重建后清理旧容器 {old_name} 失败（不影响新容器运行）：{e}");
+        }
+
+        // 7. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建；旧
         //    `<name>-<hash>` 代目录清理，纯 name 目录即当前代 → 跳过，避免误删
         //    正在使用的目录）
         let new_socket_dir = crate::socket_dir_for(name)?;
@@ -786,6 +811,66 @@ impl Podman {
         }
 
         Ok(id)
+    }
+
+    /// start 容器并确认「真正起来了」：容器进入 running 且 dock daemon 就绪。
+    ///
+    /// - 容器 running：轮询 `is_running`（`start` 返回 Ok 后容器可能需数秒进入 running）
+    /// - dock daemon 就绪：轮询 `dock_alive`（bootstrap/prepare 有延迟）
+    ///
+    /// 两级都通过才返回 Ok——用于重建时「确认新容器真的可用」后再删旧容器。
+    async fn start_and_confirm(&self, name: &str) -> Result<()> {
+        self.start(name).await?;
+
+        // 等容器进入 running（最多 ~15s）
+        let mut running = false;
+        for _ in 0..30 {
+            if self.is_running(name).await? {
+                running = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if !running {
+            return Err(Error::Connect(format!(
+                "容器 {name} 启动后未进入 running 状态"
+            )));
+        }
+
+        // 等 dock daemon 就绪（最多 ~15s；bootstrap/prepare 有延迟）
+        let mut alive = false;
+        for _ in 0..30 {
+            if self.dock_alive(name).await {
+                alive = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if !alive {
+            return Err(Error::Connect(format!(
+                "容器 {name} 已 running 但 dock daemon 未就绪（easytidy-dock client ping 无响应）"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 回滚重建：把临时名的旧容器 rename 回正式名并重新 start（尽力而为）。
+    ///
+    /// 任一步失败仅 warn（回滚是尽力恢复，不阻断错误上报）；数据始终有 commit
+    /// 镜像兜底。
+    async fn rollback(&self, old_name: &str, name: &str) {
+        if let Err(e) = self.rename(old_name, name).await {
+            tracing::warn!("回滚 rename（{old_name} → {name}）失败：{e}");
+            return;
+        }
+        match self.is_running(name).await {
+            Ok(true) => {} // 已在运行（防御；正常 stop 后不会）
+            Ok(false) | Err(_) => {
+                if let Err(e) = self.start(name).await {
+                    tracing::warn!("回滚 start（{name}）失败：{e}");
+                }
+            }
+        }
     }
 
     /// 检查容器当前生效的 mounts 与网络配置（GUI "当前生效" 状态）。
@@ -888,6 +973,43 @@ impl Podman {
             .await
             .map_err(|e| Error::Connect(format!("检查容器状态失败：{e}")))?;
         Ok(info.state.and_then(|s| s.running).unwrap_or(false))
+    }
+
+    /// 重命名容器（重建时释放正式名 / 回滚时换回）。
+    async fn rename(&self, old: &str, new: &str) -> Result<()> {
+        use bollard::container::RenameContainerOptions;
+
+        self.docker
+            .rename_container(old, RenameContainerOptions { name: new.to_string() })
+            .await
+            .map_err(|e| Error::Connect(format!("重命名容器失败（{old} → {new}）：{e}")))?;
+        Ok(())
+    }
+
+    /// dock daemon 存活确认（容器内 `easytidy-dock client ping`，fire-and-forget）。
+    ///
+    /// 容器 running 但 dock daemon 尚未就绪时返回 false（bootstrap/prepare 有延迟，
+    /// 调用方应轮询重试）。exec 不通 / 无响应 / 输出非 `alive: true` 均返回 false。
+    async fn dock_alive(&self, container: &str) -> bool {
+        use futures::StreamExt;
+
+        let cmd = vec![
+            Self::DOCK_TARGET.to_string(),
+            "client".to_string(),
+            "ping".to_string(),
+        ];
+        let exec = match self.exec_no_tty(container, "0", cmd).await {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let mut stream = exec.output;
+        let mut buf = String::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(bytes) = item {
+                buf.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        buf.contains("alive: true")
     }
 
     /// 容器详细状态（启动失败展示用）：`running` / `status` / `exit_code` / `error`。

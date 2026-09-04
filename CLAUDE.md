@@ -383,6 +383,79 @@ clippy 无新增 warning。libpod 直调端到端（keep-id + host 网）：devi
 重建容器注意：本改动只动 host 端 core + CLI + GUI；不动 easytidy-dock / server。
 `cargo build -p easytidy-core` + 重启 GUI / CLI 进程。
 
+### 快照支持选择 squash / 普通 commit（2026-09-04）
+
+需求：原「快照」恒走 `commit --squash`（单层扁平镜像），用户希望能选——
+squash（单层、体积小）或普通 commit（保留源镜像分层历史）。GUI 快照按钮
+改为**下拉选择按钮**：主按钮走默认 squash，右侧箭头菜单显式二选一。
+
+修复：
+- `core/src/libpod.rs::commit_squash` → 改名 **`commit`**，新增 `squash: bool`
+  参数：query 从硬编码 `squash=true` 改为 `squash={squash}`（true/false 都
+  附加——libpod handler 按 bool 解析，缺省等价 false，显式传更清楚）。
+- `core/src/podman/mod.rs::Podman::snapshot` 签名加 `squash: bool`；OCI history
+  `message` 按形态区分（`commit --squash` / `commit`）便于 `podman inspect` 溯源。
+  默认 squash=true 保持既有行为不变。
+- `gui/src/commands/containers.rs::env_snapshot` 加 `squash: Option<bool>`
+  （未传按默认 true；前端 camelCase `squash`）。
+- `cli/src/main.rs::EnvCmd::Snapshot` 加 `--no-squash` flag（默认 squash）；
+  `cmd_env_snapshot` 透传 `squash: bool`。
+- 前端 `ContainersPanel.tsx`：快照按钮 `Popconfirm` → `Dropdown.Button`
+  （主键=默认 squash 单层，菜单=[squash 单层（默认，体积小） / 普通 commit
+  （保留分层历史）]）；选定形态弹 `Modal` 填可选快照名再确认（`snapshotModal`
+  state 记录 {name, mode}，`handleSnapshotConfirm` 调 `env_snapshot` 传
+  `squash: mode === 'squash'`）。原 `handleSnapshot` + `Popconfirm` 移除。
+
+验证：`cargo build/test --workspace` 全过 + clippy 无新增 + `tsc --noEmit` 通过。
+squash 路径与既有快照完全等价（query 从 `squash=true` 到 `squash=true`），
+普通 commit 路径走同一 libpod 端点 `squash=false`。
+
+重建容器注意：本改动只动 host 端 core + CLI + GUI；不动 easytidy-dock / server。
+`cargo build -p easytidy-core` + 重启 GUI / CLI 进程。
+
+### 重建顺序改造：新容器确认就绪后才删旧（2026-09-04）
+
+需求：原 rebuild 顺序「commit → stop → 删旧 → 建新 → 启动」，删旧发生在**确认新容器
+起来之前**——若建新/启动失败，旧容器已删，环境只剩 commit 镜像可手动恢复。改为「**新
+容器确认就绪后才删旧**」：旧容器全程保留到确认，失败自动回滚，环境不中断。
+
+两个硬约束（决定方案）：
+- **podman 同名唯一**：新容器要用正式名 `<name>`（label `easytidy.name` / socket 目录
+  / server 注册全按它绑定），创建前旧 `<name>` 名字必须先释放（rename 走）。
+- **socket 目录按容器名派生**：新旧容器都 bind `socket_dir_for(<name>)`，两个 dock
+  daemon 抢同一 `dock.sock` → 旧容器至少要 stop 释放 socket，**重建必有短暂中断**
+  （零中断共存做不到）。
+
+修复（`core/src/podman/mod.rs::Podman`）：
+- `rebuild` 改「保留旧容器」流程：
+  1. commit 当前层 → 镜像（数据保险）
+  2. `rename` 旧 → `<name>-old-<tag>`（**保留**，释放正式名；数据在容器层+镜像双保存）
+  3. `stop` 旧（释放 socket——旧 dock daemon 退出）
+  4. `create_with_config`（正式名 `<name>`，label/socket/server 全按 `<name>`）
+  5. `start_and_confirm`（start + 确认 running + dock daemon 就绪）
+  6. **确认就绪** → `remove` 旧
+  7. 第 4/5 步任一失败 → `rollback`（删未就绪新容器，旧 rename 回正式名 + start，环境恢复）
+- 新增 `rename`（bollard `rename_container`）、`dock_alive`（容器内 `easytidy-dock
+  client ping`，解析 `alive: true`；exec 不通/无响应/非 alive 均 false）、
+  `start_and_confirm`（轮询 is_running 最多 ~15s + 轮询 dock_alive 最多 ~15s，两级都过
+  才 Ok）、`rollback`（rename 回 + start，尽力而为，任一步失败仅 warn）。
+- `commit_container` 的 `changes: None` **保持不变**——rebuild 镜像是给自己容器当 base
+  的，create 时 `easytidy.name`/`manager` 会重新注入，**不需要清继承 labels**（清 label
+  是**快照**的语义，不适用于 rebuild）。
+
+其他同步：
+- GUI `env_rebuild` 注释 + 前端 `ContainersPanel.tsx` 重建按钮 description + CLI
+  `cmd_rebuild` doc 均更新为新语义。
+- `crates/cli/tests/rebuild_e2e.rs`：假 dock 脚本（`FAKE_CTOOL_SCRIPT`）加 `client
+  ping` → `alive: true` 分支（rebuild 的 `start_and_confirm` 依赖 dock 存活确认）。
+
+验证：`cargo test --workspace -- --test-threads=1` 全过 + clippy 无新增 + `tsc --noEmit`
+通过。（core 并发跑偶发 `test_remove_socket_dirs_removes_all_generations` flaky——该测试
+改 `XDG_RUNTIME_DIR` 全局 env，串行即稳定，与本改动无关。）
+
+重建容器注意：本改动只动 host 端 core + CLI + GUI；不动 easytidy-dock / server。
+`cargo build -p easytidy-core` + 重启 GUI / CLI 进程。
+
 ## 架构：core `env` 模块族（2026-09-01 已收敛）
 
 「运行时环境适配」（env 探测 + 配置生成）统一收敛到 `core::env` 模块族，作单一

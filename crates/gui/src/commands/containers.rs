@@ -443,21 +443,25 @@ pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Resu
 ///
 /// `snapshot_name` = 用户输入的快照名（最终镜像全名 = `easytidy/snapshot/<snapshot_name>`）；
 /// 缺省 = 可读默认名 `<容器名>-<YYYYmmdd-HHMM>`（core 统一兜底）。
+/// `squash` = 镜像形态：`true`（默认）= `commit --squash` 单层；`false` = 普通
+/// commit 保留分层历史。未传（None）时按默认 `true`。
 /// 返回快照镜像名（前端展示/复用）。
 #[tauri::command]
 pub async fn env_snapshot(
     podman: tauri::State<'_, PodmanState>,
     name: String,
     snapshot_name: Option<String>,
+    squash: Option<bool>,
 ) -> Result<String, String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
+    let squash = squash.unwrap_or(true);
     let image_ref = p
-        .snapshot(&name, snapshot_name.as_deref())
+        .snapshot(&name, snapshot_name.as_deref(), squash)
         .await
         .map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
 
-    info!("环境 {} 快照完成：{}", name, image_ref);
+    info!("环境 {} 快照完成（squash={}）：{}", name, squash, image_ref);
     Ok(image_ref)
 }
 
@@ -472,8 +476,9 @@ pub async fn env_start(podman: tauri::State<'_, PodmanState>, name: String) -> R
     Ok(())
 }
 
-/// 重建环境：按注册表（每容器一个 `<name>.toml`）当前配置 commit → 删旧 →
-/// 同名重建 → 启动。应用外部修改的配置文件用；配置编辑走配置管理器（apply）。
+/// 重建环境：按注册表（每容器一个 `<name>.toml`）当前配置 commit → 保留旧容器 →
+/// 同名重建并启动 → 确认新容器就绪后才删旧（失败自动回滚，环境不中断）。
+/// 应用外部修改的配置文件用；配置编辑走配置管理器（apply）。
 #[tauri::command]
 pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
     let config_file =

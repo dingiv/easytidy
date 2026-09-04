@@ -17,8 +17,10 @@ import {
   Alert,
   Button,
   Card,
+  Dropdown,
   Empty,
   Input,
+  Modal,
   Popconfirm,
   Space,
   Spin,
@@ -36,6 +38,9 @@ import {
 } from '@ant-design/icons';
 import type { EnvView } from '../types';
 import './ContainersPanel.css';
+
+/** 快照镜像形态：squash 单层（默认）/ commit 保留分层历史 */
+type SnapshotMode = 'squash' | 'commit';
 
 /** 暴露给 MasterView 的句柄:创建/重建等动作后触发本面板重拉 */
 export interface ContainerRef {
@@ -76,6 +81,10 @@ function ContainersPanelInner(
 
   // 快照(按容器记录可选快照名)
   const [snapshotNameMap, setSnapshotNameMap] = useState<Record<string, string>>({});
+  // 快照确认弹窗：记录当前打开的是哪个容器、哪种形态
+  const [snapshotModal, setSnapshotModal] = useState<{ name: string; mode: SnapshotMode } | null>(
+    null,
+  );
 
   const load = async () => {
     setLoading(true);
@@ -150,20 +159,31 @@ function ContainersPanelInner(
     }
   };
 
-  /** 快照(commit 当前文件系统层为独立备份资产；快照名可用于后续手动恢复/重建。
-   *  未接管容器同样适用——commit 是 podman 原生能力，不依赖 easytidy 注册配置) */
-  const handleSnapshot = async (env: EnvView) => {
-    const snapshotName = (snapshotNameMap[env.name] ?? '').trim();
+  /** 打开快照确认弹窗（选定形态后） */
+  const openSnapshotModal = (env: EnvView, mode: SnapshotMode) => {
+    if (env.status === 'missing') return;
+    setSnapshotModal({ name: env.name, mode });
+  };
+
+  /** 确认快照：commit 当前文件系统层为独立备份资产；快照名可用于后续手动恢复/重建。
+   *  未接管容器同样适用——commit 是 podman 原生能力，不依赖 easytidy 注册配置。
+   *  形态：squash 单层（默认）/ commit 保留分层历史。 */
+  const handleSnapshotConfirm = async () => {
+    if (!snapshotModal) return;
+    const { name, mode } = snapshotModal;
+    const snapshotName = (snapshotNameMap[name] ?? '').trim();
+    setSnapshotModal(null);
     try {
       const imageRef = await invoke<string>('env_snapshot', {
-        name: env.name,
+        name,
         snapshotName: snapshotName || null,
+        squash: mode === 'squash',
       });
-      setSnapshotNameMap((prev) => ({ ...prev, [env.name]: '' }));
+      setSnapshotNameMap((prev) => ({ ...prev, [name]: '' }));
       message.success(`快照已创建：${imageRef}（可作为基础镜像新建容器）`);
       await load();
     } catch (err: any) {
-      setError(errMsg(err, `创建容器「${env.name}」快照失败`));
+      setError(errMsg(err, `创建容器「${name}」快照失败`));
       console.error('env_snapshot failed:', err);
     }
   };
@@ -268,7 +288,7 @@ function ContainersPanelInner(
                     {managed && (
                       <Popconfirm
                         title="重建容器"
-                        description="按注册表(config.toml)当前配置 commit → 删除 → 同名重建 → 启动。用于应用外部修改的配置文件。"
+                        description="按注册表当前配置重建：commit 当前层 → 保留旧容器 → 用新配置重建并启动 → 确认新容器就绪后才删除旧容器（失败自动回滚，环境不中断）。用于应用外部修改的配置文件。"
                         okText="重建"
                         cancelText="取消"
                         okButtonProps={{ danger: true }}
@@ -286,29 +306,24 @@ function ContainersPanelInner(
                         </Button>
                       </Popconfirm>
                     )}
-                    <Popconfirm
-                      title="创建快照"
-                      description={
-                        <Input
-                          placeholder="快照名(可选, name[:tag], 默认 <容器名>-<时间>)"
-                          value={snapshotNameMap[env.name] ?? ''}
-                          onChange={(e) =>
-                            setSnapshotNameMap((prev) => ({ ...prev, [env.name]: e.target.value }))
-                          }
-                          onKeyDown={(e) => {
-                            if (e.key === 'Enter') handleSnapshot(env);
-                          }}
-                        />
-                      }
-                      okText="创建"
-                      cancelText="取消"
+                    {/* 快照 = 下拉选择按钮：左侧主按钮走默认 squash 单层，
+                        右侧箭头菜单可显式选 squash / 普通 commit（保留分层）。
+                        选定形态后弹 Modal 填可选快照名再确认。 */}
+                    <Dropdown.Button
+                      size="small"
+                      icon={<CameraOutlined />}
                       disabled={missing}
-                      onConfirm={() => handleSnapshot(env)}
+                      onClick={() => openSnapshotModal(env, 'squash')}
+                      menu={{
+                        items: [
+                          { key: 'squash', label: 'squash 单层（默认，体积小）' },
+                          { key: 'commit', label: '普通 commit（保留分层历史）' },
+                        ],
+                        onClick: ({ key }) => openSnapshotModal(env, key as SnapshotMode),
+                      }}
                     >
-                      <Button size="small" icon={<CameraOutlined />} disabled={missing}>
-                        快照
-                      </Button>
-                    </Popconfirm>
+                      快照
+                    </Dropdown.Button>
                     <Popconfirm
                       title={`删除容器「${env.name}」?`}
                       description={
@@ -331,6 +346,40 @@ function ContainersPanelInner(
             );
           })}
         </div>
+      )}
+
+      {/* 快照确认弹窗：形态由下拉选定（squash 单层 / 普通 commit），此处填可选快照名再确认 */}
+      {snapshotModal && (
+        <Modal
+          title={`创建快照 — ${snapshotModal.name}`}
+          open
+          onOk={handleSnapshotConfirm}
+          onCancel={() => setSnapshotModal(null)}
+          okText="创建"
+          cancelText="取消"
+        >
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            <Typography.Text>
+              镜像形态：
+              {snapshotModal.mode === 'squash'
+                ? 'squash 单层（默认，体积小，不保留源镜像分层历史）'
+                : '普通 commit（保留源镜像分层历史，体积更大）'}
+            </Typography.Text>
+            <Input
+              placeholder="快照名(可选, name[:tag], 默认 <容器名>-<时间>)"
+              value={snapshotNameMap[snapshotModal.name] ?? ''}
+              onChange={(e) =>
+                setSnapshotNameMap((prev) => ({
+                  ...prev,
+                  [snapshotModal.name]: e.target.value,
+                }))
+              }
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSnapshotConfirm();
+              }}
+            />
+          </Space>
+        </Modal>
       )}
     </div>
   );

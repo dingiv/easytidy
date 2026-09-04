@@ -50,6 +50,11 @@ fn check(cond: bool, msg: &str) -> Result<(), String> {
 /// 此脚本只用于不构建 musl 二进制的 e2e 环境。
 const FAKE_CTOOL_SCRIPT: &str = r#"#!/bin/sh
 set -u
+# e2e 最小模拟 `client ping`（rebuild 的 dock daemon 存活确认，start_and_confirm 依赖）
+if [ "${1:-}" = "client" ] && [ "${2:-}" = "ping" ]; then
+  echo "alive: true"
+  exit 0
+fi
 uid=1000; gid=1000; name=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -166,7 +171,8 @@ async fn rebuild_applies_mounts_and_ports() {
             .register_container(config2.clone())
             .map_err(|e| format!("更新配置失败：{e}"))?;
 
-        // rebuild：commit → stop → rm → create（同名，新配置）→ start
+        // rebuild：commit → rename 保留旧 → stop 旧 → create（同名，新配置）→
+        // start + 确认就绪（running + dock ping）→ 删旧
         let new_id = podman
             .rebuild(&name, &config2, &bins)
             .await

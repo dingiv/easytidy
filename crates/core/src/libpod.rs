@@ -164,17 +164,19 @@ impl Libpod {
             .ok_or_else(|| Error::Connect(format!("libpod create 响应缺少 Id：{text}")))
     }
 
-    /// POST `/v<version>/libpod/commit?container=<name>&repo=<repo>&[tag=<tag>]&squash=true[&changes=…]`
+    /// POST `/v<version>/libpod/commit?container=<name>&repo=<repo>&[tag=<tag>]&squash=<bool>[&changes=…]`
     ///
-    /// 把容器当前文件系统打成一个扁平镜像(单层)。
+    /// 把容器当前文件系统打成镜像（squash 与否由调用方决定）。
     ///
+    /// - `squash`：
+    ///   - `true` 等价 `podman commit --squash`：把多层合并为**单层**,镜像体积更小,
+    ///     不再叠加源容器原有历史层。作为"环境快照"的**默认**语义(fork 后镜像层干净)。
+    ///   - `false` 普通 commit：保留源容器的**分层历史**（体积 = 源镜像层 + 容器增量层）。
     /// - `repo` 与 `tag` **分开传**：实测 libpod commit 的 `repo` 参数不允许含 `:`,
     ///   podman 会在其内部按 `<repo>:latest` 解析,遇到已有 `:` 的 repo 会触发
     ///   `parsing reference "<repo>:<tag>:latest": invalid reference format` 500。
     ///   tag 必须走独立 `tag=` query 参数（podman 5.4.2 验证过）。
     ///   `tag=None` → podman 走默认 tag（latest）。
-    /// - `squash=true` 等价 `podman commit --squash`:把多层合并为单层,镜像体积更小,
-    ///   不再叠加源容器原有历史层。适合作为"环境快照"语义(fork 后镜像层是干净的)。
     /// - `message`(OCI 镜像 history 的注释字段)进 image history,便于以后
     ///   `podman inspect` 看见来源备注。**注意:OCI 格式(/libpod/commit)用
     ///   `message`;docker 格式(/commit,已废弃)用 `comment`**——本端点传
@@ -185,16 +187,17 @@ impl Libpod {
     ///   （podman handler 只识别 `changes` schema tag）。空切片不附加参数。
     ///
     /// 返回 commit 响应里的 `Id`(镜像 ID,与 `repo:tag` 解析到同一镜像)。
-    pub async fn commit_squash(
+    pub async fn commit(
         &self,
         container_name: &str,
         repo: &str,
         tag: Option<&str>,
+        squash: bool,
         message: &str,
         changes: &[&str],
     ) -> Result<String> {
         let mut query = format!(
-            "container={}&repo={}&squash=true&message={}",
+            "container={}&repo={}&squash={squash}&message={}",
             urlencoding(container_name),
             urlencoding(repo),
             urlencoding(message),
