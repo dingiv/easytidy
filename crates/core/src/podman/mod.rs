@@ -645,13 +645,60 @@ impl Podman {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => default_snapshot_name(name),
         };
-        let image_ref = format!("easytidy/snapshot/{snapshot_name}");
+        // 感知 `name:version`：用户在 CLI/GUI 输入的快照名可以带 `:` 表示
+        // tag。libpod commit 的 `repo` 参数不允许含 `:`（会被解析成
+        // `<repo>:<tag>:latest` 报 invalid reference format 500），必须把
+        // repo 和 tag 分开传。
+        let (snap_repo, snap_tag) = parse_snapshot_ref(&snapshot_name);
+        let image_ref = match &snap_tag {
+            Some(t) => format!("easytidy/snapshot/{snap_repo}:{t}"),
+            None => format!("easytidy/snapshot/{snap_repo}"),
+        };
         let libpod = crate::libpod::Libpod::new().await?;
+
+        // 快照镜像默认清空容器继承的 labels（devcontainer.* / io.buildah.* /
+        // manager 等）。快照是独立资产，不直接被 `create_with_config` 用作
+        // 新容器 base——下次 create 时再注入 easytidy 自己的 labels，所以这里
+        // 清空所有 label 不影响后续识别逻辑。podman 5.4.2 无 `--unsetlabel`，
+        // 唯一可控路径是 commit 时传 `changes=LABEL=foo=`（空值覆盖）。
+        let changes = self.build_label_clear_changes(name).await;
+        tracing::info!(
+            "环境 {} 快照:清空 {} 个 labels 后 commit → {}",
+            name,
+            changes.len(),
+            image_ref
+        );
+
+        let change_refs: Vec<&str> = changes.iter().map(|s| s.as_str()).collect();
         libpod
-            .commit_squash(name, &image_ref, "easytidy snapshot via commit --squash")
+            .commit_squash(name, &snap_repo, snap_tag.as_deref(), "easytidy snapshot via commit --squash", &change_refs)
             .await?;
         tracing::info!("环境 {} 快照完成:{}", name, image_ref);
         Ok(image_ref)
+    }
+
+    /// 读取容器 labels，对每个 key 生成 `LABEL=foo=`（空值覆盖）changes。
+    ///
+    /// podman 5.4.2 commit 不支持真正删除 label——commit 时传 `LABEL=foo=`
+    /// 把 image 的 label value 改成空串，敏感内容（路径 / env / 端口）消失。
+    /// key 仍存在但 value 清空（podman 设计上不允许从 image 删 label key）。
+    async fn build_label_clear_changes(&self, name: &str) -> Vec<String> {
+        let labels = match self.docker.inspect_container(name, None).await {
+            Ok(detail) => detail
+                .config
+                .and_then(|c| c.labels)
+                .unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(
+                    "快照时读取容器 labels 失败（labels 会原样保留在快照镜像）：{e}"
+                );
+                return Vec::new();
+            }
+        };
+        labels
+            .into_keys()
+            .map(|k| format!("LABEL={k}="))
+            .collect()
     }
 
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
@@ -1285,6 +1332,43 @@ fn validate_mount(m: &MountConfig) -> Result<()> {
     Ok(())
 }
 
+/// 解析快照名为 `(repo, tag)`：第一个 `:` 切分，余下 `:` 视为 name/tag 一部分（podman 切最后 `:`）。
+/// `name` 仅允许 `[A-Za-z0-9_.-]+`（同 podman repo 命名规则）；含非法字符直接走原样透传（podman 自己报具体错误）。
+/// 返回的 `tag=None` 表示无 tag（podman 走默认 `:latest`）。
+fn parse_snapshot_ref(input: &str) -> (String, Option<String>) {
+    // 第一个 `:` 切（避免被 tag 内部的 `:` 干扰：name 不能再含 `:`）
+    match input.split_once(':') {
+        Some((name, tag)) => {
+            if name.is_empty() {
+                return (input.to_string(), None);
+            }
+            if !is_valid_image_name_component(name) {
+                return (input.to_string(), None);
+            }
+            if tag.is_empty() || !is_valid_image_name_component(tag) {
+                // 空 tag 或非法 tag：把 name 部分当纯名透传（不保留 `:` 痕迹）
+                return (name.to_string(), None);
+            }
+            (name.to_string(), Some(tag.to_string()))
+        }
+        None => {
+            if is_valid_image_name_component(input) {
+                (input.to_string(), None)
+            } else {
+                // 含非法字符的纯 name 也直接透传（podman 会自己报错）
+                (input.to_string(), None)
+            }
+        }
+    }
+}
+
+/// podman image name 合法字符：`[a-zA-Z0-9_.-]`（路径分隔符 `/` 由调用方处理）
+fn is_valid_image_name_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1673,5 +1757,38 @@ mod tests {
         Podman::dedup_mounts(&mut mounts);
         assert_eq!(mounts.len(), 1);
         assert_eq!(mounts[0].host_path, "/data/b", "保留最后出现的（用户手动项优先）");
+    }
+
+    /// snapshot_name 解析（name:version → (name, Some(version))）：
+    /// libpod commit 的 `repo` 不允许含 `:`，必须把 name / version 拆开分别传。
+    #[test]
+    fn test_parse_snapshot_ref() {
+        // 纯 name：tag=None
+        assert_eq!(super::parse_snapshot_ref("myimage"), ("myimage".into(), None));
+        assert_eq!(
+            super::parse_snapshot_ref("desk_pilot.v9"),
+            ("desk_pilot.v9".into(), None)
+        );
+
+        // name:version：第一个 `:` 切
+        assert_eq!(
+            super::parse_snapshot_ref("myimage:v1"),
+            ("myimage".into(), Some("v1".into()))
+        );
+        assert_eq!(
+            super::parse_snapshot_ref("desk_pilot:9.3.2"),
+            ("desk_pilot".into(), Some("9.3.2".into()))
+        );
+
+        // 非法字符（带 `/` / `:` 后跟非合法 tag）：fallback 整体当 name，tag=None
+        // （podman 自己会报具体错误）
+        assert_eq!(
+            super::parse_snapshot_ref("foo/bar"),
+            ("foo/bar".into(), None)
+        );
+        assert_eq!(super::parse_snapshot_ref("foo:"), ("foo".into(), None));
+
+        // 空字符串：原样返回（让 podman 报错）
+        assert_eq!(super::parse_snapshot_ref(""), ("".into(), None));
     }
 }

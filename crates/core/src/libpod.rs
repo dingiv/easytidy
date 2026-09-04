@@ -164,12 +164,15 @@ impl Libpod {
             .ok_or_else(|| Error::Connect(format!("libpod create 响应缺少 Id：{text}")))
     }
 
-    /// POST `/v<version>/libpod/commit?container=<name>&repo=<image_ref>&squash=true`
+    /// POST `/v<version>/libpod/commit?container=<name>&repo=<repo>&[tag=<tag>]&squash=true[&changes=…]`
     ///
     /// 把容器当前文件系统打成一个扁平镜像(单层)。
     ///
-    /// - `<image_ref>` 形态 `repo:tag`(或 `repo`,缺省 tag=latest)。libpod 端点把
-    ///   `:` 当作 repo/tag 分隔。
+    /// - `repo` 与 `tag` **分开传**：实测 libpod commit 的 `repo` 参数不允许含 `:`,
+    ///   podman 会在其内部按 `<repo>:latest` 解析,遇到已有 `:` 的 repo 会触发
+    ///   `parsing reference "<repo>:<tag>:latest": invalid reference format` 500。
+    ///   tag 必须走独立 `tag=` query 参数（podman 5.4.2 验证过）。
+    ///   `tag=None` → podman 走默认 tag（latest）。
     /// - `squash=true` 等价 `podman commit --squash`:把多层合并为单层,镜像体积更小,
     ///   不再叠加源容器原有历史层。适合作为"环境快照"语义(fork 后镜像层是干净的)。
     /// - `message`(OCI 镜像 history 的注释字段)进 image history,便于以后
@@ -177,20 +180,33 @@ impl Libpod {
     ///   `message`;docker 格式(/commit,已废弃)用 `comment`**——本端点传
     ///   `comment` 会触发 500 "messages are only compatible with the docker
     ///   image format (-f docker)"。
+    /// - `changes`（libpod commit 的 schema 字段，**复数**）：多次同名 query 参数
+    ///   累积为 `[]string`，每条一条 Dockerfile 指令。实测 `change=` 单数无效
+    ///   （podman handler 只识别 `changes` schema tag）。空切片不附加参数。
     ///
-    /// 返回 commit 响应里的 `Id`(镜像 ID,与 `image_ref` 解析到同一镜像)。
+    /// 返回 commit 响应里的 `Id`(镜像 ID,与 `repo:tag` 解析到同一镜像)。
     pub async fn commit_squash(
         &self,
         container_name: &str,
-        image_ref: &str,
+        repo: &str,
+        tag: Option<&str>,
         message: &str,
+        changes: &[&str],
     ) -> Result<String> {
-        let query = format!(
+        let mut query = format!(
             "container={}&repo={}&squash=true&message={}",
             urlencoding(container_name),
-            urlencoding(image_ref),
+            urlencoding(repo),
             urlencoding(message),
         );
+        if let Some(t) = tag {
+            query.push_str("&tag=");
+            query.push_str(&urlencoding(t));
+        }
+        for c in changes {
+            query.push_str("&changes=");
+            query.push_str(&urlencoding(c));
+        }
         let uri: hyper::Uri = format!(
             "http://podman/v{}/libpod/commit?{query}",
             self.api_version

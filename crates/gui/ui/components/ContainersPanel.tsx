@@ -290,7 +290,7 @@ function ContainersPanelInner(
                       title="创建快照"
                       description={
                         <Input
-                          placeholder="快照名(可选,默认 <容器名>-<时间>)"
+                          placeholder="快照名(可选, name[:tag], 默认 <容器名>-<时间>)"
                           value={snapshotNameMap[env.name] ?? ''}
                           onChange={(e) =>
                             setSnapshotNameMap((prev) => ({ ...prev, [env.name]: e.target.value }))

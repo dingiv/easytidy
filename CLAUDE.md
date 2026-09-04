@@ -192,6 +192,144 @@ x86_64-unknown-linux-musl` 后重建容器（bind-mount 钉 inode）。
 （daemon/bootstrap/client 都写）。查看：CLI `easytidy dock-logs --container <n>` 或
 GUI `dock_logs` 命令 / bootstrap 失败时错误信息里附日志尾。
 
+### 启动容器时清空 image 继承的 labels（2026-09-03）
+
+症状：`podman inspect <container>` 看到容器带一堆镜像继承的 labels：
+
+```
+"Labels": {
+    "devcontainer.config_file": "/home/div/.devcontainer/devcontainer.json",
+    "devcontainer.local_folder": "/home/div",
+    "devcontainer.metadata": "[{\"mounts\":[...],\"containerEnv\":{\"DISPLAY\":\":0\",...}}]",
+    "easytidy.name": "chrome",
+    "io.buildah.version": "1.39.3",
+    "manager": "easytidy"
+}
+```
+
+这些 label 里 `devcontainer.*` 含宿主绝对路径 + env + 端口，`io.buildah.version`
+是镜像构建机残留——都不是 easytidy 想往容器上挂的。`easytidy.name` /
+`manager=easytidy` 是 easytidy 自己的（识别 / GUI 维护用），要保留。
+
+**关键坑（2026-09-03 实测）**：podman 5.4.2 libpod SpecGenerator 的
+`unsetLabels` 字段**未生效**（直接 HTTP 调用，image labels 仍透传）；
+libpod CLI 也无 `--unsetlabel` flag。第一版按 unsetLabels 思路实现，
+GUI 拉新容器实测 labels 完整保留，**无效**。
+
+**唯一可控路径**：把 image labels 的 keys 用**空串**覆盖——label key
+仍存在但值清空，敏感内容（路径 / env / 端口）消失；随后 easytidy 自己的
+labels（manager / easytidy.name）正常写入，互不干扰。实测 podman 5.4.2
+HTTP API 直调 + libpod SpecGenerator 均生效：
+
+```jsonc
+// image Config.Labels: {"devcontainer.config_file": "/path/...", ...}
+// create body: labels: {
+//   "devcontainer.config_file": "",  ← 空串覆盖
+//   "devcontainer.local_folder": "",
+//   "devcontainer.metadata": "",
+//   "io.buildah.version": "",
+//   "manager": "easytidy",             ← easytidy 自己
+//   "easytidy.name": "chrome"
+// }
+// podman inspect 容器 Labels: 同上（key 保留，敏感值清空）
+```
+
+修复：
+
+- `core/src/podman/mod.rs::create_with_config`：`image_exists` 之后多调一次
+  `inspect_image`，从 `img.config.labels` 取 key 列表；用空串构造一个
+  `HashMap<key, "">`（占位 image labels），随后 `labels.insert("manager", "easytidy")`
+  / `labels.insert("easytidy.name", name)` 用真值覆盖自己的两个 key。
+- `keep_id_create_body` 签名不变（labels map 一路下传即可）。
+- inspect 失败 best-effort：warn 后用空 map（容器照常创建，仅 image labels 保留）。
+- 重建（`rebuild` → `create_with_config`）路径自动复用同一逻辑。
+
+测试：新增 `test_libpod_body_image_labels_override`：构造 image 4 个
+key 空值 + easytidy 2 个 key 真值，验证 body labels 字段全部正确。
+（第一版 `unsetLabels` 测试已删除。）
+
+验证：`podman inspect <container>` 后容器 Labels 的 `devcontainer.*` /
+`io.buildah.*` 值为空串，敏感内容清空；easytidy 自己的 labels 不受影响。
+
+**已知限制**：label key 仍存在（仅值清空）。podman 5.4.2 无 API 真正
+删除 label key（CLI 无 `--unsetlabel`，SpecGenerator 的 `unsetLabels`
+字段被忽略，post-create 也无修改 label 的子命令）。若以后 podman 修了
+这一路，可以无缝切回 unsetLabels（仅移除 `for k in img_labels.keys()`
+那行 + 复用之前的 `unsetLabels` 字段）。
+
+重建容器注意：本改动只动 host 端 core（podman/mod.rs / libpod.rs），不动
+easytidy-dock / easytidy-server；GUI/CLI 改动只需重启对应进程。
+
+### 快照 / 重建 commit 默认清空继承 labels（2026-09-03）
+
+症状：环境快照（`env_snapshot`）或重建（`rebuild`）时，commit 出的镜像
+`localhost/easytidy-rebuild:<tag>` / `easytidy/snapshot/<name>` 同样带
+`devcontainer.*` / `io.buildah.*` 等 image 标签——下次用此镜像 create
+容器（rebuild 路径）或被外部工具 inspect 时仍泄露宿主信息。
+
+修复路径与启动时一致：commit 时传 `LABEL=foo=` 清空值。
+
+- `core/src/libpod.rs::commit_squash`：新增 `changes: &[&str]` 参数，
+  每个 change 作为重复 `changes=` query 参数附加到 URL。**注意** libpod
+  commit 的 schema 字段是 `changes`（**复数**），单数 `change` 不生效
+  （实测验证：handler `schema:"changes"` 累积为 `[]string`；URL
+  `change=A&change=B` 被忽略，`changes=A&changes=B` 生效）。
+- `core/src/podman/mod.rs::Podman`：
+  - 新增 `build_label_clear_changes(name)`：`inspect_container` 读容器
+    `Config.Labels`，对每个 key 生成 `LABEL=foo=`（空值覆盖）。inspect
+    失败 best-effort（warn + 空 vec，commit 照常跑）。
+  - `snapshot()`：先 `build_label_clear_changes(name)`，再 `commit_squash` 附带。
+  - `rebuild()` 走的 `commit_container()`（bollard Docker compat）：把
+    `Vec<String>` join `\n` 塞进 `CommitContainerOptions.changes`（Docker
+    协议要求多指令 `\n` 分隔）。空切片 = `None`（原行为）。
+- 两个 commit 路径都应用同一逻辑——快照 + 重建的镜像都不带敏感 label 值。
+
+**前置 base image 重建**（2026-09-03 操作）：`localhost/desk_pilot:9.3.2`
+已基于 `localhost/desk_pilot:9.3.1` 用同样手法构建 —— 所有 label value 清空，
+仅 key 保留（podman 5.4.2 硬限制）。后续若 `desk_pilot:9.3.1` 重建并添加
+devcontainer labels，可重新跑同样 commit 一次生成新的 `<ver>.N`。
+
+验证（端到端实测）：
+- 容器 `localhost/desk_pilot:9.3.1` 起容器：labels 含完整 devcontainer 路径/env
+- snapshot（携带 `changes=LABEL=foo=`）：快照镜像 labels 全 `""`
+- 用快照镜像起的容器：labels 全 `""`，敏感内容消失
+
+测试：113 项 core 单测全过（含原 `test_libpod_body_image_labels_override`）。
+clippy 无新增 warning。
+
+重建容器注意：本改动只动 host 端 core；GUI/CLI 改动只需重启对应进程。
+`localhost/desk_pilot:9.3.2` 已构建在本地，无需重建。
+
+### 快照名 `name:version` 感知（2026-09-04）
+
+症状：用户在 CLI / GUI 输入 `myimage:v1` 时，原实现简单 `format!("easytidy/snapshot/{snapshot_name}")`
+得到 `easytidy/snapshot/myimage:v1` 后整个塞进 libpod commit 的 `repo`
+参数，**podman 内部对 `repo` 自动追加 `:latest`，拼成 `repo:v1:latest` →
+500 `parsing reference "<repo>:<tag>:latest": invalid reference format`**。
+
+实测确认 libpod `/v5.0.0/libpod/commit` 行为：
+- `repo=test/snap-3`（无 `:`）→ 镜像 = `localhost/test/snap-3:latest` ✓
+- `repo=test/snap-3&tag=tag1` → 镜像 = `localhost/test/snap-3:tag1` ✓
+- `repo=test/snap-3:tag1`（一个 `:`）→ 500 invalid reference format ✗
+
+所以 `repo` 与 `tag` 必须**分开**传，podman 不会从带 `:` 的 repo 切 tag。
+
+修复：
+- `core/src/libpod.rs::commit_squash` 签名改：`container`, `repo: &str`,
+  `tag: Option<&str>`, `message`, `changes`；`tag=None` 时不附加 `tag=` 参数
+  （podman 走默认 `:latest`）。
+- `core/src/podman/mod.rs::Podman::snapshot` 调 `parse_snapshot_ref` 拆分用户
+  输入：`name:version` → `(name, Some(version))`；纯 name → `(name, None)`；
+  非法字符（含 `/` / 空 tag）走原样透传（让 podman 自己报错）。
+- GUI placeholder / CLI help 同步：`name[:tag]` 提示。
+
+测试：新增 `test_parse_snapshot_ref` 覆盖纯 name / `name:v1` / `desk_pilot:9.3.2`
+/ `foo/bar` / `foo:` / 空字符串 6 种 case。113 项 core 单测全过。
+clippy 无新增 warning。
+
+重建容器注意：本改动只动 host 端 core + CLI + GUI；不动 easytidy-dock。
+`cargo build -p easytidy-core` + 重启 GUI / CLI 进程。
+
 ## 架构：core `env` 模块族（2026-09-01 已收敛）
 
 「运行时环境适配」（env 探测 + 配置生成）统一收敛到 `core::env` 模块族，作单一

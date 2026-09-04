@@ -219,7 +219,7 @@ enum EnvCmd {
     Snapshot {
         /// 环境名
         name: String,
-        /// 快照名（最终镜像 = easytidy/snapshot/<快照名>；默认=<容器名>-<YYYYmmdd-HHMM>）
+        /// 快照名（最终镜像 = easytidy/snapshot/<name>[:<tag>]；默认=<容器名>-<YYYYmmdd-HHMM>）
         #[arg(long)]
         snapshot: Option<String>,
     },
