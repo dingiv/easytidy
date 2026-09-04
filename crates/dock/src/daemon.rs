@@ -94,9 +94,7 @@ pub async fn run_daemon() -> anyhow::Result<()> {
         }
     });
 
-    let mut shutdown_tx: Option<oneshot::Sender<()>> = None;
-    let (sd_tx, mut sd_rx) = oneshot::channel::<()>();
-    shutdown_tx = Some(sd_tx);
+    let (_sd_tx, mut sd_rx) = oneshot::channel::<()>();
 
     loop {
         tokio::select! {
@@ -134,7 +132,6 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
     // 清理
     cleanup_task.abort();
-    drop(shutdown_tx);
     // 标记所有 session 死亡 + 广播
     let sessions = state.sessions.read().await;
     for s in sessions.values() {
@@ -268,7 +265,7 @@ async fn handle_client(
             tokio::task::spawn_blocking(move || {
                 use std::io::Read;
                 let mut reader = match reader_session.master.lock() {
-                    Ok(mut m) => m.try_clone_reader().ok(),
+                    Ok(m) => m.try_clone_reader().ok(),
                     Err(_) => None,
                 };
                 if let Some(mut r) = reader.take() {
@@ -319,7 +316,7 @@ async fn handle_client(
                 return Ok(());
             };
             // resize
-            if let Ok(mut m) = session.master.lock() {
+            if let Ok(m) = session.master.lock() {
                 let _ = m.resize(portable_pty::PtySize {
                     rows: req.rows,
                     cols: req.cols,
@@ -395,7 +392,7 @@ async fn handle_client(
             };
             match session {
                 Some(s) => {
-                    if let Ok(mut m) = s.master.lock() {
+                    if let Ok(m) = s.master.lock() {
                         let _ = m.resize(portable_pty::PtySize {
                             rows: req.rows,
                             cols: req.cols,
@@ -457,7 +454,7 @@ async fn attach_session(
                         match msg.op.as_str() {
                             "rc.resize" => {
                                 let r: RcResize = serde_json::from_value(msg.payload)?;
-                                if let Ok(mut m) = session.master.lock() {
+                                if let Ok(m) = session.master.lock() {
                                     let _ = m.resize(portable_pty::PtySize {
                                         rows: r.rows,
                                         cols: r.cols,
