@@ -57,7 +57,7 @@ function truncateFlavor(name: string, max = 16): string {
 }
 
 function MasterViewInner() {
-  // 容器列表刷新触发器：new-container 提交成功 / 模板同步派生成功后 +1
+  // 容器列表刷新触发器：new-container 提交成功后 +1
   const [refreshTick, setRefreshTick] = useState(0);
   // 模板列表刷新触发器：模板 tab 保存成功后 +1（FlavorsPanel 重新加载）
   const [templateTick, setTemplateTick] = useState(0);

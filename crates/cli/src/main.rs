@@ -34,9 +34,11 @@ use easytidy_protocol::{Handshake, HandshakeAck};
 #[command(name = "easytidy")]
 #[command(about = "easytidy - Linux 容器应用沙盒管理器", long_about = None)]
 struct Cli {
-    /// 配置文件路径（可选，默认 $XDG_CONFIG_HOME/easytidy/config.toml）
+    /// 容器配置根目录（可选，默认 FileLoader `CONTAINERS` namespace：
+    /// dev = `crates/core/data/containers`，prod = `~/.easytidy/data/containers`；
+    /// 每容器一个 `<name>.toml`）
     #[arg(short, long, global = true)]
-    config: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
 
     /// 启用详细日志
     #[arg(short, long, global = true)]
@@ -266,7 +268,7 @@ async fn main() -> Result<()> {
             std::process::exit(code);
         }
         Commands::Open { container, command } => {
-            let code = cmd_open(container, command, cli.config.clone()).await?;
+            let code = cmd_open(container, command, cli.config_dir.clone()).await?;
             std::process::exit(code);
         }
         Commands::DockLogs { container, tail } => {
@@ -420,8 +422,7 @@ async fn cmd_create(
             }
 
             // 注册到配置文件
-            let config_path = ConfigFile::default_path()?;
-            let config_file = ConfigFile::with_path(config_path);
+            let config_file = ConfigFile::default_instance()?;
 
             if let Err(e) = config_file.register_container(container_config) {
                 error!("注册容器配置失败：{}", e);
@@ -444,10 +445,9 @@ async fn cmd_rebuild(podman: Podman, container: String) -> Result<()> {
     info!("重建容器：{}", container);
 
     // 从 configfile 读取容器配置
-    let config_path = ConfigFile::default_path()?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file = ConfigFile::default_instance()?;
     let Some(config) = config_file.get_container(&container)? else {
-        bail!("容器配置不存在：{container}（请先 create，或在 config.toml 中编辑 mounts/network 配置）");
+        bail!("容器配置不存在：{container}（请先 create，或编辑 <容器配置目录>/{container}.toml 的 mounts/network）");
     };
 
     // 容器内二进制需 bind-mount 进重建后的容器（与 create 同源，统一走 core helper）
@@ -565,8 +565,7 @@ async fn cmd_rm(podman: Podman, container: String, force: bool) -> Result<()> {
     println!("容器 {} 删除成功", container);
 
     // 从配置文件注销
-    let config_path = ConfigFile::default_path()?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file = ConfigFile::default_instance()?;
 
     if let Err(e) = config_file.unregister_container(&container) {
         error!("注销容器配置失败：{}", e);
@@ -601,7 +600,7 @@ async fn cmd_env_new(
                 .create_with_config(&name, &image, &bins, &config)
                 .await?;
             podman.start(&name).await?;
-            let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+            let config_file = ConfigFile::default_instance()?;
             config_file.register_container(config)?;
             println!(
                 "新环境 {name} 已创建并运行（ID: {}）",
@@ -615,7 +614,7 @@ async fn cmd_env_new(
 /// 删除环境：容器 + 配置 + 桌面图标 + socket 目录全清理（快照为资产保留并提示）。
 async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
     podman.remove(&name, true).await?;
-    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+    let config_file = ConfigFile::default_instance()?;
     if let Err(e) = config_file.unregister_container(&name) {
         error!("注销配置失败：{}", e);
     }
@@ -721,7 +720,7 @@ async fn cmd_flavor_apply(
     }
 
     // 注册配置（entry 应用 + GUI 透传 env/mounts 落盘，供后续 run/passthrough 使用）
-    let config_file = ConfigFile::with_path(ConfigFile::default_path()?);
+    let config_file = ConfigFile::default_instance()?;
     config_file.register_container(config)?;
 
     println!("✅ flavor {flavor_name} 已应用。启动容器内应用：");
@@ -1119,15 +1118,16 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
 }
 
 /// 读注册表中容器的 `silent_boot`；无配置/无条目/读失败 → false（Default 语义）。
-fn silent_boot_for(config_path: Option<&Path>, name: &str) -> bool {
-    let Some(path) = config_path
-        .map(Path::to_path_buf)
-        .or_else(|| ConfigFile::default_path().ok())
-    else {
-        return false;
+/// `config_dir` = 容器配置根目录覆盖（`--config`），缺省走 FileLoader `CONTAINERS`。
+fn silent_boot_for(config_dir: Option<&Path>, name: &str) -> bool {
+    let cf = match config_dir {
+        Some(d) => ConfigFile::with_base_dir(d.to_path_buf()),
+        None => match ConfigFile::default_instance() {
+            Ok(c) => c,
+            Err(_) => return false,
+        },
     };
-    ConfigFile::with_path(path)
-        .get_container(name)
+    cf.get_container(name)
         .ok()
         .flatten()
         .map(|c| c.silent_boot)
@@ -1179,7 +1179,7 @@ fn show_error_in_terminal(message: &str) {
 async fn cmd_open(
     container: String,
     command: Vec<String>,
-    config_path: Option<PathBuf>,
+    config_dir: Option<PathBuf>,
 ) -> Result<i32> {
     info!("打开容器：container={container}, cmd={command:?}");
 
@@ -1205,7 +1205,7 @@ async fn cmd_open(
 
     // ③ 分支
     if command.is_empty() {
-        if silent_boot_for(config_path.as_deref(), &container) {
+        if silent_boot_for(config_dir.as_deref(), &container) {
             // 静默：只保证容器在跑（auto_start 应用由 server 自拉起）
             info!("silent_boot：仅确保容器 {container} 运行（不弹 GUI）");
             return Ok(0);
@@ -1491,8 +1491,8 @@ mod tests {
     #[test]
     fn test_silent_boot_for_reads_config() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        let cf = ConfigFile::with_path(path.clone());
+        let base = tmp.path().to_path_buf();
+        let cf = ConfigFile::with_base_dir(base.clone());
         cf.register_container(ContainerConfig {
             name: "c1".to_string(),
             params: easytidy_core::models::ContainerParams {
@@ -1505,9 +1505,9 @@ mod tests {
         .unwrap();
 
         assert!(
-            silent_boot_for(Some(&path), "c1"),
+            silent_boot_for(Some(&base), "c1"),
             "silent_boot=true 应读回 true"
         );
-        assert!(!silent_boot_for(Some(&path), "c2"), "未注册容器 → false");
+        assert!(!silent_boot_for(Some(&base), "c2"), "未注册容器 → false");
     }
 }

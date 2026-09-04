@@ -42,13 +42,15 @@ function TemplateEditorPaneInner({ initial, onSaved, onCancel }: TemplateEditorP
   const [saving, setSaving] = useState(false);
 
   /** 编辑器 onChange：ContainerConfig 载荷 → ConfTemplate；
-   *  加载 YAML/示例若缺 gui/gpu/setup（它们不在 ContainerConfig 五 section 里），保留现值 */
+   *  加载 YAML/示例若缺 gui/gpu_nvidia/gpu_amd/setup（它们不在 ContainerConfig 五
+   *  section 里），保留现值 */
   const handleChange = (next: ContainerConfig) => {
     const t = next as ConfTemplate;
     setConfig((prev) => ({
       ...t,
       gui: t.gui ?? prev.gui,
-      gpu: t.gpu ?? prev.gpu,
+      gpu_nvidia: t.gpu_nvidia ?? prev.gpu_nvidia,
+      gpu_amd: t.gpu_amd ?? prev.gpu_amd,
       setup: t.setup ?? prev.setup,
     }));
   };

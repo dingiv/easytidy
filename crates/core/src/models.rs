@@ -1,6 +1,9 @@
 //! 数据模型（GUI / CLI / engine 共用）。
 
+use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::ser::{SerializeStruct, Serializer};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// easytidy 管理的容器概要（从 podman inspect/ps 投影）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,26 +92,20 @@ pub struct NetworkConfig {
     pub ports: Vec<PortMapping>,
 }
 
-/// `ContainerParams.network` 的 serde 默认值（旧 config.toml 兼容）。
-fn default_network() -> NetworkConfig {
-    NetworkConfig::default()
-}
-
-/// `ContainerParams.keep_id` 的 serde 默认值（旧配置无该字段 → 默认开启）。
-fn default_true() -> bool {
-    true
-}
-
 /// 容器核心参数——模板与实例共享的基座。
 ///
 /// [`Flavor`](crate::flavor::Flavor)（模板，存意图）与 [`ContainerConfig`]
 /// （实例，存快照）经 `#[serde(flatten)]` 组合本结构：序列化形状与拆分前
 /// 完全一致（TOML/JSON 字段平铺在外层，旧文件直接兼容；toml 0.8 pretty
-/// 序列化器自动把表类字段排到末尾，flatten 无值后置表问题——2026-08-18 实测）。
+// 序列化器自动把表类字段排到末尾，flatten 无值后置表问题——2026-08-18 实测）。
 ///
-/// 模板同步（config ← flavor 重展开）以本结构为传输单位：`env` / `name` /
-/// `silent_boot` / `persistent` 属于实例侧，不参与同步。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// 模板仅作**创建期预填**：展开为实例快照后，容器与模板彻底解耦（无血缘
+/// 字段、无同步、无漂移检测）。`env` / `name` / `silent_boot` / `persistent`
+/// 属于实例侧。
+///
+/// **手动 `Serialize` / `Deserialize`（impl 在结构体下方）**：保留 `user_home`
+/// 作为 `keep_id` 别名；GPU 字段无迁移（程序未发布）。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerParams {
     /// 基础镜像
     pub image: String,
@@ -116,57 +113,49 @@ pub struct ContainerParams {
     /// ENTRYPOINT。shell 执行（`su -c`），参数经 `entry_args` 追加）
     pub entry: Option<String>,
     /// entry 应用参数（拼接在 entry 后空格分隔；含空格的参数需引号）
-    #[serde(default)]
     pub entry_args: Vec<String>,
     /// 路径映射（bind mount）
-    #[serde(default)]
     pub mounts: Vec<MountConfig>,
     /// 网络配置（默认 Host 模式）
-    #[serde(default = "default_network")]
     pub network: NetworkConfig,
     /// 用户命名空间 keep-id：开启时宿主登录 uid ↔ 容器同 uid 锁死
     /// （podman `userns.keep-id`，docs/12）。与 GUI 透传的关系：
     /// `gui=true` 的 flavor 展开时强制开启。
-    /// 旧字段名 `user_home`（用户一致性映射）经 alias 无缝读入。
-    #[serde(default = "default_true", alias = "user_home")]
+    /// 旧字段名 `user_home`（用户一致性映射）经自定义 Deserialize 自动迁移。
     pub keep_id: bool,
     /// 容器默认用户 uid（`None` = 创建时取宿主登录 uid）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_uid: Option<u32>,
     /// 容器默认用户 gid（`None` = 创建时取宿主登录 gid）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_gid: Option<u32>,
     /// 容器内用户名（可选；设置后创建/重建时经宿主 root exec 幂等 useradd
     /// 建号，否则容器仅按 uid/gid 运行、可能无 passwd 条目）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_name: Option<String>,
     /// GUI 透传（意图字段）：展开/重建时自动注入宿主显示环境
     /// （DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/XDG_DATA_DIRS）+ X11/Wayland
     /// socket、$XDG_RUNTIME_DIR、字体图标只读挂载，并强制 keep_id。存意图，按宿主
     /// 实时探测注入（见 `inject_gui_passthrough`）。旧配置缺省 false。
-    #[serde(default)]
     pub gui: bool,
-    /// GPU 透传（意图字段）。值格式 `<vendor>[=<spec>]`：
-    /// - `nvidia` / `nvidia=all` / `nvidia=0` / `nvidia=device=<uuid>`
-    /// - `amd` / `amd=all` / `amd=0`
-    /// - `all` / `0` / `device=<uuid>`（向后兼容 → 视为 nvidia）
+    /// NVIDIA GPU 透传（意图字段）。开启时展开/重建注入：
+    /// - `NVIDIA_VISIBLE_DEVICES=all` + `NVIDIA_DRIVER_CAPABILITIES=all` env
+    /// - `nvidia.com/gpu=all` CDI 设备节点
     ///
-    /// 展开/重建时经 `<vendor>.com/gpu=<spec>` CDI 引用注入设备节点；NVIDIA 另注入
-    /// `NVIDIA_VISIBLE_DEVICES` / `NVIDIA_DRIVER_CAPABILITIES` env。需宿主已装对应
-    /// Container Toolkit 并生成 CDI spec。None = 不透传。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gpu: Option<String>,
+    /// 需宿主已装 NVIDIA Container Toolkit 并生成 CDI spec。
+    /// 旧版本单字段 `gpu: "nvidia..."` 经自定义 Deserialize 自动迁移。
+    pub gpu_nvidia: bool,
+    /// AMD GPU 透传（意图字段）。开启时 create 期探测宿主 AMD 裸设备注入
+    /// CDI 设备节点；无 vendor 专属 env（ROCm 容器内自检即可）。
+    ///
+    /// 需宿主已装 AMD Container Toolkit 并生成 CDI spec。
+    /// 旧版本单字段 `gpu: "amd..."` 经自定义 Deserialize 自动迁移。
+    pub gpu_amd: bool,
     /// 设备直通（podman `--device` 列表；裸设备 "host:container[:perms]"，
     /// 或 CDI 引用如 "nvidia.com/gpu=all"）
-    #[serde(default)]
     pub devices: Vec<String>,
     /// 安全选项（podman `--security-opt` 列表；如 "label=disable" /
     /// "apparmor=unconfined" / "seccomp=unconfined"。防 SELinux/AppArmor 拦截设备节点）
-    #[serde(default)]
     pub security_opts: Vec<String>,
     /// PID 命名空间模式（如 "host"；默认 private。与 init 互斥——设为非 private
     /// 时不注入 init/catatonit）
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<String>,
 }
 
@@ -184,11 +173,240 @@ impl Default for ContainerParams {
             user_gid: None,
             user_name: None,
             gui: false,
-            gpu: None,
+            gpu_nvidia: false,
+            gpu_amd: false,
             devices: Vec::new(),
             security_opts: Vec::new(),
             pid: None,
         }
+    }
+}
+
+/// 手动 Serialize：固定字段顺序 + 默认跳过 false / 空 / None（与原 `#[derive(Serialize)]`
+/// 行为对齐；旧字段名 `gpu` / `user_home` 不再写出——避免下一轮 round-trip 时污染）。
+impl Serialize for ContainerParams {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        let mut st = s.serialize_struct("ContainerParams", 16)?;
+        st.serialize_field("image", &self.image)?;
+        st.serialize_field("entry", &self.entry)?;
+        st.serialize_field("entry_args", &self.entry_args)?;
+        st.serialize_field("mounts", &self.mounts)?;
+        st.serialize_field("network", &self.network)?;
+        st.serialize_field("keep_id", &self.keep_id)?;
+        if self.user_uid.is_some() {
+            st.serialize_field("user_uid", &self.user_uid)?;
+        }
+        if self.user_gid.is_some() {
+            st.serialize_field("user_gid", &self.user_gid)?;
+        }
+        if self.user_name.is_some() {
+            st.serialize_field("user_name", &self.user_name)?;
+        }
+        st.serialize_field("gui", &self.gui)?;
+        if self.gpu_nvidia {
+            st.serialize_field("gpu_nvidia", &self.gpu_nvidia)?;
+        }
+        if self.gpu_amd {
+            st.serialize_field("gpu_amd", &self.gpu_amd)?;
+        }
+        st.serialize_field("devices", &self.devices)?;
+        st.serialize_field("security_opts", &self.security_opts)?;
+        if self.pid.is_some() {
+            st.serialize_field("pid", &self.pid)?;
+        }
+        st.end()
+    }
+}
+
+/// 手动 Deserialize：保留 `user_home`（旧版 keep_id 别名）以避免破坏老手写
+/// yaml/flavor，但 GPU 拆分后 `gpu: "<vendor>"` 字段直接忽略（程序未发布，
+/// 无迁移负担）。
+#[allow(clippy::field_reassign_with_default)] // deser 默认 + 按字段写回是惯用 pattern
+impl<'de> Deserialize<'de> for ContainerParams {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ParamsVisitor;
+        impl<'de> Visitor<'de> for ParamsVisitor {
+            type Value = ContainerParams;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("ContainerParams")
+            }
+
+            fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<ContainerParams, V::Error> {
+                // 重复字段追踪
+                #[derive(Default)]
+                struct Seen {
+                    image: bool,
+                    entry: bool,
+                    entry_args: bool,
+                    mounts: bool,
+                    network: bool,
+                    keep_id: bool,
+                    user_uid: bool,
+                    user_gid: bool,
+                    user_name: bool,
+                    gui: bool,
+                    gpu_nvidia: bool,
+                    gpu_amd: bool,
+                    devices: bool,
+                    security_opts: bool,
+                    pid: bool,
+                }
+                let mut seen = Seen::default();
+
+                // None = 字段缺失（回落到 Default）；Some(_) = 已读入
+                let mut image: Option<String> = None;
+                let mut entry: Option<Option<String>> = None;
+                let mut entry_args: Option<Vec<String>> = None;
+                let mut mounts: Option<Vec<MountConfig>> = None;
+                let mut network: Option<NetworkConfig> = None;
+                let mut keep_id: Option<bool> = None;
+                let mut user_uid: Option<Option<u32>> = None;
+                let mut user_gid: Option<Option<u32>> = None;
+                let mut user_name: Option<Option<String>> = None;
+                let mut gui: Option<bool> = None;
+                let mut gpu_nvidia: Option<bool> = None;
+                let mut gpu_amd: Option<bool> = None;
+                let mut devices: Option<Vec<String>> = None;
+                let mut security_opts: Option<Vec<String>> = None;
+                let mut pid: Option<Option<String>> = None;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "image" => {
+                            if seen.image {
+                                return Err(de::Error::duplicate_field("image"));
+                            }
+                            image = Some(map.next_value()?);
+                            seen.image = true;
+                        }
+                        "entry" => {
+                            if seen.entry {
+                                return Err(de::Error::duplicate_field("entry"));
+                            }
+                            entry = Some(map.next_value()?);
+                            seen.entry = true;
+                        }
+                        "entry_args" => {
+                            if seen.entry_args {
+                                return Err(de::Error::duplicate_field("entry_args"));
+                            }
+                            entry_args = Some(map.next_value()?);
+                            seen.entry_args = true;
+                        }
+                        "mounts" => {
+                            if seen.mounts {
+                                return Err(de::Error::duplicate_field("mounts"));
+                            }
+                            mounts = Some(map.next_value()?);
+                            seen.mounts = true;
+                        }
+                        "network" => {
+                            if seen.network {
+                                return Err(de::Error::duplicate_field("network"));
+                            }
+                            network = Some(map.next_value()?);
+                            seen.network = true;
+                        }
+                        "keep_id" | "user_home" => {
+                            if seen.keep_id {
+                                return Err(de::Error::duplicate_field("keep_id"));
+                            }
+                            keep_id = Some(map.next_value()?);
+                            seen.keep_id = true;
+                        }
+                        "user_uid" => {
+                            if seen.user_uid {
+                                return Err(de::Error::duplicate_field("user_uid"));
+                            }
+                            user_uid = Some(map.next_value()?);
+                            seen.user_uid = true;
+                        }
+                        "user_gid" => {
+                            if seen.user_gid {
+                                return Err(de::Error::duplicate_field("user_gid"));
+                            }
+                            user_gid = Some(map.next_value()?);
+                            seen.user_gid = true;
+                        }
+                        "user_name" => {
+                            if seen.user_name {
+                                return Err(de::Error::duplicate_field("user_name"));
+                            }
+                            user_name = Some(map.next_value()?);
+                            seen.user_name = true;
+                        }
+                        "gui" => {
+                            if seen.gui {
+                                return Err(de::Error::duplicate_field("gui"));
+                            }
+                            gui = Some(map.next_value()?);
+                            seen.gui = true;
+                        }
+                        "gpu_nvidia" => {
+                            if seen.gpu_nvidia {
+                                return Err(de::Error::duplicate_field("gpu_nvidia"));
+                            }
+                            gpu_nvidia = Some(map.next_value()?);
+                            seen.gpu_nvidia = true;
+                        }
+                        "gpu_amd" => {
+                            if seen.gpu_amd {
+                                return Err(de::Error::duplicate_field("gpu_amd"));
+                            }
+                            gpu_amd = Some(map.next_value()?);
+                            seen.gpu_amd = true;
+                        }
+                        "devices" => {
+                            if seen.devices {
+                                return Err(de::Error::duplicate_field("devices"));
+                            }
+                            devices = Some(map.next_value()?);
+                            seen.devices = true;
+                        }
+                        "security_opts" => {
+                            if seen.security_opts {
+                                return Err(de::Error::duplicate_field("security_opts"));
+                            }
+                            security_opts = Some(map.next_value()?);
+                            seen.security_opts = true;
+                        }
+                        "pid" => {
+                            if seen.pid {
+                                return Err(de::Error::duplicate_field("pid"));
+                            }
+                            pid = Some(map.next_value()?);
+                            seen.pid = true;
+                        }
+                        _ => {
+                            // 未知字段跳过（保持前向兼容）
+                            let _: serde::de::IgnoredAny = map.next_value()?;
+                        }
+                    }
+                }
+
+                let image = image.ok_or_else(|| de::Error::missing_field("image"))?;
+                let mut p = ContainerParams::default();
+                p.image = image;
+                if let Some(v) = entry { p.entry = v; }
+                if let Some(v) = entry_args { p.entry_args = v; }
+                if let Some(v) = mounts { p.mounts = v; }
+                if let Some(v) = network { p.network = v; }
+                if let Some(v) = keep_id { p.keep_id = v; }
+                if let Some(v) = user_uid { p.user_uid = v; }
+                if let Some(v) = user_gid { p.user_gid = v; }
+                if let Some(v) = user_name { p.user_name = v; }
+                if let Some(v) = gui { p.gui = v; }
+                if let Some(v) = gpu_nvidia { p.gpu_nvidia = v; }
+                if let Some(v) = gpu_amd { p.gpu_amd = v; }
+                if let Some(v) = devices { p.devices = v; }
+                if let Some(v) = security_opts { p.security_opts = v; }
+                if let Some(v) = pid { p.pid = v; }
+
+                Ok(p)
+            }
+        }
+
+        d.deserialize_map(ParamsVisitor)
     }
 }
 
@@ -199,21 +417,17 @@ impl Default for ContainerParams {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContainerConfig {
     pub name: String,
-    /// 核心参数（模板共享基座）
+    /// 核心参数（创建期可来自模板预填的共享基座）
     #[serde(flatten)]
     pub params: ContainerParams,
     /// 容器环境变量（"KEY=VALUE" 列表，GUI 透传时含宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY
-    /// ——flavor 展开期的解析快照，随会话可能变化，不参与模板同步）
+    /// ——创建期解析快照，随会话可能变化）
     #[serde(default)]
     pub env: Vec<String>,
     /// 静默启动标志（宿主开机自启）
     pub silent_boot: bool,
     /// 是否常驻（catatonit + server 生命周期）
     pub persistent: bool,
-    /// 血缘：来源 flavor 模板名（展开时盖章）。模板同步与漂移检测依据；
-    /// `None` = 自由创建（镜像起步），不参与模板生态
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub flavor: Option<String>,
 }
 
 impl Default for ContainerConfig {
@@ -225,7 +439,6 @@ impl Default for ContainerConfig {
             env: Vec::new(),
             silent_boot: false,
             persistent: false,
-            flavor: None,
         }
     }
 }
@@ -297,10 +510,10 @@ persistent = true
         // flatten 形状：基座字段平铺在外层（旧文件直接兼容）
         assert_eq!(config.params.image, "alpine:latest");
         assert_eq!(config.params.entry.as_deref(), Some("/bin/sh"));
-        assert_eq!(config.flavor, None);
         // 设备/安全/PID/GUI/GPU 新字段：旧配置无 → 缺省（None/空/false）
         assert!(!config.params.gui);
-        assert!(config.params.gpu.is_none());
+        assert!(!config.params.gpu_nvidia);
+        assert!(!config.params.gpu_amd);
         assert!(config.params.devices.is_empty());
         assert!(config.params.security_opts.is_empty());
         assert!(config.params.pid.is_none());
@@ -313,7 +526,7 @@ persistent = true
 name = "chrome"
 image = "ubuntu:24.04"
 gui = true
-gpu = "all"
+gpu_nvidia = true
 devices = ["/dev/uinput:/dev/uinput"]
 security_opts = ["label=disable", "apparmor=unconfined"]
 pid = "host"
@@ -322,7 +535,8 @@ persistent = true
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
         assert!(config.params.gui);
-        assert_eq!(config.params.gpu.as_deref(), Some("all"));
+        assert!(config.params.gpu_nvidia);
+        assert!(!config.params.gpu_amd);
         assert_eq!(config.params.devices, vec!["/dev/uinput:/dev/uinput".to_string()]);
         assert_eq!(
             config.params.security_opts,
@@ -330,9 +544,9 @@ persistent = true
         );
         assert_eq!(config.params.pid.as_deref(), Some("host"));
 
-        // 序列化形状：gpu/pid 为 None 时省略（skip_serializing_if），devices/security 空时保留
+        // 序列化形状：pid None 时省略；gpu_* true 时写出；devices/security 始终保留
         let v = serde_json::to_value(&config).unwrap();
-        assert_eq!(v["gpu"], "all");
+        assert_eq!(v["gpu_nvidia"], true);
         assert_eq!(v["gui"], true);
         assert_eq!(v["pid"], "host");
         assert_eq!(v["devices"][0], "/dev/uinput:/dev/uinput");
@@ -467,7 +681,8 @@ user_name = "tidy"
                 user_gid: Some(1000),
                 user_name: Some("tidy".to_string()),
                 gui: true,
-                gpu: Some("all".to_string()),
+                gpu_nvidia: true,
+                gpu_amd: false,
                 devices: vec!["/dev/uinput:/dev/uinput".to_string()],
                 security_opts: vec!["label=disable".to_string(), "apparmor=unconfined".to_string()],
                 pid: Some("host".to_string()),
@@ -475,28 +690,18 @@ user_name = "tidy"
             env: vec!["DISPLAY=:0".to_string()],
             silent_boot: true,
             persistent: true,
-            flavor: Some("chrome".to_string()),
         };
 
         // TOML 往返（configfile 格式；flatten 平铺形状不变）
         let toml_str = toml::to_string(&config).unwrap();
         let back: ContainerConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(back.params, config.params);
-        assert_eq!(back.flavor, config.flavor);
-        // 血缘 skip_serializing_if=None：无血缘时不落盘
-        let no_lineage = ContainerConfig {
-            flavor: None,
-            ..config.clone()
-        };
-        let toml_str = toml::to_string(&no_lineage).unwrap();
-        assert!(!toml_str.contains("flavor"));
 
         // JSON 往返（Tauri 命令格式）
         let json = serde_json::to_value(&config).unwrap();
         let back: ContainerConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.name, "app");
         assert_eq!(back.params, config.params);
-        assert_eq!(back.flavor, config.flavor);
     }
 }
 

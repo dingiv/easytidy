@@ -94,8 +94,8 @@ pub async fn remove_container(
         .map_err(|e| ferr(&format!("删除容器 {name}"), e))?;
 
     // 从配置文件注销
-    let config_path = ConfigFile::default_path().map_err(|e| ferr("解析配置路径", e))?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| ferr("解析容器配置目录", e))?;
     config_file
         .unregister_container(&name)
         .map_err(|e| ferr("注销容器配置", e))?;
@@ -289,8 +289,8 @@ pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvVi
     podman.return_podman(p).await;
 
     // configfile 注册表：podman 中不存在的配置 → "missing"（仅配置保留）
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{}", e))?;
     let registered = config_file
         .list_containers()
         .map_err(|e| format!("读取注册表失败：{}", e))?;
@@ -386,8 +386,7 @@ pub async fn env_new(
         error!("容器内准备失败（{name}）：{e}");
     }
 
-    let config_path = try_log!(ConfigFile::default_path(), "解析配置路径");
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file = try_log!(ConfigFile::default_instance(), "解析容器配置目录");
     try_log!(config_file.register_container(config), "注册环境配置");
 
     // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可——旧
@@ -414,27 +413,6 @@ pub async fn env_new(
     Ok(())
 }
 
-/// 模板派生清单：每个 conf 模板有哪些容器以其为血缘（FlavorsPanel 展示
-/// 「派生容器」+ 批量同步入口）。自由创建的容器（无血缘）不出现。
-///
-/// 数据源：`configfile` 注册表里每个容器的 `flavor` 字段——容器从 conf 模板创建
-/// 时该字段存模板名（与旧 TOML flavor 共用同一血缘语义）。
-#[tauri::command]
-pub fn template_lineage() -> Result<std::collections::HashMap<String, Vec<String>>, String> {
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
-    let config_file = ConfigFile::with_path(config_path);
-    let containers = config_file
-        .list_containers()
-        .map_err(|e| format!("读取容器配置失败：{e}"))?;
-    let mut lineage = std::collections::HashMap::new();
-    for cfg in containers {
-        if let Some(flavor) = cfg.flavor {
-            lineage.entry(flavor).or_insert_with(Vec::new).push(cfg.name);
-        }
-    }
-    Ok(lineage)
-}
-
 /// 删除环境：容器 + 注册配置 + 桌面图标 + socket 目录全清理。
 ///
 /// 快照镜像为独立资产，删除时保留（可手动基于该镜像恢复/重建）。
@@ -445,8 +423,8 @@ pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Resu
     podman.return_podman(p).await;
 
     // 清理注册配置（失败仅告警，不阻断删除）
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{}", e))?;
     if let Err(e) = config_file.unregister_container(&name) {
         warn!("注销环境 {} 配置失败（忽略）：{}", name, e);
     }
@@ -494,13 +472,12 @@ pub async fn env_start(podman: tauri::State<'_, PodmanState>, name: String) -> R
     Ok(())
 }
 
-/// 重建环境：按注册表（config.toml）当前配置 commit → 删旧 → 同名重建
-/// → 启动。应用外部修改的配置文件 / 修正容器漂移状态用；配置编辑走
-/// 配置管理器（apply），模板对齐走「从模板同步」。
+/// 重建环境：按注册表（每容器一个 `<name>.toml`）当前配置 commit → 删旧 →
+/// 同名重建 → 启动。应用外部修改的配置文件用；配置编辑走配置管理器（apply）。
 #[tauri::command]
 pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
     let config = config_file
         .get_container(&name)
         .map_err(|e| format!("读取配置失败：{e}"))?

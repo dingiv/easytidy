@@ -18,36 +18,29 @@ use crate::state::GuiSession;
 // 配置管理器命令（M4 前置：mount 管理 + 网络映射管理；改配置 = 重建容器）
 // ============================================================================
 
-/// 获取容器配置（configfile 期望配置 + podman inspect 当前生效状态 + 宿主用户
-/// + 模板血缘状态）。
+/// 获取容器配置（configfile 期望配置 + podman inspect 当前生效状态 + 宿主用户）。
 ///
 /// 返回（前端契约）：
 /// ```json
 /// { "config": { "name","image","entry","entry_args","silent_boot","persistent",
 ///                "mounts":[{"host_path","container_path","read_only"}],
 ///                "network":{"mode":"host"|"mapped","ports":[...]},
-///                "env":["K=V"], "user_home":true, "flavor":"chrome"|null },
+///                "env":["K=V"], "user_home":true },
 ///   "effective": { "mounts":[...], "network":{...}, "env":["K=V"],
 ///                  "user":"0:0"|null, "userns_mode":"keep-id"|null },
-///   "host_user": { "name","uid","gid","home" } | null,
-///   "flavor_status": { "flavor":"chrome","exists":true,"drifted":false } | null }
+///   "host_user": { "name","uid","gid","home" } | null }
 /// ```
 /// `effective` 为 `null` 表示容器尚未创建（仅 configfile 有记录）或 podman 不可达；
-/// `host_user` 为 `null` 表示宿主用户探测失败（容器降级 root 运行，UI 需展示）；
-/// `flavor_status` 为 `null` 表示自由创建（无血缘，不参与模板同步）。
+/// `host_user` 为 `null` 表示宿主用户探测失败（容器降级 root 运行，UI 需展示）。
 #[tauri::command]
 pub async fn get_container_config(name: String) -> Result<serde_json::Value, String> {
     // configfile 期望配置
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{}", e))?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
     let config = config_file
         .get_container(&name)
         .map_err(|e| format!("读取容器配置失败：{}", e))?
         .ok_or_else(|| format!("容器配置不存在：{}", name))?;
-
-    // 模板血缘状态（漂移检测：实例基座 vs 来源 conf 模板当前声明）。
-    // 模板数据源：conf/<name>.yaml（GUI 全面切 YAML 后）。
-    let flavor_status = conf_template_lineage_status(&config);
 
     // podman inspect 当前生效状态（容器未创建 / 连接失败时为 null）
     let effective = match Podman::connect().await {
@@ -69,7 +62,6 @@ pub async fn get_container_config(name: String) -> Result<serde_json::Value, Str
         "effective": effective,
         // 宿主用户（uid 映射语义对照表数据源；null = 探测失败，容器降级 root）
         "host_user": serde_json::to_value(easytidy_core::userenv::host_user()).map_err(|e| e.to_string())?,
-        "flavor_status": flavor_status,
     }))
 }
 
@@ -104,93 +96,13 @@ pub async fn apply_container_config(
     }
 
     // 更新 configfile（与重建后的容器保持一致）
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
-    let config_file = ConfigFile::with_path(config_path);
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
     config_file
         .register_container(container_config)
         .map_err(|e| format!("更新容器配置失败：{e}"))?;
 
     Ok(new_id)
-}
-
-/// 从来源模板重新同步容器配置（ConfigManager「从模板同步」/ FlavorsPanel
-/// 批量同步的底层动作）：从 conf 模板重新加载 → 保留实例侧字段（silent_boot/
-/// persistent，setup 不参与同步，安装已发生）→ 重建容器 → 更新注册。
-///
-/// 返回同步提示（模板名 + 重建结果）。
-#[tauri::command]
-pub async fn config_sync_from_template(name: String) -> Result<String, String> {
-    let config_path = ConfigFile::default_path().map_err(|e| format!("解析配置路径失败：{e}"))?;
-    let config_file = ConfigFile::with_path(config_path);
-
-    let current = config_file
-        .get_container(&name)
-        .map_err(|e| format!("读取容器配置失败：{e}"))?
-        .ok_or_else(|| format!("容器配置不存在：{name}"))?;
-    let template_name = current
-        .flavor
-        .clone()
-        .ok_or_else(|| format!("容器 {name} 无血缘（非模板创建），不参与模板同步"))?;
-
-    // 模板源: conf 目录 YAML(GUI 全面切 YAML 后)。`conf_template_expand` 走
-    // 共享 inject_gui_passthrough:`gui: true` 时按当前宿主 env 实时注入
-    // DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR——模板不硬编 session 特有值。
-    let mut next: ContainerConfig = conf_template_expand(template_name.clone(), name.clone())
-        .map_err(|e| format!("从模板 {template_name} 展开失败：{e}"))?;
-    next.silent_boot = current.silent_boot;
-    next.persistent = current.persistent;
-    // flavor 已由 conf_template_expand 盖为 template_name,无需重复设
-
-    let podman = Podman::connect().await.map_err(|e| format!("连接 podman 失败：{e}"))?;
-    let bins = easytidy_core::ContainerBins::resolve().map_err(|e| e.to_string())?;
-    podman
-        .rebuild(&name, &next, &bins)
-        .await
-        .map_err(|e| format!("重建容器失败：{e}"))?;
-    // 容器内准备（fontconfig + 可选 useradd）：失败不阻断同步（落日志）
-    if let Err(e) = podman.prepare_container(&name, &next.params).await {
-        tracing::error!("容器内准备失败（{name}）：{e}");
-    }
-    config_file
-        .register_container(next)
-        .map_err(|e| format!("更新容器配置失败：{e}"))?;
-
-    Ok(format!(
-        "已从模板 {} 重新同步（容器已重建，实例自启/常驻设置保留）",
-        template_name
-    ))
-}
-
-/// 模板血缘状态（drift 检测）：读 conf 模板比对实例 params。
-///
-/// 与 `flavor::lineage_status` 等价语义：返回 `{ flavor, exists, drifted }`
-/// 结构（保留 `flavor` 字段名以匹配前端 `FlavorStatus` 类型）；不存在时
-/// exists=false 不再报漂移（删除模板保留血缘信息）。
-fn conf_template_lineage_status(config: &ContainerConfig) -> Option<serde_json::Value> {
-    let template_name = config.flavor.clone()?;
-    let yaml = match ConfTemplateStore::read_yaml(&template_name) {
-        Ok(y) => y,
-        Err(_) => {
-            return Some(serde_json::json!({
-                "flavor": template_name, "exists": false, "drifted": false
-            }));
-        }
-    };
-    let template: ConfTemplate = match serde_yaml::from_str(&yaml) {
-        Ok(t) => t,
-        Err(e) => {
-            warn!("解析模板 {template_name} 失败（drift 检测跳过）：{e}");
-            return Some(serde_json::json!({
-                "flavor": template_name, "exists": false, "drifted": false
-            }));
-        }
-    };
-    // 与 flavor 一致:仅比对 params(镜像/entry/挂载/网络/用户映射);
-    // env 是宿主展开期快照,天然随会话变化,不参与漂移判定。
-    let drifted = template.config.params != config.params;
-    Some(serde_json::json!({
-        "flavor": template_name, "exists": true, "drifted": drifted
-    }))
 }
 
 // ============================================================================
@@ -357,11 +269,12 @@ pub fn conf_template_get(name: String) -> Result<ConfTemplate, String> {
     serde_yaml::from_str(&yaml).map_err(|e| format!("解析模板 {name} 失败：{e}"))
 }
 
-/// 模板展开 → 完整 ContainerConfig（创建表单预填 / 从模板同步共用）。
+/// 模板展开 → 完整 ContainerConfig（创建表单预填）。
 ///
 /// 与 [`conf_template_get`] 的区别:`get` 返回原始 ConfTemplate（含 `setup` 等模板字段）,
 /// `expand` 返回可直接提交的 [`ContainerConfig`]——已按宿主实时 env 注入 GUI/GPU 透传
-/// (config 内 `gui`/`gpu` 意图开启时),并盖 `flavor` 字段为模板名(血缘追溯)。
+/// (config 内 `gui`/`gpu` 意图开启时)。模板仅作创建期预填，容器创建后与模板解耦
+/// （无血缘字段、无同步、无漂移检测）。
 ///
 /// - `name`:模板文件名 stem(如 `chrome`)
 /// - `container_name`:执行容器名(覆盖模板内 `config.name` 默认值)
@@ -370,12 +283,7 @@ pub fn conf_template_expand(name: String, container_name: String) -> Result<Cont
     let yaml = ConfTemplateStore::read_yaml(&name).map_err(|e| e.to_string())?;
     let tpl: ConfTemplate =
         serde_yaml::from_str(&yaml).map_err(|e| format!("解析模板 {name} 失败：{e}"))?;
-    let mut config = tpl.build_config(&container_name);
-    // 血缘盖章 = 模板名(模板作者未在 YAML 显式写 flavor 时)
-    if config.flavor.is_none() {
-        config.flavor = Some(name);
-    }
-    Ok(config)
+    Ok(tpl.build_config(&container_name))
 }
 
 /// GUI + GPU 透传预览：给定配置（含 `gui`/`gpu` 意图与当前 mounts/env），返回
@@ -827,7 +735,7 @@ mod tests {
     /// 透传预览的增量语义（确定性，不依赖宿主 DISPLAY 等）：
     /// - 已声明的挂载（同 container_path）→ 引擎幂等去重，预览不再重复
     /// - 未声明的 → 引擎注入（gui 开时 /tmp/.X11-unix 恒注入），预览应含
-    /// - gpu → NVIDIA_* env 增量（宿主无关）
+    /// - gpu_nvidia → NVIDIA_* env 增量（宿主无关）；gpu_amd → 无 env 注入
     #[test]
     fn test_passthrough_preview_delta() {
         // gui 开 + 已声明 /tmp/.X11-unix → 不应出现在注入增量
@@ -859,9 +767,9 @@ mod tests {
             p2.mounts
         );
 
-        // gpu=all → NVIDIA_* env 增量（确定性，不依赖宿主）
+        // gpu_nvidia=true → NVIDIA_* env 增量（确定性，不依赖宿主）
         let gpu_cfg: ContainerConfig = serde_json::from_value(serde_json::json!({
-            "name": "t3", "image": "alpine", "gpu": "all",
+            "name": "t3", "image": "alpine", "gpu_nvidia": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
             "silent_boot": false, "persistent": true
         }))
@@ -870,9 +778,9 @@ mod tests {
         assert!(p3.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
         assert!(p3.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
 
-        // gui + gpu 同开 → 两类注入都在（mounts 来自 gui，NVIDIA env 来自 gpu）
+        // gui + gpu_nvidia 同开 → 两类注入都在（mounts 来自 gui，NVIDIA env 来自 gpu_nvidia）
         let both: ContainerConfig = serde_json::from_value(serde_json::json!({
-            "name": "t4", "image": "alpine", "gui": true, "gpu": "all",
+            "name": "t4", "image": "alpine", "gui": true, "gpu_nvidia": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
             "silent_boot": false, "persistent": true
         }))

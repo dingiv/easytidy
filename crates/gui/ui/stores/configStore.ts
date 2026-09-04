@@ -15,7 +15,6 @@ import type {
   ContainerConfig,
   ContainerConfigResult,
   ContainerConfigView,
-  FlavorStatus,
   HostUser,
 } from '../types';
 
@@ -26,13 +25,10 @@ interface ConfigState {
   effective: ContainerConfigView | null;
   /** 宿主用户（uid 映射面板数据源） */
   hostUser: HostUser | null;
-  /** 模板血缘状态（null = 自由创建） */
-  flavorStatus: FlavorStatus | null;
   /** 本地编辑态 */
   edit: ContainerConfig | null;
   loading: boolean;
   applying: boolean;
-  syncing: boolean;
   error: string | null;
   /** 标志位：用户是否修改过（update 置 true,load/apply 后 false） */
   dirty: boolean;
@@ -42,8 +38,6 @@ interface ConfigState {
   update: (mutator: (edit: ContainerConfig) => ContainerConfig) => void;
   /** 保存并重启容器（成功后重载） */
   apply: (name: string) => Promise<void>;
-  /** 从来源 conf 模板重新同步（重读 YAML 模板 → rebuild；成功后重载）。返回成功提示（失败 undefined） */
-  syncFromTemplate: (name: string) => Promise<string | undefined>;
   /** 重置错误 */
   clearError: () => void;
 }
@@ -52,11 +46,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   saved: null,
   effective: null,
   hostUser: null,
-  flavorStatus: null,
   edit: null,
   loading: true,
   applying: false,
-  syncing: false,
   error: null,
   dirty: false,
 
@@ -68,7 +60,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         saved: normalizeConfig(result.config),
         effective: result.effective ? normalizeView(result.effective) : null,
         hostUser: result.host_user ?? null,
-        flavorStatus: result.flavor_status ?? null,
         edit: normalizeConfig(result.config),
         dirty: false,
       });
@@ -108,21 +99,6 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       console.error('apply_container_config failed:', err);
     } finally {
       set({ applying: false });
-    }
-  },
-
-  syncFromTemplate: async (name) => {
-    set({ syncing: true, error: null });
-    try {
-      const note = await invoke<string>('config_sync_from_template', { name });
-      // 同步即重建容器：重载（血缘状态刷新，漂移清零）
-      await get().load(name);
-      return note;
-    } catch (err: any) {
-      set({ error: errMsg(err, '从模板同步失败') });
-      console.error('config_sync_from_template failed:', err);
-    } finally {
-      set({ syncing: false });
     }
   },
 

@@ -207,7 +207,7 @@ export function EnvPane({
         </Button>
       </div>
       <span className="section-hint">
-        用户自定义行可增删，随「保存并重启」生效；EasyTidy 注入（EASYTIDY_USER_*、GUI/GPU 透传，
+        用户自定义行可增删，随「保存并重启」生效；EasyTidy 注入（EASYTIDY_USER_*、GUI/NVIDIA GPU 透传，
         及容器内 server 运行时探测/修正如 XAUTHORITY）、Podman 注入与镜像默认由引擎/镜像带入，只读。
       </span>
     </div>

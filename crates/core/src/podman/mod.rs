@@ -390,6 +390,23 @@ impl Podman {
         // （无 root、无 su）。keep-id 时宿主登录 uid ↔ 容器同 uid 锁死（docs/12）。
         let user_spec = format!("{user_uid}:{user_gid}");
 
+        // AMD GPU 裸设备探测（create 期，不落盘——render 节点号随重启漂移，配置
+        // 只存意图 bool）。gpu_amd 开了但宿主探测不到任何 AMD 设备 → 直接报可读
+        // 错误（避免静默无 GPU 或 podman unresolvable CDI 玄学报错）。
+        let amd_gpu_devices = if config.params.gpu_amd {
+            let devs = crate::env::host::detect_amd_gpu_devices();
+            if devs.is_empty() {
+                return Err(Error::Config(format!(
+                    "容器 {name} 开启了 AMD GPU 透传（gpu_amd），但宿主未探测到 \
+                     AMD GPU：/dev/dri 无 AMD（PCI vendor 0x1002）render 节点且 \
+                     无 /dev/kfd"
+                )));
+            }
+            devs
+        } else {
+            Vec::new()
+        };
+
         // keep-id → 必须走 libpod 端点（Docker compat 端点不支持 userns.keep-id，
         // 实测；见 libpod.rs）。keep-id 使容器内 uid 1000 = 宿主当前登录用户：
         // 宿主 home 读写 / /run/user/1000（显示 socket）自然可达（GUI 窗口可用）。
@@ -417,7 +434,8 @@ impl Podman {
                 Some(user_spec.as_str()),
                 true,
                 config.params.devices.clone(),
-                config.params.gpu.as_deref(),
+                config.params.gpu_nvidia,
+                amd_gpu_devices,
                 config.params.pid.as_deref(),
                 config.params.security_opts.clone(),
             );
@@ -449,7 +467,8 @@ impl Podman {
             Some(user_spec.as_str()),
             false,
             config.params.devices.clone(),
-            config.params.gpu.as_deref(),
+            config.params.gpu_nvidia,
+            amd_gpu_devices,
             config.params.pid.as_deref(),
             config.params.security_opts.clone(),
         );
@@ -1450,7 +1469,8 @@ mod tests {
             Some("1000:1000"),
             true,
             Vec::new(),
-            None,
+            false,
+            Vec::new(),
             None,
             Vec::new(),
         );
@@ -1472,7 +1492,8 @@ mod tests {
             None,
             false,
             Vec::new(),
-            None,
+            false,
+            Vec::new(),
             None,
             Vec::new(),
         );
@@ -1506,7 +1527,8 @@ mod tests {
             Some("1000:1000"),
             false,
             Vec::new(),
-            None,
+            false,
+            Vec::new(),
             None,
             Vec::new(),
         );
@@ -1519,7 +1541,11 @@ mod tests {
 
     #[test]
     fn test_libpod_body_device_fields() {
-        let make = |devices: Vec<String>, gpu: Option<&str>, pid: Option<&str>, security: Vec<String>| {
+        let make = |devices: Vec<String>,
+                    gpu_nvidia: bool,
+                    amd_devices: Vec<String>,
+                    pid: Option<&str>,
+                    security: Vec<String>| {
             crate::libpod::keep_id_create_body(
                 "c1",
                 "alpine:latest",
@@ -1534,7 +1560,8 @@ mod tests {
                 Some("1000:1000"),
                 true,
                 devices,
-                gpu,
+                gpu_nvidia,
+                amd_devices,
                 pid,
                 security,
             )
@@ -1543,7 +1570,7 @@ mod tests {
         let to_vec = |items: &[&str]| items.iter().map(|s| s.to_string()).collect::<Vec<_>>();
 
         // 全部为空（旧行为）：不出现 devices/pidns/security 字段，init 保持 true
-        let body = make(Vec::new(), None, None, Vec::new());
+        let body = make(Vec::new(), false, Vec::new(), None, Vec::new());
         assert!(body.get("devices").is_none());
         assert!(body.get("pidns").is_none());
         assert!(body.get("apparmor_profile").is_none());
@@ -1553,38 +1580,65 @@ mod tests {
         // entrypoint 始终置空（清镜像 ENTRYPOINT；command 即 PID 1 字面命令）
         assert_eq!(body["entrypoint"], serde_json::json!([]));
 
-        // gpu = "all" → nvidia.com/gpu=all CDI 引用（与 podman --gpus all 等价）
-        let body = make(Vec::new(), Some("all"), None, Vec::new());
+        // gpu_nvidia=true → nvidia.com/gpu=all CDI 引用
+        let body = make(Vec::new(), true, Vec::new(), None, Vec::new());
         assert_eq!(body["devices"][0]["path"], "nvidia.com/gpu=all");
 
         // 裸设备直通
-        let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), None, None, Vec::new());
+        let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), false, Vec::new(), None, Vec::new());
         assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
 
-        // gpu + 裸设备共存
-        let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), Some("0"), None, Vec::new());
+        // gpu_nvidia + 裸设备共存
+        let body = make(
+            to_vec(&["/dev/uinput:/dev/uinput"]),
+            true,
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
         assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
-        assert_eq!(body["devices"][1]["path"], "nvidia.com/gpu=0");
+        assert_eq!(body["devices"][1]["path"], "nvidia.com/gpu=all");
 
-        // gpu = "nvidia" → nvidia.com/gpu=all（显式 vendor 前缀）
-        let body = make(Vec::new(), Some("nvidia"), None, Vec::new());
-        assert_eq!(body["devices"][0]["path"], "nvidia.com/gpu=all");
+        // gpu_amd=true（探测出的裸设备）→ 原样落 devices，非 amd.com/gpu CDI
+        let body = make(
+            Vec::new(),
+            false,
+            to_vec(&["/dev/dri/renderD129:/dev/dri/renderD129"]),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(body["devices"][0]["path"], "/dev/dri/renderD129:/dev/dri/renderD129");
 
-        // gpu = "amd" → amd.com/gpu=all（AMD CDI）
-        let body = make(Vec::new(), Some("amd"), None, Vec::new());
-        assert_eq!(body["devices"][0]["path"], "amd.com/gpu=all");
+        // 双开 → 裸设备(uinput) + nvidia CDI + amd 裸设备按序落
+        let body = make(
+            to_vec(&["/dev/uinput:/dev/uinput"]),
+            true,
+            to_vec(&["/dev/dri/renderD129:/dev/dri/renderD129"]),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
+        assert_eq!(body["devices"][1]["path"], "/dev/dri/renderD129:/dev/dri/renderD129");
+        assert_eq!(body["devices"][2]["path"], "nvidia.com/gpu=all");
 
-        // gpu = "amd=0" → amd.com/gpu=0
-        let body = make(Vec::new(), Some("amd=0"), None, Vec::new());
-        assert_eq!(body["devices"][0]["path"], "amd.com/gpu=0");
+        // AMD 裸设备与用户手动设备串相同 → 去重只落一次
+        let body = make(
+            to_vec(&["/dev/dri/renderD129:/dev/dri/renderD129"]),
+            false,
+            to_vec(&["/dev/dri/renderD129:/dev/dri/renderD129"]),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(body["devices"].as_array().unwrap().len(), 1);
+        assert_eq!(body["devices"][0]["path"], "/dev/dri/renderD129:/dev/dri/renderD129");
 
         // pid = host → pidns.nsmode = host 且 init 禁用（catatonit 无法进 host PID ns）
-        let body = make(Vec::new(), None, Some("host"), Vec::new());
+        let body = make(Vec::new(), false, Vec::new(), Some("host"), Vec::new());
         assert_eq!(body["pidns"]["nsmode"], "host");
         assert_eq!(body["init"], false);
 
         // pid = private（显式）→ 无 pidns 字段，init 保持
-        let body = make(Vec::new(), None, Some("private"), Vec::new());
+        let body = make(Vec::new(), false, Vec::new(), Some("private"), Vec::new());
         assert!(body.get("pidns").is_none());
         assert_eq!(body["init"], true);
 
@@ -1592,7 +1646,8 @@ mod tests {
         // seccomp → seccomp_profile_path（与 podman CLI --security-opt 映射一致）
         let body = make(
             Vec::new(),
-            None,
+            false,
+            Vec::new(),
             None,
             to_vec(&["label=disable", "apparmor=unconfined", "seccomp=unconfined"]),
         );
@@ -1601,7 +1656,7 @@ mod tests {
         assert_eq!(body["seccomp_profile_path"], "unconfined");
 
         // 未知 key 忽略，无 '=' 的串忽略（不 panic、不产生字段）
-        let body = make(Vec::new(), None, None, to_vec(&["mask=/foo", "nonsense"]));
+        let body = make(Vec::new(), false, Vec::new(), None, to_vec(&["mask=/foo", "nonsense"]));
         assert!(body.get("apparmor_profile").is_none());
         assert!(body.get("selinux_opts").is_none());
     }

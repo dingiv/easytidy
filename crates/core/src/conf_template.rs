@@ -65,25 +65,15 @@ pub struct ConfTemplateInfo {
 impl ConfTemplate {
     /// 模板展开为可创建的 [`ContainerConfig`]。
     ///
-    /// 与 [`crate::flavor::Flavor::build_config`] 对齐语义,区别是这里走
-    /// 共享的 [`inject_gui_passthrough`](crate::env::inject_gui_passthrough)
-    /// 注入逻辑(`gui: true` 时追加宿主 env/mounts)。
+    /// 模板仅作**创建期预填**：展开为实例快照，容器创建后与模板彻底解耦
+    /// （无血缘字段、无同步、无漂移检测）。
     ///
-    /// - `name`:执行容器名(覆盖模板内 `config.name`)
-    /// - `flavor` 字段盖章为模板名(`self.config.flavor` 已是 None;若用户保存
-    ///   时填了 flavor 仍以填的为准——但模板作者一般不会在 YAML 里写 flavor)
+    /// - `name`：执行容器名（覆盖模板内 `config.name`）
+    /// - 按 config 内的 gui/gpu 意图注入宿主透传（与实例 apply/重建路径共用）
     pub fn build_config(&self, name: &str) -> ContainerConfig {
         let mut config = self.config.clone();
         config.name = name.to_string();
-        // 按 config 内的 gui/gpu 意图注入宿主透传(与实例 apply/重建路径共用)
         inject_passthrough(&mut config);
-        // 血缘盖章 = 模板名(若模板作者没填则使用文件 stem 命名约定;
-        // 调用方负责在 conf_template_expand 同步盖章)
-        if config.flavor.is_none() {
-            // 模板本身 YAML 里写的 flavor 优先,无则填"模板即自己"的标记 —
-            // 由调用方在 expand 时按文件 stem 写入(便于 config_sync_from_template
-            // 按 conf YAML 重展开重建)
-        }
         config
     }
 }
@@ -108,7 +98,6 @@ mod tests {
         assert!(t.setup.is_empty());
         assert_eq!(t.config.name, "chrome");
         assert_eq!(t.config.params.image, "docker.io/library/ubuntu:24.04");
-        assert_eq!(t.config.flavor, None);
     }
 
     #[test]
@@ -163,59 +152,62 @@ mod tests {
 
     #[test]
     fn test_conf_template_gpu_expand() {
-        // gpu: all → 向后兼容 → NVIDIA：params.gpu = "all" + 注入 NVIDIA_* env
+        // gpu_nvidia: true → params.gpu_nvidia + 注入 NVIDIA_* env
         let json = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
             "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
             "env":[],"silent_boot":false,"persistent":true,
-            "gpu":"all"
+            "gpu_nvidia":true
         }"#;
         let t: ConfTemplate = serde_json::from_str(json).unwrap();
-        assert_eq!(t.config.params.gpu.as_deref(), Some("all"));
+        assert!(t.config.params.gpu_nvidia);
         let cfg = t.build_config("c1");
-        assert_eq!(cfg.params.gpu.as_deref(), Some("all"));
+        assert!(cfg.params.gpu_nvidia);
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
         assert!(cfg.params.security_opts.is_empty(), "gpu 不应隐式加 security_opts");
 
-        // gpu: nvidia → 显式 vendor：params.gpu = "nvidia" + NVIDIA_* env
-        let json_n = r#"{
-            "name":"c3","image":"alpine","entry_args":[],
-            "mounts":[],"network":{"mode":"host","ports":[]},
-            "env":[],"silent_boot":false,"persistent":true,
-            "gpu":"nvidia"
-        }"#;
-        let tn: ConfTemplate = serde_json::from_str(json_n).unwrap();
-        let cfgn = tn.build_config("c3");
-        assert_eq!(cfgn.params.gpu.as_deref(), Some("nvidia"));
-        assert!(cfgn.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
-
-        // gpu: amd → AMD：params.gpu = "amd"，无 NVIDIA_* env
+        // gpu_amd: true → params.gpu_amd，无 NVIDIA_* env
         let json_a = r#"{
             "name":"c4","image":"alpine","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},
             "env":[],"silent_boot":false,"persistent":true,
-            "gpu":"amd"
+            "gpu_amd":true
         }"#;
         let ta: ConfTemplate = serde_json::from_str(json_a).unwrap();
         let cfga = ta.build_config("c4");
-        assert_eq!(cfga.params.gpu.as_deref(), Some("amd"));
+        assert!(cfga.params.gpu_amd);
         assert!(
             !cfga.env.iter().any(|e| e.starts_with("NVIDIA_")),
             "AMD 不应注入 NVIDIA_* env"
         );
 
-        // 未设 gpu → 不透传
+        // 双开 → NVIDIA env + 两个 vendor 标志
+        let json_both = r#"{
+            "name":"c5","image":"alpine","entry_args":[],
+            "mounts":[],"network":{"mode":"host","ports":[]},
+            "env":[],"silent_boot":false,"persistent":true,
+            "gpu_nvidia":true,"gpu_amd":true
+        }"#;
+        let tb: ConfTemplate = serde_json::from_str(json_both).unwrap();
+        let cfgb = tb.build_config("c5");
+        assert!(cfgb.params.gpu_nvidia);
+        assert!(cfgb.params.gpu_amd);
+        assert!(cfgb.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+
+        // 未设 gpu_* → 不透传
         let json2 = r#"{
             "name":"c2","image":"alpine","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},
             "env":[],"silent_boot":false,"persistent":true
         }"#;
         let t2: ConfTemplate = serde_json::from_str(json2).unwrap();
-        assert!(t2.config.params.gpu.is_none());
+        assert!(!t2.config.params.gpu_nvidia);
+        assert!(!t2.config.params.gpu_amd);
         let cfg2 = t2.build_config("c2");
-        assert!(cfg2.params.gpu.is_none());
+        assert!(!cfg2.params.gpu_nvidia);
+        assert!(!cfg2.params.gpu_amd);
         assert!(
             !cfg2.env.iter().any(|e| e.starts_with("NVIDIA_")),
             "无 gpu 时不应注入 NVIDIA env"

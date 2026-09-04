@@ -105,12 +105,9 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::env_snapshot,
             commands::containers::env_start,
             commands::containers::env_stop,
-            // 模板派生清单（conf 模板按 container.flavor 字段分组）
-            commands::containers::template_lineage,
-            // 配置管理器（单实例 GUI：get/apply/sync + 血缘）
+            // 配置管理器（单实例 GUI：get/apply）
             commands::config::get_container_config,
             commands::config::apply_container_config,
-            commands::config::config_sync_from_template,
             // 配置编辑器 YAML 桥 + conf 模板管理（GUI 全面切 YAML 后取代 flavor）
             commands::config::conf_parse,
             commands::config::conf_load_dialog,

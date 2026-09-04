@@ -84,9 +84,31 @@ pub fn seed_start_script(name: &str) {
     let _ = std::fs::write(&path, content);
 }
 
-/// 主配置文件路径（`~/.easytidy/config.toml`）
+/// 主配置文件路径（`~/.easytidy/config.toml`）。
+///
+/// 仅作**一次性迁移**定位用（旧单文件注册表 → 每容器文件）；新代码一律用
+/// [`containers_dir`]（每容器一个文件）。
 pub fn config_file_path() -> Result<PathBuf> {
     Ok(app_data_dir()?.join("config.toml"))
+}
+
+/// 容器配置根目录（**每容器一个 `<name>.toml`**，目录即注册表）。
+///
+/// 经 FileLoader `CONTAINERS` namespace 解析（dev/prod 自动切，见 core
+/// `Cargo.toml` `[package.metadata.shared]`）：
+/// - dev → 源码树 `crates/core/data/containers`（git-ignore，与已安装隔离）
+/// - prod → `~/.easytidy/data/containers`
+pub fn containers_dir() -> Result<PathBuf> {
+    let sentinel = easytidy_shared::loader!()
+        .resolve("CONTAINERS::_base")
+        .ok_or_else(|| Error::Config("解析容器配置目录失败（CONTAINERS namespace）".to_string()))?;
+    let dir = sentinel
+        .parent()
+        .map(|p| p.to_path_buf())
+        .ok_or_else(|| Error::Config("容器配置目录无父目录".to_string()))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| Error::Config(format!("创建容器配置目录失败：{e}")))?;
+    Ok(dir)
 }
 
 /// 一次性迁移：`$XDG_CONFIG_HOME/easytidy/` 下旧配置/flavors → 新目录
@@ -145,5 +167,18 @@ mod tests {
         // <core manifest>/data（源码树内，与已安装 ~/.easytidy 隔离）
         let dir = app_data_dir().unwrap();
         assert_eq!(dir, PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data"));
+    }
+
+    #[test]
+    fn containers_dir_resolves_via_containers_namespace_in_dev() {
+        // CONTAINERS namespace（dev = data/containers）经 FileLoader 解析后取父目录，
+        // 应落在 <core manifest>/data/containers（与 app_data_dir 同源，其下多一层）。
+        let dir = containers_dir().unwrap();
+        assert_eq!(
+            dir,
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data").join("containers"),
+            "containers_dir 应为源码树 data/containers（实际：{}）",
+            dir.display()
+        );
     }
 }

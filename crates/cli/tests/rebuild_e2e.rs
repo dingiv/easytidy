@@ -137,8 +137,8 @@ async fn rebuild_applies_mounts_and_ports() {
         ..Default::default()
     };
 
-    // 私有 configfile（不碰用户真实配置）
-    let config_file = ConfigFile::with_path(tmp_path.join("config.toml"));
+    // 私有容器配置根目录（不碰用户真实配置）
+    let config_file = ConfigFile::with_base_dir(tmp_path.to_path_buf());
     config_file
         .register_container(config.clone())
         .expect("注册容器配置失败");
@@ -313,7 +313,7 @@ async fn identity_prepare_user_and_root_exec() {
         },
         ..Default::default()
     };
-    let config_file = ConfigFile::with_path(tmp.path().join("config.toml"));
+    let config_file = ConfigFile::with_base_dir(tmp.path().to_path_buf());
     config_file.register_container(config.clone()).expect("注册容器配置失败");
 
     let result: Result<(), String> = async {

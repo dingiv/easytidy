@@ -330,6 +330,59 @@ clippy 无新增 warning。
 重建容器注意：本改动只动 host 端 core + CLI + GUI；不动 easytidy-dock。
 `cargo build -p easytidy-core` + 重启 GUI / CLI 进程。
 
+### GPU 透传：拆成 AMD / NVIDIA 两个独立按钮（2026-09-04）
+
+症状：旧实现 `ContainerParams.gpu: Option<String>` 单字段（值格式
+`<vendor>[=<spec>]`），UI 用 Select（关闭 / NVIDIA / AMD）+ spec Input 表达。
+用户场景：核显 + NVIDIA 独显的笔记本（或双 vendor 工作站）想同时透传，
+旧 Select 只能二选一。
+
+修复：
+- `core/src/models.rs::ContainerParams`：`gpu: Option<String>` → 两个 bool
+  `gpu_nvidia: bool` / `gpu_amd: bool`（默认均 false）。spec 输入框能力整体
+  丢掉（勾选即全设备直通；要选具体设备走 `devices: Vec<String>` 裸设备）。
+- `core/src/models.rs::ContainerParams` 改**手动 Serialize / Deserialize**：
+  - 写出：固定字段顺序 + 默认跳过 false / 空 / None（与原
+    `#[derive(Serialize)]` 行为对齐）。
+  - 读入：仅新字段 `gpu_nvidia` / `gpu_amd`；保留 `user_home` 作为
+    `keep_id` 别名（避免破坏老手写 yaml/flavor）。
+  - **无 GPU 迁移**——程序未发布，旧 `gpu: "nvidia"` 字段直接报错忽略。
+- **vendor 设备注入路径分叉（2026-09-04 desk_pilot 实测定案）**：
+  - NVIDIA → libpod body 拼 `nvidia.com/gpu=all` CDI 引用（nvidia-container-
+    toolkit 自动生成 nvidia.yaml，可解析）。
+  - AMD → **不走 CDI**：AMD 生态无自动 CDI 工具链，`amd.com/gpu=all` 在真实
+    宿主恒 `unresolvable CDI devices`（desk_pilot 启动实测 500）。改为
+    `env::host::detect_amd_gpu_devices()` 裸设备探测：`/dev/kfd`（ROCm 入口）
+    + `/dev/dri/renderD*` 中 sysfs PCI vendor = `0x1002` 的 render 节点（VAAPI/
+    Mesa/ROCm 够用，不抢宿主 DRM master）。探测纯函数 `collect_amd_devices`
+    （目录注入，tempdir 单测）。gpu_amd 开但探测为空 → create 前报可读中文错误。
+  - libpod `keep_id_create_body` 签名：`gpu: Option<&str>` →
+    `gpu_nvidia: bool, amd_gpu_devices: Vec<String>`（AMD 由 create_with_config
+    先探测再传入；设备串与用户手动 devices 去重）。双开 = kfd+renderD + nvidia CDI。
+- `core/src/env/host.rs`：删 `GpuVendor` enum / `parse_gpu_value`；新增
+  `detect_amd_gpu_devices`。`inject_gpu_passthrough` NVIDIA 开注入
+  `NVIDIA_VISIBLE_DEVICES=all` + `NVIDIA_DRIVER_CAPABILITIES=all`；AMD 无
+  vendor env。`inject_passthrough(config)` 改看两个 bool。
+- `core/src/podman/mod.rs::create_with_config`：`gpu_amd` 时调
+  `detect_amd_gpu_devices()`（不落盘——render 节点号随重启漂移，配置只存意图
+  bool），探测空 → `Error::Config`。
+- GUI：`ContainerConfig.gpu` → `gpu_nvidia` / `gpu_amd`。
+  `ContainerPane.tsx` GPU 段（Select + Input → 2 行 Switch）；Types 镜像。
+- `crates/gui/assets/chrome.eg.yaml` / `crates/gui/conf/chrome.yaml`：
+  `gpu: nvidia` → `gpu_nvidia: true`。
+- 模板 `conf_template_gpu_expand` 测试 4 case（nvidia / amd / both / none）。
+- 测试：core 112 全过（env::host 新增 `collect_amd_devices` 2 case 用 tempdir
+  造 fake dri+sysfs，不依赖真 AMD 宿主；`test_libpod_body_device_fields` 覆盖
+  amd 裸设备落位 + 与手动设备去重）。
+
+验证：`cargo test --workspace --lib` 全过（core 112 + gui 13 + cli 25 + shared 12）；
+clippy 无新增 warning。libpod 直调端到端（keep-id + host 网）：devices
+`kfd+renderD129` 与 `kfd+renderD129+nvidia.com/gpu=all` 两种 body 均创建成功，
+容器内 /dev/kfd + /dev/dri/renderD129 + /dev/nvidia-* 齐全。
+
+重建容器注意：本改动只动 host 端 core + CLI + GUI；不动 easytidy-dock / server。
+`cargo build -p easytidy-core` + 重启 GUI / CLI 进程。
+
 ## 架构：core `env` 模块族（2026-09-01 已收敛）
 
 「运行时环境适配」（env 探测 + 配置生成）统一收敛到 `core::env` 模块族，作单一

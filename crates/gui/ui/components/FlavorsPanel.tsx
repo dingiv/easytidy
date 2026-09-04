@@ -5,9 +5,9 @@
 // 编译期打进首跑播种）。本面板数据源全部从 conf 目录读取，模板 tab 不再展示
 // TOML flavor 预设（已退役，CLI flavor apply 仍可访问 ~/.easytidy/flavors/）。
 //
-// 与容器管理分离：模板是配置的批量管理层（存意图），容器是实例（存
-// 快照）。每卡片操作：使用（预填创建）/ 编辑 / 复制 / 删除；列表支持
-// 多选 → 批量删除。血缘：派生计数 + 「同步派生」（次级入口）。
+// 模板仅作「创建期预填」：容器一旦创建即自包含、与模板彻底解耦（无血缘、
+// 无同步、无漂移检测）。每卡片操作：使用（预填创建）/ 编辑 / 复制 / 删除；
+// 列表支持多选 → 批量删除。
 // 「使用」经 onLaunch 回调让 MasterView 打开 `new-container` pane + 预填。
 
 import { useEffect, useState } from 'react';
@@ -31,7 +31,6 @@ import {
   PlusOutlined,
   ReloadOutlined,
   RocketOutlined,
-  SyncOutlined,
 } from '@ant-design/icons';
 import type { ConfTemplate } from '../types';
 import './FlavorsPanel.css';
@@ -45,7 +44,7 @@ function nextCopyName(base: string, existing: string[]): string {
   return `${base}-copy${i}`;
 }
 
-/** 模板身份 = 文件 stem（conf_templates 返回的 `id`）。增删改/展开/血缘一律
+/** 模板身份 = 文件 stem（conf_templates 返回的 `id`）。增删改/展开一律
  *  用它定位文件——**不是** YAML 内 `config.name`（= 默认容器名，复制不改名时
  *  会撞车：两个 `chrome.yaml` 同名，删 copy 会误删原文件）。 */
 function tplId(t: ConfTemplate): string {
@@ -65,10 +64,8 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
   const { message, modal } = AntApp.useApp();
 
   const [templates, setTemplates] = useState<ConfTemplate[]>([]);
-  const [lineage, setLineage] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [syncingTemplate, setSyncingTemplate] = useState<string | null>(null);
 
   // 多选（批量删除）
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -77,12 +74,8 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
     setLoading(true);
     setError(null);
     try {
-      const [templateList, lineageMap] = await Promise.all([
-        invoke<ConfTemplate[]>('conf_templates'),
-        invoke<Record<string, string[]>>('template_lineage'),
-      ]);
+      const templateList = await invoke<ConfTemplate[]>('conf_templates');
       setTemplates(templateList);
-      setLineage(lineageMap ?? {});
     } catch (err: any) {
       setError(errMsg(err, '加载模板失败'));
       console.error('load (conf templates) failed:', err);
@@ -100,7 +93,7 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
     const id = tplId(t);
     modal.confirm({
       title: `删除模板 ${id}?`,
-      content: '已创建的容器不受影响（血缘仍保留），仅删除模板。',
+      content: '已创建的容器不受影响，仅删除模板。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -185,51 +178,6 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
     });
   };
 
-  /** 批量同步：把模板当前声明重新展开到全部派生容器（逐个重建） */
-  const handleSyncAll = (t: ConfTemplate) => {
-    const id = tplId(t);
-    const derived = lineage[id] ?? [];
-    if (derived.length === 0) return;
-    modal.confirm({
-      title: `按模板「${id}」重新同步全部派生容器？`,
-      content: (
-        <div>
-          <p>以下 {derived.length} 个容器将按模板当前声明重新展开并逐个重建（本地的自启/常驻设置保留，其余本地修改被模板覆盖）：</p>
-          <p style={{ paddingLeft: 12 }}>{derived.join('、')}</p>
-        </div>
-      ),
-      okText: '全部重新同步',
-      okButtonProps: { danger: true },
-      cancelText: '取消',
-      onOk: async () => {
-        setSyncingTemplate(id);
-        const failures: string[] = [];
-        try {
-          for (const name of derived) {
-            try {
-              await invoke('config_sync_from_template', { name });
-            } catch (err: any) {
-              failures.push(`${name}：${errMsg(err)}`);
-            }
-          }
-          if (failures.length > 0) {
-            modal.error({
-              title: `同步完成，${failures.length} 个失败`,
-              width: 620,
-              content: <pre className="error-detail">{failures.join('\n\n')}</pre>,
-              okText: '知道了',
-            });
-          } else {
-            message.success(`已按模板「${id}」同步 ${derived.length} 个容器`);
-          }
-          await load();
-        } finally {
-          setSyncingTemplate(null);
-        }
-      },
-    });
-  };
-
   return (
     <div className="flavors-panel">
       <div className="panel-header">
@@ -250,6 +198,7 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
         模板描述「将一个镜像 run 起来」的完整配置清单（镜像 / entry 应用 / 挂载 / 网络 /
         用户映射 / setup 安装命令），存放于 <code>~/.easytidy/conf/</code>。
         「使用」一键打开配置编辑器并预填该模板；列表支持多选后批量删除。
+        模板仅作创建期预填——容器创建后即自包含、与模板解耦。
       </p>
 
       {error && (
@@ -301,7 +250,6 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
           <div className="flavor-list">
           {templates.map((t) => {
             const id = tplId(t);
-            const derived = lineage[id] ?? [];
             return (
               <div
                 key={id}
@@ -322,11 +270,6 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                       <Tag>mounts ×{t.mounts.length}</Tag>
                     )}
                     <Tag>{t.network.mode === 'host' ? 'host 网络' : 'bridge'}</Tag>
-                    {derived.length > 0 && (
-                      <Tooltip title={`派生容器：${derived.join('、')}`}>
-                        <Tag color="gold">派生 ×{derived.length}</Tag>
-                      </Tooltip>
-                    )}
                   </div>
                   <div className="flavor-image">{t.image}</div>
                   {t.path && (
@@ -355,20 +298,6 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                     onClick={() => handleCopy(t)}
                     title="复制"
                   />
-                  {derived.length > 0 && (
-                    <Tooltip
-                      title={`按模板当前声明重新同步全部派生容器（${derived.join(
-                        '、',
-                      )}）`}
-                    >
-                      <Button
-                        icon={<SyncOutlined />}
-                        loading={syncingTemplate === id}
-                        onClick={() => handleSyncAll(t)}
-                        title="同步派生"
-                      />
-                    </Tooltip>
-                  )}
                   <Button
                     danger
                     icon={<DeleteOutlined />}

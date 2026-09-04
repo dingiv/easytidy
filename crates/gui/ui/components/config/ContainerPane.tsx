@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Input, Select, Space, Switch, Tag, Typography } from 'antd';
+import { Input, Space, Switch, Typography } from 'antd';
 import type { ContainerConfig, ImageSummary } from '../../types';
 import { ImageSelect } from './ImageSelect';
 
@@ -22,13 +22,16 @@ interface ContainerPaneProps {
   onPersistentChange(v: boolean): void;
   /** GUI 透传开关（实例一等项；存意图，展开/重建时按宿主实时注入） */
   onGuiChange(v: boolean): void;
-  /** GPU 透传值（null = 关；开时默认 "all"，可改为设备名 / device=<uuid>） */
-  onGpuChange(v: string | null): void;
+  /** NVIDIA GPU 透传开关（注入 NVIDIA_* env + nvidia.com/gpu=all CDI） */
+  onGpuNvidiaChange(v: boolean): void;
+  /** AMD GPU 透传开关（探测注入 /dev/kfd + AMD render 节点；ROCm 容器内自检） */
+  onGpuAmdChange(v: boolean): void;
 }
 
 export function ContainerPane({
   edit, mode, nameLocked = false, onNameChange, onImageChange,
-  onSilentBootChange, onPersistentChange, onGuiChange, onGpuChange,
+  onSilentBootChange, onPersistentChange, onGuiChange,
+  onGpuNvidiaChange, onGpuAmdChange,
 }: ContainerPaneProps) {
   // 镜像下拉数据：仅 create 模式需要拉（edit 模式镜像只读，渲染 Typography.Text）。
   const [images, setImages] = useState<ImageSummary[]>([]);
@@ -108,58 +111,34 @@ export function ContainerPane({
         </Space>
       </div>
       <div className="config-field">
-        <label>GPU 透传</label>
+        <label>NVIDIA GPU 透传</label>
         <Space>
-          <Select
-            style={{ width: 120 }}
-            value={(() => {
-              if (!edit.gpu) return '';
-              const v = edit.gpu.split('=')[0];
-              return v === 'nvidia' || v === 'amd' ? v : 'nvidia';
-            })()}
-            onChange={(vendor: string) => onGpuChange(vendor || null)}
-            options={[
-              { value: '', label: '关闭' },
-              { value: 'nvidia', label: 'NVIDIA' },
-              { value: 'amd', label: 'AMD' },
-            ]}
+          <Switch
+            checked={!!edit.gpu_nvidia}
+            onChange={onGpuNvidiaChange}
+            checkedChildren="开"
+            unCheckedChildren="关"
           />
-          {edit.gpu && (
-            <Input
-              style={{ width: 200 }}
-              value={(() => {
-                const idx = edit.gpu!.indexOf('=');
-                return idx === -1 ? 'all' : edit.gpu!.slice(idx + 1);
-              })()}
-              onChange={(e) => {
-                const spec = e.target.value.trim() || 'all';
-                const vendor = edit.gpu!.split('=')[0];
-                const v = vendor === 'nvidia' || vendor === 'amd' ? vendor : 'nvidia';
-                onGpuChange(spec === 'all' ? v : `${v}=${spec}`);
-              }}
-              placeholder="all / 0 / device=<uuid>"
-            />
-          )}
+          <Typography.Text type="secondary">
+            注入 NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES env + nvidia.com/gpu=all CDI
+            设备节点（见「环境变量」页只读项）
+          </Typography.Text>
         </Space>
-        <Typography.Text type="secondary" className="section-hint">
-          经 &lt;vendor&gt;.com/gpu=&lt;值&gt; 注入设备节点
-          {edit.gpu && edit.gpu.startsWith('nvidia')
-            ? ' + NVIDIA_* env'
-            : ''}
-          （见「环境变量」页只读项）；需宿主已装对应 Container Toolkit 并生成 CDI spec
-        </Typography.Text>
       </div>
-      {edit.flavor && (
-        <div className="config-field">
-          <label>来源模板</label>
-          <Space>
-            <Tag color="blue">{edit.flavor}</Tag>
-            <Typography.Text type="secondary">
-              配置由此模板展开；模板修改后可在顶部「从模板同步」重新对齐
-            </Typography.Text>
-          </Space>
-        </div>
-      )}
+      <div className="config-field">
+        <label>AMD GPU 透传</label>
+        <Space>
+          <Switch
+            checked={!!edit.gpu_amd}
+            onChange={onGpuAmdChange}
+            checkedChildren="开"
+            unCheckedChildren="关"
+          />
+          <Typography.Text type="secondary">
+            透传 /dev/kfd + AMD render 节点（PCI 0x1002；无 AMD CDI 依赖）
+          </Typography.Text>
+        </Space>
+      </div>
     </div>
   );
 }

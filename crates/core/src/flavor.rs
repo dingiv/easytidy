@@ -36,14 +36,9 @@ pub struct Flavor {
 }
 
 impl Flavor {
-    /// flavors 目录（$XDG_CONFIG_HOME/easytidy/flavors）。
+    /// flavors 目录（应用数据根下的 `flavors` 子目录，dev/prod 自动切）。
     pub fn flavors_dir() -> Result<PathBuf> {
-        let base = crate::configfile::ConfigFile::default_path()?;
-        let dir = match base.parent() {
-            Some(p) => p.join("flavors"),
-            None => PathBuf::from("flavors"),
-        };
-        Ok(dir)
+        Ok(crate::appdata::app_data_dir()?.join("flavors"))
     }
 
     /// 列出可用 flavor（*.toml 文件名）。
@@ -143,7 +138,8 @@ impl Flavor {
     /// 映射表外置到资源文件 `ASSETS_DIR::gui-passthrough.yaml`（dev 源码树 /
     /// prod 数据目录），见 [`crate::gui_passthrough`] 模块文档与 docs/11。
     ///
-    /// 血缘：展开结果盖 `flavor = Some(self.name)`（模板同步/漂移检测依据）。
+    /// 模板仅作**创建期预填**：展开为实例快照，容器创建后与模板彻底解耦
+    /// （无血缘字段、无同步、无漂移检测）。
     pub fn build_config(&self, name: &str) -> Result<ContainerConfig> {
         let mut config = ContainerConfig {
             name: name.to_string(),
@@ -151,82 +147,10 @@ impl Flavor {
             env: Vec::new(),
             silent_boot: false,
             persistent: true,
-            // 血缘盖章：后续 ConfigManager「从模板同步」与漂移检测依据
-            flavor: Some(self.name.clone()),
         };
         crate::env::host::inject_passthrough(&mut config);
         Ok(config)
     }
-}
-
-// ============================================================================
-// 血缘：模板同步与漂移检测（config ← flavor 重展开）
-// ============================================================================
-
-/// 血缘状态（GUI 展示用）：来源模板是否存在 + 实例是否漂移。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LineageStatus {
-    /// 来源模板名
-    pub flavor: String,
-    /// 模板文件是否存在（被删除 = 无法同步，仅展示血缘）
-    pub exists: bool,
-    /// 实例基座与模板当前声明不一致（GUI 依据此展示「从模板同步」）。
-    /// 只比 `params`——env 是展开期宿主环境解析快照（DISPLAY 等），
-    /// 天然随会话变化，不参与漂移判定
-    pub drifted: bool,
-}
-
-/// 查询实例配置的血缘状态。
-///
-/// `None` = 无血缘（自由创建）。模板文件损坏/不可读按 `exists=false` 处理
-/// （不吞掉血缘信息）。
-pub fn lineage_status(config: &ContainerConfig) -> Option<LineageStatus> {
-    let flavor_name = config.flavor.clone()?;
-    let status = match Flavor::load(&flavor_name) {
-        Ok(f) => LineageStatus {
-            drifted: f
-                .build_config(&config.name)
-                .map(|expanded| expanded.params != config.params)
-                .unwrap_or(true),
-            flavor: flavor_name,
-            exists: true,
-        },
-        Err(_) => LineageStatus {
-            flavor: flavor_name,
-            exists: false,
-            drifted: false,
-        },
-    };
-    Some(status)
-}
-
-/// 从来源模板重新同步容器配置（flavor = 实例配置批量管理的核心动作）：
-/// 重新展开 → 保留实例侧字段 → 重建容器 → 更新注册。
-///
-/// - 基座（image/entry/entry_args/mounts/network/keep_id/user_*）与 env 取模板
-///   重新展开结果（env 重解析当前宿主显示环境）
-/// - `silent_boot` / `persistent` 保留实例当前值（用户本地决策不随模板走）
-///
-/// 返回同步后的配置。
-pub async fn sync_from_flavor(
-    podman: &crate::podman::Podman,
-    config_file: &crate::configfile::ConfigFile,
-    name: &str,
-    bins: &crate::ContainerBins,
-) -> Result<ContainerConfig> {
-    let current = config_file
-        .get_container(name)?
-        .ok_or_else(|| Error::Config(format!("容器配置不存在：{name}")))?;
-    let flavor_name = current.flavor.clone().ok_or_else(|| {
-        Error::Config(format!("容器 {name} 无血缘（非模板创建），不参与模板同步"))
-    })?;
-    let flavor = Flavor::load(&flavor_name)?;
-    let mut next = flavor.build_config(name)?;
-    next.silent_boot = current.silent_boot;
-    next.persistent = current.persistent;
-    podman.rebuild(name, &next, bins).await?;
-    config_file.register_container(next.clone())?;
-    Ok(next)
 }
 
 // ============================================================================

@@ -139,20 +139,13 @@ export interface ContainerConfig {
   user_name?: string | null;
   /// GUI 透传（意图）：开启时引擎展开/重建注入宿主显示 env + X11/Wayland/字体图标挂载
   gui?: boolean;
-  /// GPU 透传（意图）：值为 "all" / 设备名 / "device=<uuid>"；null/缺省 = 不透传
-  gpu?: string | null;
-  /// 血缘：来源 flavor 模板名（展开时盖章；null = 自由创建，不参与模板同步）
-  flavor?: string | null;
-}
-
-/// 模板血缘状态（get_container_config 返回；null = 无血缘）
-export interface FlavorStatus {
-  /// 来源模板名
-  flavor: string;
-  /// 模板文件是否存在（被删 = 无法同步，仅展示血缘）
-  exists: boolean;
-  /// 实例基座与模板当前声明不一致（提示「从模板同步」）
-  drifted: boolean;
+  /// NVIDIA GPU 透传（意图）：开启时注入 `NVIDIA_VISIBLE_DEVICES=all` / `NVIDIA_DRIVER_CAPABILITIES=all` env
+  /// + `nvidia.com/gpu=all` CDI 设备节点。需宿主已装 NVIDIA Container Toolkit。
+  gpu_nvidia?: boolean;
+  /// AMD GPU 透传（意图）：开启时 create 期探测宿主 AMD 裸设备注入
+  /// （/dev/kfd + /dev/dri 下 PCI vendor 0x1002 的 render 节点）；无 vendor
+  /// 专属 env（ROCm 容器内自检即可）。无 AMD CDI 依赖。
+  gpu_amd?: boolean;
 }
 
 /// 宿主用户信息（uid 映射语义对照表数据源；null = 探测失败，
@@ -200,8 +193,6 @@ export interface ContainerConfigResult {
   config: ContainerConfig;
   effective: ContainerConfigView | null;
   host_user: HostUser | null;
-  /// 模板血缘状态（null = 自由创建）
-  flavor_status?: FlavorStatus | null;
 }
 
 /// 活跃终端会话（get_terminals / server pty.list；均为容器默认用户会话）

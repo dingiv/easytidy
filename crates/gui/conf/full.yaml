@@ -62,7 +62,3 @@ env:
   - WAYLAND_DISPLAY=wayland-0
   - XDG_RUNTIME_DIR=/run/user/1000
   - HTTP_PROXY=http://127.0.0.1:7890
-
-# 血缘标记：此配置由 flavor 模板展开而来（null 或省略 = 自由创建，不参与
-# 模板同步）
-# flavor: chrome

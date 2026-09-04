@@ -15,7 +15,6 @@ export function normalizeConfig(cfg: ContainerConfig): ContainerConfig {
       ports: cfg.network.ports.map((p) => ({ ...p })),
     },
     env: [...(cfg.env ?? [])],
-    flavor: cfg.flavor ?? null,
   };
 }
 

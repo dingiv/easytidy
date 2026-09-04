@@ -1,7 +1,8 @@
 //! env —— 运行时环境适配的统一模块（宿主侧生成 + 容器侧探测）。
 //!
 //! 把散在各处的「env 探测 + 配置生成」收敛到这里，作单一事实源：
-//! - [`host`]：宿主侧（容器创建期）——透传注入入口（`gui` / `gpu` 意图 → env/mounts）
+//! - [`host`]：宿主侧（容器创建期）——透传注入入口（`gui` / `gpu_nvidia` / `gpu_amd`
+//!   意图 → env/mounts）
 //! - [`gui`]：GUI 透传规则（`ASSETS_DIR::gui-passthrough.yaml` 资源驱动）
 //! - [`incontainer`]：容器侧——身份（[`resolve_identity`]，server 与 dock 共用
 //!   单一事实源）+ 容器运行时 env 探测（XAUTHORITY / XDG_DATA_DIRS / uid）+
@@ -19,10 +20,7 @@ pub mod host;
 pub mod incontainer;
 
 pub use gui::{GuiPassthroughMount, GuiPassthroughRule};
-pub use host::{
-    inject_gpu_passthrough, inject_gui_passthrough, inject_passthrough, parse_gpu_value,
-    GpuVendor,
-};
+pub use host::{inject_gpu_passthrough, inject_gui_passthrough, inject_passthrough};
 pub use incontainer::{
     fixup_xdg_data_dirs_value, prepare_in_container, probe_xauthority, resolve_identity,
     self_uid_gid, Identity,

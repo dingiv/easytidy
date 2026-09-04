@@ -289,9 +289,13 @@ pub fn keep_id_create_body(
     keep_id: bool,
     // 设备直通：裸设备 "host:container[:perms]" 列表（SpecGenerator devices 的 Path）
     devices: Vec<String>,
-    // GPU 透传：`<vendor>[=<spec>]`（nvidia / amd）；经 `<vendor>.com/gpu=<spec>`
-    // CDI 引用注入设备节点。None = 无 GPU
-    gpu: Option<&str>,
+    // GPU 透传：
+    // - gpu_nvidia：NVIDIA 走 CDI `nvidia.com/gpu=all`（宿主 nvidia.yaml 可解析）
+    // - amd_gpu_devices：AMD 已探测的裸设备串（"host:container"，见
+    //   `env::host::detect_amd_gpu_devices`）；空 = 无 AMD 透传
+    // NVIDIA 专属 env 由 `inject_passthrough` 负责（create 前已注入 config.env）。
+    gpu_nvidia: bool,
+    amd_gpu_devices: Vec<String>,
     // PID 命名空间模式（"host" 等）；None = private。非 private 时禁用 init
     pid: Option<&str>,
     // 安全选项（"label=disable" / "apparmor=unconfined" / "seccomp=..." 原始串）；
@@ -359,18 +363,20 @@ pub fn keep_id_create_body(
     };
 
     // 设备直通：SpecGenerator 的 devices 字段是 []spec.LinuxDevice，其 Path 既能是
-    // 裸设备串（"host:container[:perms]"）也能是 CDI 引用（"nvidia.com/gpu=all" /
-    // "amd.com/gpu=all"）——podman CLI 的 --device 与 --gpus 都归一化成此。
-    // GPU 由此经 CDI 注入设备节点；vendor 由 `gpu` 值前缀决定（nvidia/amd）。
+    // 裸设备串（"host:container[:perms]"）也能是 CDI 引用（"nvidia.com/gpu=all"）——
+    // podman CLI 的 --device 与 --gpus 都归一化成此。
+    // NVIDIA → CDI 引用；AMD → 裸设备（无 amd CDI spec，见 env::host 探测）。
     let mut device_list: Vec<Value> = Vec::new();
-    for d in &devices {
-        if !d.trim().is_empty() {
-            device_list.push(json!({ "path": d.trim() }));
+    let mut raw_devices: Vec<String> = devices;
+    raw_devices.extend(amd_gpu_devices);
+    for d in &raw_devices {
+        let trimmed = d.trim();
+        if !trimmed.is_empty() && !device_list.iter().any(|v| v["path"] == trimmed) {
+            device_list.push(json!({ "path": trimmed }));
         }
     }
-    if let Some(gpu) = gpu.map(str::trim).filter(|g| !g.is_empty()) {
-        let (vendor, spec) = crate::env::parse_gpu_value(gpu);
-        device_list.push(json!({ "path": format!("{}.com/gpu={}", vendor.cdi_prefix(), spec) }));
+    if gpu_nvidia {
+        device_list.push(json!({ "path": "nvidia.com/gpu=all" }));
     }
 
     // PID 命名空间：SpecGenerator 的 pidns.nsmode。默认即 private（省略该字段），
@@ -414,7 +420,12 @@ pub fn keep_id_create_body(
         // catatonit = PID 1；PID 命名空间非 private 时禁用（无法注入 init）
         "init": init_enabled,
         "mounts": podman_mounts,
-        "network_mode": network_mode,       // Some("host") 或 null（bridge 默认）
+        // libpod 原生字段 `netns.nsmode`，不是 Docker compat 的 `network_mode`
+        // （后者 libpod REST API 静默忽略 → 默认走 pasta）
+        "netns": match network_mode {
+            Some(mode) => json!({ "nsmode": mode }),
+            None => Value::Null,
+        },
         "exposed_ports": exposed_ports,
         "portmappings": portmappings,
         "working_dir": working_dir,

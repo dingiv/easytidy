@@ -1,8 +1,9 @@
 # 容器配置示例 —— 经典 Chrome 容器模板（GUI 透传）
 #
 # conf 模板 = 静态意图;宿主耦合的运行时数据(DISPLAY/WAYLAND/XAUTHORITY/
-# XDG_RUNTIME_DIR 等)在「使用 / 从模板同步」时由 Rust 端从宿主 env 实时注入
+# XDG_RUNTIME_DIR 等)在「使用」预填时由 Rust 端从宿主 env 实时注入
 # (见 core::conf_template::ConfTemplate::build_config + inject_gui_passthrough)。
+# 模板仅作创建期预填——容器创建后即自包含、与模板解耦(无血缘/同步/漂移)。
 #
 # GUI 透传开关 = gui: true（展开时宿主 env 自动注入 + 字体图标只读挂载 + /tmp/.X11-unix +
 # $XDG_RUNTIME_DIR 挂载 + user_home 强开 keep-id）。
@@ -22,8 +23,8 @@ silent_boot: false
 persistent: true
 user_home: true
 
-# GPU 透传（NVIDIA Container Toolkit）：值格式 <vendor>[=<spec>]
-gpu: nvidia
+# GPU 透传（NVIDIA Container Toolkit）：勾选后注入 nvidia.com/gpu=all CDI + NVIDIA_* env
+gpu_nvidia: true
 security_opts:
   - label=disable
   - apparmor=unconfined
