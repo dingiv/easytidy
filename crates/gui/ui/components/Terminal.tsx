@@ -132,7 +132,6 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
       term.write(data);
     };
     const handlePtyEvent = (event: PtyEvent) => {
-      console.log('[DBG-Term] handlePtyEvent kind=', event.kind, 'len=', event.data?.length ?? 0, 'streamIdRef=', streamIdRef.current);
       if (event.kind === 'data' && event.data) {
         // 循环 push（不用 spread：帧超过 ~65535 元素会 RangeError）
         for (const b of event.data) pendingWrites.push(b);
@@ -187,7 +186,6 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
       ch.onmessage = (ev) => {
         if (gen === streamGen) handlePtyEvent(ev); // 旧代事件丢弃
       };
-      console.log('[DBG-Term] establishStream START hint=', hint, 'gen=', gen, 'streamIdRef=', streamIdRef.current, 'initialStreamId=', initialStreamId, 'inFlight=', inFlightInvokeRef.current !== null);
       try {
         let sid: number;
         if (inFlightInvokeRef.current === null) {
@@ -221,10 +219,9 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
           if (streamIdRef.current === null) {
             // 防御（理论上不可达：建流者必然发布 ref）。绝不在此新建流——
             // 会与既有会话重复（双终端）。等下一次重连恢复。
-            console.warn('[DBG-Term] remount 但无 sid（异常），等待重连');
+            console.warn('remount 但无 sid（异常），等待重连');
             return;
           }
-          console.log('[DBG-Term] remount attaching ch to sid=', streamIdRef.current);
           sid = await invoke<number>('pty_open', {
             onEvent: ch,
             cmd: null,
@@ -234,7 +231,6 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
             attachStreamId: streamIdRef.current, // attach 不 create
           });
         }
-        console.log('[DBG-Term] establishStream GOT sid=', sid, 'gen=', gen);
         const prev = streamIdRef.current;
         streamIdRef.current = sid;
         writeFailed = false; // 新通道就绪：恢复自动重连能力
@@ -246,7 +242,7 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
         }
         term.focus();
       } catch (err) {
-        console.error('[DBG-Term] pty_open failed:', err);
+        console.error('pty_open failed:', err);
         term.writeln(`\r\n\x1b[91m[${hint ?? '打开'} PTY 失败：${err}]\x1b[0m`);
       }
     };
@@ -302,7 +298,6 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
     // 大输入分 64KB 块，小输入（打字）直发保持低延迟。
     const INPUT_CHUNK = 64 * 1024;
     term.onData((data: string) => {
-      console.log('[DBG-Term] onData len=', data.length, 'preview=', JSON.stringify(data.slice(0, 30)), 'streamIdRef=', streamIdRef.current);
       if (streamIdRef.current === null) return;
       const bytes = new TextEncoder().encode(data);
       const streamId = streamIdRef.current;
@@ -433,5 +428,7 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
   );
 }
 
-/** memo 包裹：无 props，父组件重渲染不触发重建 */
+/** memo 按 props（streamId / onStream / onExit）浅比较：props 引用不变时
+ *  跳过重建。实际是否生效取决于父组件是否稳定传回调——每次渲染新建
+ *  onStream/onExit 则 memo 失效。 */
 export const Terminal = memo(TerminalInner);

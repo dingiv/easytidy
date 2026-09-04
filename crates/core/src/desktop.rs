@@ -22,6 +22,22 @@ Categories=System;ContainerManagement;
 X-easytidy-container={name}
 "#;
 
+/// 清理 .desktop INI 值（`Key=value` 单行结构专用）：换行 / 控制字符会让
+/// 一行断裂成多行 → 破坏 INI 解析。换行替换为空格、控制字符丢弃、连续空白
+/// 压缩、首尾 trim。**仅用于 INI 值字段**（Name/Comment/Keywords/Icon 等）；
+/// `Exec` 是 shell 命令行（含空格合法），不走此函数。
+fn sanitize_ini_value(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .filter_map(|c| match c {
+            '\n' | '\r' => Some(' '),
+            c if (c as u32) < 0x20 => None, // 丢弃其他控制字符（\0-\x1f）
+            c => Some(c),
+        })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// 生成 .desktop 文件内容。
 ///
 /// 参数：
@@ -38,14 +54,14 @@ pub fn generate_desktop_entry(
     cli_path: &str,
 ) -> String {
     let default_title = format!("easytidy {}", name);
-    let title = title.unwrap_or(&default_title);
-    let icon = icon.unwrap_or("easytidy-container");
+    let title = sanitize_ini_value(title.unwrap_or(&default_title));
+    let icon = sanitize_ini_value(icon.unwrap_or("easytidy-container"));
     let exec = format!("{} open --container {}", cli_path, name);
 
     DESKTOP_ENTRY_TEMPLATE
-        .replace("{title}", title)
+        .replace("{title}", &title)
         .replace("{exec}", &exec)
-        .replace("{icon}", icon)
+        .replace("{icon}", &icon)
         .replace("{name}", name)
 }
 
@@ -379,15 +395,24 @@ pub struct PassthroughSpec {
 /// 生成 distrobox 风格 .desktop 内容（TryExec/GenericName/Keywords/
 /// Actions=Remove——TryExec 缺失时部分桌面环境不显示入口，实测）。
 fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
-    let comment = spec.comment.as_deref().unwrap_or("easytidy passthrough");
-    let categories = spec.categories.as_deref().unwrap_or("Application;Utility;");
+    // INI 值清理：app_name / comment / categories / icon / wm / desktop_file 来自
+    // 容器内 .desktop 或用户，可能含换行 / 控制字符 → 破坏单行 Key=value 结构。
+    // container（podman 字符集限制 [a-zA-Z0-9][a-zA-Z0-9_.-]*）与 cli_path /
+    // exec（命令行 / 路径，空格合法）安全，不处理。
+    let app_name = sanitize_ini_value(&spec.app_name);
+    let comment = sanitize_ini_value(spec.comment.as_deref().unwrap_or("easytidy passthrough"));
+    let categories = sanitize_ini_value(spec.categories.as_deref().unwrap_or("Application;Utility;"));
+    let icon = spec.icon.as_ref().map(|i| sanitize_ini_value(i));
+    let wm = spec.startup_wm_class.as_ref().map(|w| sanitize_ini_value(w));
+    let desktop_file = sanitize_ini_value(&spec.desktop_file);
+
     let mut content = format!(
         "[Desktop Entry]\n\
          Name={}\n\
          GenericName=easytidy {} - {}\n\
          Comment={comment}\n\
          Categories={categories}\n",
-        spec.app_name, spec.container, spec.app_name,
+        app_name, spec.container, app_name,
     );
     // ⚠️ --container 是子命令级参数（`easytidy open --container <n> -- ...`），
     // 放顶层会报 "unexpected argument '--container'"（journalctl 实测）。
@@ -397,13 +422,13 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
         "Exec={} open --container {} -- {}\n",
         spec.cli_path, spec.container, spec.exec,
     ));
-    if let Some(icon) = spec.icon.as_ref() {
+    if let Some(icon) = icon {
         content.push_str(&format!("Icon={icon}\n"));
     }
     if spec.startup_notify {
         content.push_str("StartupNotify=true\n");
     }
-    if let Some(wm) = spec.startup_wm_class.as_ref() {
+    if let Some(wm) = wm {
         content.push_str(&format!("StartupWMClass={wm}\n"));
     }
     content.push_str(&format!(
@@ -419,16 +444,16 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
          Exec={} unexport --container {} --desktop-file {}\n",
         spec.container,
         spec.cli_path,
-        spec.app_name,
+        app_name,
         spec.cli_path,
         spec.container,
-        spec.desktop_file,
+        desktop_file,
     ));
     content.push_str(&format!(
         "X-easytidy-pt=1\n\
          X-easytidy-container={}\n\
          X-easytidy-app={}\n",
-        spec.container, spec.desktop_file,
+        spec.container, desktop_file,
     ));
     content
 }
@@ -803,6 +828,57 @@ pub fn remove_passthrough(container: &str, desktop_file: &str) -> Result<PathBuf
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_sanitize_ini_value() {
+        // 换行 → 空格
+        assert_eq!(sanitize_ini_value("a\nb"), "a b");
+        assert_eq!(sanitize_ini_value("a\r\nb"), "a b");
+        assert_eq!(sanitize_ini_value("a\rb"), "a b");
+        // 控制字符丢弃
+        assert_eq!(sanitize_ini_value("a\x00b"), "ab");
+        assert_eq!(sanitize_ini_value("a\x1fb"), "ab");
+        // 连续空白压缩 + 首尾 trim
+        assert_eq!(sanitize_ini_value("  my  app  "), "my app");
+        assert_eq!(sanitize_ini_value("\n\n"), "");
+        // 正常值不变
+        assert_eq!(sanitize_ini_value("Google Chrome"), "Google Chrome");
+        assert_eq!(sanitize_ini_value("Application;Utility;"), "Application;Utility;");
+    }
+
+    #[test]
+    fn test_generate_desktop_entry_sanitizes_title() {
+        let content = generate_desktop_entry(
+            "test-container",
+            Some("Bad\nTitle"),
+            None,
+            "/usr/bin/easytidy",
+        );
+        // 换行被清理，Name 保持单行
+        assert!(content.contains("Name=Bad Title"));
+        assert!(!content.lines().any(|l| l.starts_with("Title=")));
+    }
+
+    #[test]
+    fn test_generate_passthrough_content_sanitizes_app_name() {
+        let spec = PassthroughSpec {
+            container: "chrome".to_string(),
+            app_name: "My\nApp".to_string(),
+            comment: Some("line1\nline2".to_string()),
+            categories: None,
+            exec: "myapp".to_string(),
+            icon: None,
+            desktop_file: "/usr/share/applications/myapp.desktop".to_string(),
+            cli_path: "/usr/bin/easytidy".to_string(),
+            startup_notify: false,
+            startup_wm_class: None,
+        };
+        let content = generate_passthrough_content(&spec);
+        assert!(content.contains("Name=My App"));
+        assert!(content.contains("Comment=line1 line2"));
+        // 无断裂行（line2 不成为新行开头）
+        assert!(!content.lines().any(|l| l.starts_with("line2")));
+    }
 
     #[test]
     fn test_generate_desktop_entry() {

@@ -60,14 +60,33 @@ impl DaemonState {
 pub async fn run_daemon() -> anyhow::Result<()> {
     let state = Arc::new(DaemonState::new());
 
-    // 清理旧 socket（防上次非正常退出残留）
-    let _ = tokio::fs::remove_file(DAEMON_SOCKET).await;
+    // 竞态防护：若已有活 daemon（socket 可连）→ 本实例直接退出（不 remove、
+    // 不 bind）。防 bootstrap 并发双 spawn（StrictMode 双 invoke / 用户快速
+    // 连点）时后启动者删掉先启动者正在用的 socket。
+    if tokio::net::UnixStream::connect(DAEMON_SOCKET).await.is_ok() {
+        info!("daemon already running (socket connectable), this instance exits");
+        return Ok(());
+    }
+
     // 确保 socket 目录存在（/run/easytidy，与日志同目录）
     if let Some(parent) = std::path::Path::new(DAEMON_SOCKET).parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    let listener = UnixListener::bind(DAEMON_SOCKET)
-        .with_context(|| format!("bind {} failed", DAEMON_SOCKET))?;
+    // 清理 stale socket（文件在但无 daemon 监听——上面 connect 已确认连不上）
+    let _ = tokio::fs::remove_file(DAEMON_SOCKET).await;
+
+    // bind；AddrInUse = 另一 daemon 刚 bind 完（竞态输者）→ 退出而非 continue
+    //（否则 continue 会覆盖另一 daemon 的 socket）。
+    let listener = match UnixListener::bind(DAEMON_SOCKET) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            info!("another daemon just bound the socket, this instance exits");
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("bind {} failed: {e}", DAEMON_SOCKET));
+        }
+    };
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -132,9 +151,14 @@ pub async fn run_daemon() -> anyhow::Result<()> {
 
     // 清理
     cleanup_task.abort();
-    // 标记所有 session 死亡 + 广播
+    // 杀所有 session 的 bash 进程组（SIGHUP）+ 标记死亡 + 广播。
+    // daemon 是 bash 的直接父进程（portable-pty spawn）——只 set_dead 不 kill 时，
+    // daemon 死后 bash 变孤儿被容器 PID 1（catatonit）收养；容器正常停止靠
+    // runc SIGKILL 整个 cgroup 兜底，但 daemon 被单独 kill（容器存活）会残留
+    // root bash。与 rc.close 路径保持一致。
     let sessions = state.sessions.read().await;
     for s in sessions.values() {
+        s.kill();
         s.set_dead();
         s.broadcast_exited();
     }
@@ -376,9 +400,10 @@ async fn handle_client(
         }
         "rc.resize" => {
             // 独立 resize（GUI xterm.fit 时经一次性 `client resize` exec
-            // 触发）：找唯一 alive session → master.resize → 内核自动给
-            // 前台进程组发 SIGWINCH → bash 重绘 prompt。**关键**：仅改
-            // xterm.cols 而 bash 还在旧宽度 = 提示符 wrap（root 终端的
+            // 触发）：找**首个** alive session（`.find` 取第一个；当前产品每
+            // 容器单 root session，多 session 时作用于首个）→ master.resize →
+            // 内核自动给前台进程组发 SIGWINCH → bash 重绘 prompt。**关键**：
+            // 仅改 xterm.cols 而 bash 还在旧宽度 = 提示符 wrap（root 终端的
             // `~ ` 与 ` $ ` 错行显示）。attach 路径下的 `rc.resize` 由
             // `attach_session` 内的消息循环处理，不走这里。
             let req: RcResize = serde_json::from_value(cmd.payload)?;
@@ -435,11 +460,13 @@ async fn handle_client(
 /// - client Raw 帧 → session.write_input
 /// - session 输出（订阅通道）→ client Raw 帧
 /// - rc.resize → master.resize
-/// - rc.close → session.kill（detach 不杀 bash：kill 只标记 alive=false；
-///   bash 由 reader EOF 触发 set_dead。实际产品语义：rc.close 杀 bash + 杀 daemon）
+/// - rc.close → **同步清理**（与顶层 `rc.close` 路径一致）：`kill()` 发
+///   SIGHUP 杀 bash 进程组 + `set_dead()` 标记 + `broadcast_exited()` + 从
+///   session map 移除，随后断开本 client 桥流。reader task 的 EOF 处理作为
+///   兜底（幂等：已移除的 session 再 broadcast 无害）。
 async fn attach_session(
     framed: &mut Framed<UnixStream, FrameCodec>,
-    _state: Arc<DaemonState>,
+    state: Arc<DaemonState>,
     session: Arc<RootSession>,
     token: u64,
     _attach_id: u64,
@@ -464,8 +491,14 @@ async fn attach_session(
                                 }
                             }
                             "rc.close" => {
-                                info!("client (token={}) requested close", token);
+                                info!("client (token={}) requested close session {}", token, session.id);
+                                // 同步清理（与顶层 rc.close 一致）：杀 bash 进程组 +
+                                // 标记 + 广播 + 从 map 移除，随后断开本 client 桥流。
                                 session.kill();
+                                session.set_dead();
+                                session.broadcast_exited();
+                                state.sessions.write().await.remove(&session.id);
+                                break;
                             }
                             "rc.ping" => {
                                 let _: RcPing = serde_json::from_value(msg.payload)?;

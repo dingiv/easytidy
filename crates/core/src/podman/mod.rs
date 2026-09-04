@@ -477,9 +477,10 @@ impl Podman {
         Ok(id)
     }
 
-    /// 挂载去重（最后一道防墙）：按 `container_path` 去重，保留先出现的；同目标
-    /// 不同 host_path 或 read_only 不同的告警（用户最可能需要知道）。空
-    /// `container_path` 视为无效丢弃（libpod 会拒绝）。
+    /// 挂载去重（最后一道防墙）：按 `container_path` 去重，保留**最后**出现的一项
+    /// （挂载顺序 [模板…, GUI 注入…, 用户手动…]，用户手动项在最后 → 覆盖模板
+    /// 同路径项）；同目标不同 host_path 或 read_only 不同的告警（用户最可能需要
+    /// 知道）。空 `container_path` 视为无效丢弃（libpod 会拒绝）。
     ///
     /// **加在 `expand_user_mounts` 末尾**：路径变量已展开为绝对路径，比较无歧义；
     /// 在 mount 进入 `host_config.mounts` 之前 → podman 不会再因重复 destination

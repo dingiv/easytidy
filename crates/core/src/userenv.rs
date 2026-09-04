@@ -1,8 +1,14 @@
-//! 宿主用户探测（用户一致性映射，distrobox 式）。
+//! 宿主用户探测。
 //!
-//! 容器创建时（`create_with_config`，`user_home=true`）读取宿主用户名/uid/gid/home，
-//! 经 `EASYTIDY_USER_*` 环境变量注入容器；容器内 server 据此创建同名用户并以
-//! `su` 以该用户拉起应用——避免容器内 root 读写宿主挂载目录的权限问题。
+//! 读取宿主登录用户的 name/uid/gid/home（libc `getuid`/`getgid` + `/etc/passwd`
+//! 反查 + `$HOME`），供三处使用：
+//! - **keep-id**（`create_with_config`）：宿主登录 uid ↔ 容器同 uid 锁定的基准
+//! - **路径变量展开**（`pathvars`）：`${HOME}`/`${USER}`/`${UID}`/`${GID}` 宿主侧取值
+//! - **GUI 用户面板**：展示宿主身份（uid 映射语义对照表数据源）
+//!
+//! 新身份模型（2026-08-28 定案）：server 即容器默认用户——容器 `User` 字段直指
+//! 配置 uid:gid（宿主 `create_with_config` 设置），server 无需建号 / 降权 / `su`。
+//! `host_user()` 失败（无登录用户）时上层按配置 uid/gid 或宿主探测继续，不做用户映射。
 
 /// 宿主用户信息（当前进程实际身份对应的用户）。
 /// `Serialize`：GUI 配置管理器"用户"面板展示宿主身份（uid 映射语义对照表数据源）。
