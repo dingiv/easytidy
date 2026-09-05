@@ -311,7 +311,7 @@ export function UserPane({
           type="warning"
           showIcon
           message="keep-id 已关闭"
-          description="容器默认用户 uid 与宿主不再对齐：显示环境可能不可用（GUI 应用无法访问宿主显示 socket）。仅适用于无头/非 GUI 容器；此配置随「保存并重启」重建容器后生效。"
+          description="容器默认用户 uid 与宿主不再对齐：显示环境可能不可用（GUI 应用无法访问宿主显示 socket）。仅适用于无头/非 GUI 容器；此配置随「快速重建」重建容器后生效。"
           className="mode-hint"
         />
       )}

@@ -751,9 +751,39 @@ impl Podman {
 
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
     ///
-    /// 「新容器确认就绪后才删旧」的安全流程（旧容器全程保留到确认，失败自动回滚）：
-    /// 1. `commit_container` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
-    ///    （仅容器层；bind mount 不入 commit —— 正是所需）——**数据保险**
+    /// **安全重建，默认形态**：commit 用 `commit --squash`（单层扁平镜像，
+    /// 体积小）。普通 commit 形态（保留分层、更快）见 [`Self::rebuild_quick`]——
+    /// 两者安全流程完全相同。
+    pub async fn rebuild(
+        &self,
+        name: &str,
+        config: &ContainerConfig,
+        bins: &crate::ContainerBins,
+    ) -> Result<String> {
+        self.rebuild_with_commit(name, config, bins, true).await
+    }
+
+    /// 快速重建：与 [`Self::rebuild`] 流程完全相同（安全：保留旧容器、确认
+    /// 新容器就绪、失败自动回滚），唯一差异是 commit 用**普通 commit**
+    /// （保留源容器分层历史、无需扁平化，更快）。「快速」指 commit 速度，
+    /// 不是跳过安全流程。
+    pub async fn rebuild_quick(
+        &self,
+        name: &str,
+        config: &ContainerConfig,
+        bins: &crate::ContainerBins,
+    ) -> Result<String> {
+        self.rebuild_with_commit(name, config, bins, false).await
+    }
+
+    /// 两种形态共用的安全重建（`squash` 决定 commit 方式）。
+    ///
+    /// 「新容器确认就绪后才删旧」的安全流程（旧容器全程保留到确认，失败自动
+    /// 回滚）：
+    /// 1. libpod `commit` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
+    ///    （仅容器层；bind mount 不入 commit —— 正是所需）——**数据保险**；
+    ///    `squash=true` → `commit --squash` 单层扁平（体积小、较慢），
+    ///    `false` → 普通 commit（保留分层、更快）
     /// 2. `rename` 旧容器为临时名 `<name>-old-<tag>`（**保留**！释放正式名，
     ///    旧容器数据仍在容器层 + 镜像双重保存）
     /// 3. `stop` 旧（释放 socket——旧 dock daemon 退出，`dock.sock` 让出给新容器；
@@ -767,11 +797,12 @@ impl Podman {
     /// 错误处理：第 4 / 5 步任一失败 → **回滚**（删未就绪的新容器，把旧容器
     /// rename 回正式名并重新 start，环境恢复运行）；数据始终有 commit 镜像兜底。
     /// 调用方负责在成功后把 `config` 回写 configfile（GUI apply / CLI rebuild 均执行）。
-    pub async fn rebuild(
+    async fn rebuild_with_commit(
         &self,
         name: &str,
         config: &ContainerConfig,
         bins: &crate::ContainerBins,
+        squash: bool,
     ) -> Result<String> {
         // 先记下现有 socket 目录（重建后 socket 目录 = easytidy/<name>；成功后清理
         // 旧代孤儿 `<name>-<hash>`。纯 name 目录即当前代——按新目录做白名单，见第 7 步）
@@ -780,7 +811,15 @@ impl Podman {
         // 1. commit 当前容器层（bind mount 不入镜像）→ 数据保险
         let tag = Self::rebuild_image_tag(name);
         let image_ref = format!("localhost/easytidy-rebuild:{tag}");
-        self.commit_container(name, &image_ref).await?;
+        let message = if squash {
+            "easytidy rebuild snapshot via commit --squash"
+        } else {
+            "easytidy rebuild snapshot via commit"
+        };
+        let libpod = crate::libpod::Libpod::new().await?;
+        libpod
+            .commit(name, "localhost/easytidy-rebuild", Some(&tag), squash, message, &[])
+            .await?;
 
         // 2. rename 旧容器为临时名（保留！释放 <name> 的名字）
         let old_name = format!("{name}-old-{tag}");
@@ -823,48 +862,6 @@ impl Podman {
         for legacy in legacy_socket_dirs {
             if legacy != new_socket_dir {
                 tracing::debug!("重建后清理旧代 socket 目录：{}", legacy.display());
-                let _ = std::fs::remove_dir_all(&legacy);
-            }
-        }
-
-        Ok(id)
-    }
-
-    /// 快速重建（无回滚、不确认就绪）：commit 数据 → 停 → 删旧 → 同名重建 → 启动。
-    ///
-    /// 与 [`Self::rebuild`]（安全重建）的差异：**不保留旧容器、不确认新容器
-    /// 就绪、失败不回滚**——流程更短、速度更快，环境中断几秒；create 失败时旧
-    /// 容器已删（数据仍有第 1 步的 commit 镜像兜底）。GUI「快速重建」用。
-    pub async fn rebuild_quick(
-        &self,
-        name: &str,
-        config: &ContainerConfig,
-        bins: &crate::ContainerBins,
-    ) -> Result<String> {
-        // 先记下现有 socket 目录（清理规则同安全重建：纯 name 目录即当前代，跳过）
-        let legacy_socket_dirs = crate::resolve_socket_dirs(name);
-
-        // 1. commit 当前容器层（bind mount 不入镜像）→ 数据兜底
-        let tag = Self::rebuild_image_tag(name);
-        let image_ref = format!("localhost/easytidy-rebuild:{tag}");
-        self.commit_container(name, &image_ref).await?;
-
-        // 2. 停 + 删旧（快速模式不保留旧容器、无回滚）
-        if self.is_running(name).await? {
-            self.stop(name).await?;
-        }
-        self.remove(name, true).await?;
-
-        // 3. 同名 create + start（不确认就绪：快速模式；失败由调用方报错，
-        //    数据可从 commit 镜像恢复）
-        let id = self.create_with_config(name, &image_ref, bins, config).await?;
-        self.start(name).await?;
-
-        // 4. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建）
-        let new_socket_dir = crate::socket_dir_for(name)?;
-        for legacy in legacy_socket_dirs {
-            if legacy != new_socket_dir {
-                tracing::debug!("快速重建后清理旧代 socket 目录：{}", legacy.display());
                 let _ = std::fs::remove_dir_all(&legacy);
             }
         }
@@ -1148,31 +1145,6 @@ impl Podman {
             }
         }
         Ok(output)
-    }
-
-    /// 提交容器当前层为镜像（bind mount 不入 commit）。
-    pub(crate) async fn commit_container(&self, name: &str, image_ref: &str) -> Result<()> {
-        use bollard::container::Config;
-        use bollard::image::CommitContainerOptions;
-
-        let (repo, tag) = image_ref
-            .rsplit_once(':')
-            .unwrap_or((image_ref, "latest"));
-        let options = CommitContainerOptions {
-            container: name.to_string(),
-            repo: repo.to_string(),
-            tag: tag.to_string(),
-            comment: "easytidy rebuild snapshot".to_string(),
-            author: "easytidy".to_string(),
-            pause: true,
-            changes: None,
-        };
-        let config = Config::<String>::default();
-        self.docker
-            .commit_container(options, config)
-            .await
-            .map_err(|e| Error::Connect(format!("提交容器快照失败（重建中止，容器未变更）：{e}")))?;
-        Ok(())
     }
 
     /// 生成重建镜像 tag（容器名净化 + 时间戳，保证唯一）。

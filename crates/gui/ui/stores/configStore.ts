@@ -4,7 +4,7 @@
 // - **dirty 由编辑动作显式置位**（update 置 true,load 重置 false）——
 //   不再用深比较推断"是否有未保存修改"（比较法对引擎注入 env/mounts/
 //   userns 回显的过滤有各种漏网,导致未修改也误报,2026-08-08 实测）
-// - 保存（apply）即"保存并重启容器"——成功后 reload,dirty 重置;
+// - 保存（apply）即"快速重建容器"——成功后 reload,dirty 重置;
 //   不存在"已保存未生效"状态（容器已按新配置重建）
 
 import { create } from 'zustand';
@@ -36,7 +36,7 @@ interface ConfigState {
   load: (name: string) => Promise<void>;
   /** 编辑动作：应用修改到 edit 并置 dirty（任意字段变更入口） */
   update: (mutator: (edit: ContainerConfig) => ContainerConfig) => void;
-  /** 保存并重启容器（成功后重载） */
+  /** 快速重建容器（成功后重载） */
   apply: (name: string) => Promise<void>;
   /** 重置错误 */
   clearError: () => void;
@@ -92,7 +92,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         config: payload,
       });
       console.log(`container recreated, new id: ${newId}`);
-      // 保存并重启成功：重载（dirty 重置,无"未生效"状态）
+      // 快速重建成功：重载（dirty 重置,无"未生效"状态）
       await get().load(name);
     } catch (err: any) {
       set({ error: errMsg(err, '应用配置失败') });

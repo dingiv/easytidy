@@ -65,10 +65,10 @@ pub async fn get_container_config(name: String) -> Result<serde_json::Value, Str
     }))
 }
 
-/// 应用容器配置（mounts / 网络映射变更 → 重建容器，重启后生效）。
+/// 应用容器配置（mounts / 网络映射变更 → 快速重建容器，重启后生效）。
 ///
 /// `config` 即 `get_container_config` 返回的 `config` 对象（含 mounts/network）。
-/// 返回新容器 ID。
+/// 走快速重建（普通 commit + 安全流程：保留旧容器、失败自动回滚）。返回新容器 ID。
 #[tauri::command]
 pub async fn apply_container_config(
     name: String,
@@ -82,11 +82,12 @@ pub async fn apply_container_config(
     // 让实例配置区里切换「GUI 透传 / GPU 透传」开关后,重建即生效。
     inject_passthrough(&mut container_config);
 
-    // 直接调用 core（不依赖 GuiSession）：commit → 删旧 → 同名重建（新配置）→ 启动
+    // 直接调用 core（不依赖 GuiSession）：快速重建（普通 commit + 安全流程）
+    // commit → 保留旧容器 → 同名重建（新配置）→ 确认就绪 → 删旧（失败自动回滚）
     let podman = Podman::connect().await.map_err(|e| e.to_string())?;
     let bins = easytidy_core::ContainerBins::resolve().map_err(|e| e.to_string())?;
     let new_id = podman
-        .rebuild(&name, &container_config, &bins)
+        .rebuild_quick(&name, &container_config, &bins)
         .await
         .map_err(|e| e.to_string())?;
 

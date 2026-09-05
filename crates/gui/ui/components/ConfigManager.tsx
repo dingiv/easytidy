@@ -3,7 +3,7 @@
 // 本入口复用 `ConfigEditorPane` Shell：仅承载 entry-specific 逻辑：
 //   - zustand store 订阅（load / apply）
 //   - handleApply 提交校验（mounts / ports / env —— entry-specific 提交语义）
-//   - header 操作（刷新 / 保存并重启）
+//   - header 操作（刷新 / 快速重建）
 //   - 警示（未保存修改）
 //
 // 布局/标题/Spin/Alert 位置由 Shell 统一。
@@ -40,7 +40,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerName]);
 
-  // ---------- 保存并重启 ----------
+  // ---------- 快速重建 ----------
 
   const handleApply = async () => {
     if (!edit) return;
@@ -78,7 +78,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
     }
     await apply(containerName);
     if (!useConfigStore.getState().error) {
-      message.success('配置已应用，容器已重启');
+      message.success('配置已应用，容器已快速重建');
     }
   };
 
@@ -122,11 +122,11 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
             刷新
           </Button>
           <Popconfirm
-            title="保存并重启容器"
-            description={`将提交并重建容器以应用新的挂载、网络、环境变量与用户配置，期间容器会短暂停止。${
+            title="快速重建容器"
+            description={`将提交并快速重建容器（普通 commit + 安全流程：保留旧容器、失败自动回滚）以应用新的挂载、网络、环境变量与用户配置，期间容器会短暂停止。${
               !(edit?.keep_id ?? true) ? '警告：用户一致性映射（keep-id）已关闭！' : ''
             }`}
-            okText="保存并重启"
+            okText="快速重建"
             cancelText="取消"
             okButtonProps={{ danger: true }}
             onConfirm={handleApply}
@@ -138,7 +138,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
               loading={applying}
               disabled={!edit || !dirty}
             >
-              保存并重启
+              快速重建
             </Button>
           </Popconfirm>
         </Space>
@@ -150,7 +150,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
               type="warning"
               showIcon
               message="有未保存的修改"
-              description="修改将在保存并重启容器后生效。"
+              description="修改将在快速重建容器后生效。"
             />
           )}
         </>

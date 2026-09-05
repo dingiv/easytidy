@@ -1,7 +1,7 @@
 // 环境变量面板：单一合并表（按来源分类型）+ 添加行。
 //
 // 类型（来源，按去重优先级从高到低）：
-// - 用户自定义：env 配置（可增删，随「保存并重启」生效）
+// - 用户自定义：env 配置（可增删，随「快速重建」生效）
 // - EasyTidy 注入：create-time 透传注入（EASYTIDY_USER_* / GUI-GPU）+
 //   容器内 server 运行时探测/修正（XAUTHORITY / XDG_DATA_DIRS 修正）——
 //   同一来源（EasyTidy），只读；运行时项带原因悬停提示
@@ -207,7 +207,7 @@ export function EnvPane({
         </Button>
       </div>
       <span className="section-hint">
-        用户自定义行可增删，随「保存并重启」生效；EasyTidy 注入（EASYTIDY_USER_*、GUI/NVIDIA GPU 透传，
+        用户自定义行可增删，随「快速重建」生效；EasyTidy 注入（EASYTIDY_USER_*、GUI/NVIDIA GPU 透传，
         及容器内 server 运行时探测/修正如 XAUTHORITY）、Podman 注入与镜像默认由引擎/镜像带入，只读。
       </span>
     </div>

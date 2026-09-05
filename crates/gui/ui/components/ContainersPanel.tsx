@@ -38,14 +38,16 @@ import type { EnvView } from '../types';
 import './ContainersPanel.css';
 
 /** 快照/重建统一下拉的 4 个动作（均不询问用户确认，点击即执行）。
- *  快照：podman commit 独立资产（未接管容器同样适用）——squash 单层（小体积）
- *  vs 普通 commit（保留分层，更快）。重建：按注册表配置（仅已接管）——安全
- *  （保留旧容器至新容器就绪、失败回滚）vs 快速（删旧重建、无回滚）。 */
+ *  「快速」= 用普通 commit 代替默认 squash（保留分层、更快）：
+ *  - 快照：squash 单层镜像（小体积）/ 快速快照：普通 commit 镜像（更快）
+ *    （均为独立资产，未接管容器同样适用）
+ *  - 重建：squash commit + 安全重建 / 快速重建：普通 commit + 安全重建
+ *    （按注册表配置，保留旧容器至新容器就绪、失败自动回滚；仅已接管） */
 const ACTIONS = [
   { key: 'snapshot', label: '快照', hint: 'squash 单层，体积小' },
   { key: 'snapshot-quick', label: '快速快照', hint: '普通 commit，保留分层，更快' },
-  { key: 'rebuild', label: '重建', hint: '安全：保留旧容器至新容器就绪，失败回滚' },
-  { key: 'rebuild-quick', label: '快速重建', hint: 'commit 数据后删旧重建，无回滚' },
+  { key: 'rebuild', label: '重建', hint: 'squash commit + 安全重建（失败回滚）' },
+  { key: 'rebuild-quick', label: '快速重建', hint: '普通 commit + 安全重建（失败回滚），更快' },
 ] as const;
 
 /** 下拉记忆：上次使用动作的 localStorage key（跨容器共享） */
