@@ -148,7 +148,7 @@ function ContainersPanelInner(
     }
   };
 
-  /** 打开容器窗口(Worker GUI) */
+  /** 打开容器控制台(Worker GUI) */
   const handleOpen = async (env: EnvView) => {
     try {
       await invoke('open_container_window', { name: env.name });
@@ -288,16 +288,16 @@ function ContainersPanelInner(
                         运行
                       </Button>
                     ) : null}
-                    {/* 打开/重建依赖 easytidy server 或注册配置，未接管容器不适用；
+                    {/* 控制台/重建依赖 easytidy server 或注册配置，未接管容器不适用；
                         快照仅 podman commit，不依赖注册配置，未接管容器同样可快照 */}
                     {managed && (
                       <Button
                         size="small"
                         icon={<ExportOutlined />}
                         onClick={() => handleOpen(env)}
-                        title="打开容器窗口(Worker GUI)"
+                        title="打开容器控制台(Worker GUI)"
                       >
-                        打开
+                        控制台
                       </Button>
                     )}
                     {/* 快照/重建统一下拉：hover 展开全部动作（记忆：上次使用置顶+标记），
