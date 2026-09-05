@@ -67,7 +67,13 @@ async fn main() -> anyhow::Result<()> {
         }))
         .await?;
     let resp = recv_json(&mut m1_stream).await?;
-    let sid = resp.payload["stream_id"].as_u64().unwrap() as u32;
+    if let Some(err) = &resp.err {
+        anyhow::bail!("pty.open failed: {} {}", err.code, err.message);
+    }
+    let sid = resp.payload["stream_id"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("pty.open 响应缺少 stream_id: {:?}", resp.payload))?
+        as u32;
     eprintln!("[MOCK-M1] pty.open sid={}", sid);
 
     let m1_frames = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));

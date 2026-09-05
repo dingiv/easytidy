@@ -392,7 +392,7 @@ pub(crate) async fn handle_apps_ps(msg: Message, state: &Arc<ServerState>) -> Re
                 ProcessStatus::Exited { .. } => "exited".to_string(),
             },
             exit_code: info.status.exit_code(),
-            stdio_len: info.stdio.lock().unwrap().len(),
+            stdio_len: info.stdio.lock().unwrap().len() as u64,
         })
         .collect();
     processes.sort_by_key(|p| p.started_at);

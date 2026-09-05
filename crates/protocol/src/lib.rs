@@ -1,13 +1,13 @@
-//! easytidy 线协议（socket 协议 v0）。
+//! easytidy 线协议（socket 协议 v2，见 [`PROTOCOL_VERSION`]）。
 //!
 //! 定义宿主侧（GUI / CLI）与容器内 server 之间的 wire format：
-//! 长度前缀分帧 + 1 字节判别符（`0x01` JSON 消息 / `0x02` 原始流数据），
+//! 4 字节大端长度前缀分帧 + 1 字节判别符（`0x01` JSON 消息 / `0x02` 原始流数据），
 //! 以及全部消息族（pty / fs / apps / passthrough / config / lifecycle）。
 //!
 //! 另含 root-channel 专用载荷（`rc` 模块）：`easytidy-dock` client↔daemon
 //! 进程与 GUI/CLI 客户端之间的 root 终端通道（同帧层、同握手）。
 //!
-//! 详见 docs/08-requirements.md「Socket 协议 v0」与实施计划。
+//! 详见 `docs/15-socket-protocol.md`。
 
 /// v2（2026-08-27 身份模型重构）：删除 `PtyOpen.as_root` /
 /// `PtyTerminalInfo.as_root`（root 终端改走宿主 root-channel，不经 server）。

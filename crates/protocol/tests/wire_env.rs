@@ -33,7 +33,7 @@ async fn call_server_env(sock: &str) -> ServerEnvResp {
         }))
         .await
         .unwrap();
-    let ack = read_json_frame(&mut framed).await.expect("hello ack");
+    let ack = read_json_frame(&mut framed).await;
     assert_eq!(ack.op, "hello");
 
     // server.env
@@ -47,16 +47,23 @@ async fn call_server_env(sock: &str) -> ServerEnvResp {
         }))
         .await
         .unwrap();
-    let resp = read_json_frame(&mut framed).await.expect("server.env resp");
+    let resp = read_json_frame(&mut framed).await;
     assert_eq!(resp.op, "server.env");
     serde_json::from_value(resp.payload).expect("parse ServerEnvResp")
 }
 
-async fn read_json_frame(framed: &mut Framed<UnixStream, FrameCodec>) -> Option<Message> {
+/// 读下一个 JSON 帧（跳过 Raw 帧）。流在拿到 JSON 帧前断开 → panic
+/// （测试里连接应正常，断流即测试前置失效）。
+async fn read_json_frame(framed: &mut Framed<UnixStream, FrameCodec>) -> Message {
     loop {
-        let f = framed.next().await.expect("read").expect("frame present");
-        if let Frame::Json(m) = f {
-            return Some(m);
+        let f = framed
+            .next()
+            .await
+            .expect("stream closed before JSON frame")
+            .expect("frame decode error");
+        match f {
+            Frame::Json(m) => return m,
+            Frame::Raw { .. } => continue, // Raw 帧（如 PTY 流）跳过，找 JSON
         }
     }
 }

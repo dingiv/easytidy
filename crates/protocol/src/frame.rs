@@ -1,20 +1,28 @@
 //! 帧定义与 codec（长度前缀分帧 + 判别符）。
 //!
 //! 帧格式：
-//! - 4 字节小端序长度（不包括长度字段本身）
+//! - 4 字节**大端（网络序）**长度（不包括长度字段本身）——`LengthDelimitedCodec`
+//!   默认大端，两端用同一 codec 故内部通信正常；抓包/第三方工具须按大端解析
 //! - 1 字节判别符（FRAME_JSON / FRAME_RAW）
-//! - N 字节载荷
+//! - N 字节载荷（≤ [`MAX_FRAME_LEN`]）
 //!
 //! JSON 帧载荷：JSON 文本（UTF-8）
 //! RAW 帧载荷：u32 大端序 stream_id + 原始字节
+//!
+//! 帧长上限 [`MAX_FRAME_LEN`]（64 MiB）：超过时 decode 报 `InvalidData`。
+//! 调大到 64 MiB 是因为 `FsRead` 一次性读整个文件并以 Base64 回传——8 MiB
+//! 默认上限下读 ~6MB 文件（Base64 后 >8MiB）会被静默拒绝。大文件读取宜分块
+//! （`offset`/`len`），此处仅放宽上限兜底。
 
 use bytes::{Buf, BufMut, BytesMut};
 use serde::{Deserialize, Serialize};
 use tokio_util::codec::{Decoder, Encoder, LengthDelimitedCodec};
 
+use crate::message::Message;
 use crate::{FRAME_JSON, FRAME_RAW};
-// 引用 message 模块的类型（避免循环依赖，在 message.rs 中定义）
-// 注意：这个引用放在模块末尾，避免循环依赖
+
+/// 单帧最大载荷（不含 4 字节长度前缀）。64 MiB。
+pub const MAX_FRAME_LEN: usize = 64 * 1024 * 1024;
 
 /// 协议帧
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,9 +33,6 @@ pub enum Frame {
     Raw { stream_id: u32, data: Vec<u8> },
 }
 
-// 引用 message 模块的类型（避免循环依赖，在 message.rs 中定义）
-use crate::message::Message;
-
 /// 帧编码器/解码器
 pub struct FrameCodec {
     length_delimited: LengthDelimitedCodec,
@@ -36,7 +41,10 @@ pub struct FrameCodec {
 impl FrameCodec {
     pub fn new() -> Self {
         Self {
-            length_delimited: LengthDelimitedCodec::new(),
+            // 显式放宽 max_frame_length（默认 8 MiB 会拒大 Base64 帧，见模块 doc）
+            length_delimited: LengthDelimitedCodec::builder()
+                .max_frame_length(MAX_FRAME_LEN)
+                .new_codec(),
         }
     }
 }
@@ -130,10 +138,14 @@ pub fn encode_frame(frame: Frame) -> BytesMut {
     dst
 }
 
-/// 便捷函数：从字节解码单帧（返回 None 表示数据不足）
-pub fn decode_frame(src: &mut BytesMut) -> Option<Frame> {
+/// 便捷函数：从字节解码单帧。
+///
+/// 返回 `Ok(None)` = 数据不足（再等几个字节）；`Ok(Some(frame))` = 解出一帧；
+/// `Err` = 协议违例（未知判别符 / 坏 JSON / raw 帧过短 / 超 [`MAX_FRAME_LEN`]）。
+/// 调用方须区分「再等」与「对端发了非法帧」——后者不应继续等。
+pub fn decode_frame(src: &mut BytesMut) -> Result<Option<Frame>, std::io::Error> {
     let mut codec = FrameCodec::new();
-    codec.decode(src).ok().flatten()
+    codec.decode(src)
 }
 
 #[cfg(test)]
@@ -154,7 +166,7 @@ mod tests {
 
         let encoded = encode_frame(frame.clone());
         let mut decoded_src = encoded.clone();
-        let decoded = decode_frame(&mut decoded_src).expect("decode failed");
+        let decoded = decode_frame(&mut decoded_src).unwrap().expect("decode failed");
 
         assert_eq!(frame, decoded);
     }
@@ -168,7 +180,7 @@ mod tests {
 
         let encoded = encode_frame(frame.clone());
         let mut decoded_src = encoded.clone();
-        let decoded = decode_frame(&mut decoded_src).expect("decode failed");
+        let decoded = decode_frame(&mut decoded_src).unwrap().expect("decode failed");
 
         assert_eq!(frame, decoded);
     }
@@ -182,7 +194,7 @@ mod tests {
 
         let encoded = encode_frame(frame.clone());
         let mut decoded_src = encoded.clone();
-        let decoded = decode_frame(&mut decoded_src).expect("decode failed");
+        let decoded = decode_frame(&mut decoded_src).unwrap().expect("decode failed");
 
         assert_eq!(frame, decoded);
     }
@@ -234,11 +246,30 @@ mod tests {
         encoded.extend(encode_frame(frame2.clone()));
 
         let mut buffer = encoded;
-        let decoded1 = decode_frame(&mut buffer).expect("decode frame1 failed");
-        let decoded2 = decode_frame(&mut buffer).expect("decode frame2 failed");
+        let decoded1 = decode_frame(&mut buffer).unwrap().expect("decode frame1 failed");
+        let decoded2 = decode_frame(&mut buffer).unwrap().expect("decode frame2 failed");
 
         assert_eq!(frame1, decoded1);
         assert_eq!(frame2, decoded2);
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_decode_frame_insufficient_vs_violation() {
+        use crate::message::{MsgKind, Message};
+        // 数据不足 → Ok(None)（不是 Err）
+        let mut partial = BytesMut::from(&[0u8, 0, 0, 10][..]); // 声称 10 字节但没给够
+        assert_eq!(decode_frame(&mut partial).unwrap(), None);
+        // 协议违例（未知判别符 0x99）→ Err
+        let mut src = encode_frame(Frame::Json(Message {
+            id: 1,
+            kind: MsgKind::Req,
+            op: "x".into(),
+            payload: serde_json::json!({}),
+            err: None,
+        }));
+        assert!(src.len() > 5); // 长度前缀 4 + 判别符 1 + 载荷 ≥ 1
+        src[4] = 0x99; // 篡改判别符字节（长度前缀 4 字节之后）
+        assert!(decode_frame(&mut src).is_err());
     }
 }

@@ -23,17 +23,20 @@ pub struct PtyOpen {
     pub cols: u16,
     /// 终端行数
     pub rows: u16,
-    /// 接线常驻终端（默认 false）：server 持有每容器一个常驻交互终端
-    /// （persistent 会话，不随连接断开清理）；true 时优先复用已有常驻
-    /// 终端（输出回放），无则新建并设为常驻。CLI 执行命令传 false。
+    /// 接线"常驻终端"（默认 false）——**与 [`PtyOpen::attach_stream`] 是两码事**：
+    /// 本字段是「是否使用 server 持有的每容器唯一常驻交互终端」的开关。
+    /// true = 复用已有常驻终端（无则新建并设为常驻，输出回放）；false =
+    /// 独立会话（CLI 执行命令传 false）。命名沿用历史；此处 "attach" 指
+    /// "接常驻终端"，**不是**"按 stream_id 重连"（后者是 `attach_stream`）。
     #[serde(default)]
     pub attach: bool,
     /// 多终端实例：true = 新建**独立持久会话**（server 持有，不随连接断开
     /// 清理，也不登记为身份默认终端；GUI 多开终端用，配合 pty.list 恢复）
     #[serde(default)]
     pub persistent: bool,
-    /// 附接到指定已存在会话（输出回放 + 订阅，返回其 stream_id；
-    /// GUI 重开窗口恢复多终端面板用；会话不存在时回退新建路径）
+    /// 按 **stream_id** 重连到指定已有会话（输出回放 + 订阅，返回其 stream_id；
+    /// GUI 重开窗口恢复多终端面板用；会话不存在时回退新建路径）。
+    /// ⚠️ 与 `attach`（常驻终端开关）无关：本字段是"重连某个具体会话"。
     #[serde(default)]
     pub attach_stream: Option<u32>,
 }
@@ -211,11 +214,8 @@ pub struct FsWrite {
     pub offset: Option<u64>,
 }
 
-/// 查询 server 服务信息（HTTP 静态托管端口等）
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ServerInfo;
-
-/// ServerInfo 响应
+/// ServerInfo 响应（`server.info`；请求侧无 payload——server 不解析请求体，
+/// 客户端发 `Null` 即可）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerInfoResp {
     /// HTTP 静态文件服务端口（0 = 未启用）
@@ -368,8 +368,8 @@ pub struct ManagedProcess {
     /// 退出码（running 时 None）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
-    /// 已捕获 stdio 字节数
-    pub stdio_len: usize,
+    /// 已捕获 stdio 字节数（u64 而非 usize——wire 类型须平台无关宽度）
+    pub stdio_len: u64,
 }
 
 /// 列出托管进程（apps.ps）
@@ -560,13 +560,6 @@ pub struct ChildExited {
     pub code: i32,
     /// 进程类型（entry, passthrough）
     pub kind: String,
-}
-
-/// Entry 启动事件
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct EntryStarted {
-    /// 进程 PID
-    pub pid: u32,
 }
 
 /// 关闭确认事件

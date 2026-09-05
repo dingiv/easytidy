@@ -24,7 +24,7 @@ use tracing::{debug, error, info};
 use tracing_subscriber::EnvFilter;
 
 use easytidy_core::configfile::ConfigFile;
-use easytidy_core::models::{ContainerConfig, NetworkMode};
+use easytidy_core::models::{ContainerConfig, MountConfig, NetworkMode};
 use easytidy_core::podman::Podman;
 use easytidy_protocol::ops::{PtyExited, PtyOpen, PtyOpenResp, PtyResize};
 use easytidy_protocol::{Frame, FrameCodec, Message, MsgKind, PROTOCOL_VERSION};
@@ -70,11 +70,9 @@ enum Commands {
         #[arg(short, long)]
         name: String,
 
-        /// home 目录（可选，默认映射 $HOME）
-        #[arg(long)]
-        home: Option<String>,
-
-        /// 挂载卷（格式：src:dst，可多次指定）
+        /// 挂载卷（格式：src:dst，可多次指定）。注意家目录不挂载宿主 $HOME
+        /// ——容器家目录 = 容器默认用户的 passwd home（容器层持久，2026-08-28
+        /// 定案），要挂其他路径用本 flag。
         #[arg(long)]
         volume: Vec<String>,
     },
@@ -285,6 +283,11 @@ async fn main() -> Result<()> {
             // 宿主侧操作，无需 podman 连接
             cmd_unexport(container, desktop_file)
         }
+        // flavor list 是纯本地操作（读 flavors 目录），无需 podman 连接——
+        // 放在 podman 连接前，避免 socket 没起时报"连接 podman 失败"
+        Commands::Flavor {
+            cmd: FlavorCmd::List,
+        } => cmd_flavor_list(),
         _ => {
             // 需要 podman 连接的命令
             let podman = match Podman::connect().await {
@@ -301,26 +304,31 @@ async fn main() -> Result<()> {
             match cli.command {
                 Commands::List => cmd_list(podman).await,
                 Commands::Pull { image } => cmd_pull(podman, image).await,
-                Commands::Create {
-                    image,
-                    name,
-                    home,
-                    volume,
-                } => cmd_create(podman, image, name, home, volume).await,
+                Commands::Create { image, name, volume } => {
+                    cmd_create(podman, image, name, volume, cli.config_dir.clone()).await
+                }
                 Commands::Start { container } => cmd_start(podman, container).await,
                 Commands::Stop { container } => cmd_stop(podman, container).await,
                 Commands::Restart { container } => cmd_restart(podman, container).await,
-                Commands::Rebuild { container } => cmd_rebuild(podman, container).await,
-                Commands::Rm { container, force } => cmd_rm(podman, container, force).await,
+                Commands::Rebuild { container } => {
+                    cmd_rebuild(podman, container, cli.config_dir.clone()).await
+                }
+                Commands::Rm { container, force } => {
+                    cmd_rm(podman, container, force, cli.config_dir.clone()).await
+                }
                 Commands::Inspect { container } => cmd_inspect(podman, container).await,
-                Commands::Boot { container, gui } => cmd_boot(container, gui).await,
+                Commands::Boot { container, gui } => cmd_boot(podman, container, gui).await,
                 Commands::Env { cmd } => match cmd {
                     EnvCmd::New {
                         name,
                         flavor,
                         image,
-                    } => cmd_env_new(podman, name, flavor, image).await,
-                    EnvCmd::Rm { name } => cmd_env_rm(podman, name).await,
+                    } => {
+                        cmd_env_new(podman, name, flavor, image, cli.config_dir.clone()).await
+                    }
+                    EnvCmd::Rm { name } => {
+                        cmd_env_rm(podman, name, cli.config_dir.clone()).await
+                    }
                     EnvCmd::Snapshot {
                         name,
                         snapshot,
@@ -331,12 +339,21 @@ async fn main() -> Result<()> {
                     EnvCmd::List => cmd_env_list(podman).await,
                 },
                 Commands::Flavor { cmd } => match cmd {
-                    FlavorCmd::List => cmd_flavor_list(),
+                    // List 已在 podman 连接前处理（纯本地，无需 podman）——此处不可达
+                    FlavorCmd::List => unreachable!("flavor list handled before podman connect"),
                     FlavorCmd::Apply { flavor, container } => {
-                        cmd_flavor_apply(podman, flavor, container).await
+                        cmd_flavor_apply(
+                            podman,
+                            flavor,
+                            container,
+                            cli.config_dir.clone(),
+                        )
+                        .await
                     }
                 },
-                _ => Ok(()), // 已经在上面处理
+                // 外层已处理的变体（Run/Open/DockLogs/Unexport/Flavor::List）——
+                // 运行时不可达（它们在 podman 连接前就返回了），仅满足 match 穷尽
+                _ => Ok(()),
             }
         }
     }
@@ -383,19 +400,36 @@ async fn cmd_create(
     podman: Podman,
     image: String,
     name: String,
-    _home: Option<String>,
-    _volume: Vec<String>,
+    volume: Vec<String>,
+    config_dir: Option<PathBuf>,
 ) -> Result<()> {
     info!("创建容器：{} from {}", name, image);
 
     // 容器内二进制（server + ctool；dev→musl 构建树，prod→安装位，统一走 core helper）
     let bins = easytidy_core::ContainerBins::resolve()?;
 
+    // --volume src:dst → MountConfig（用户显式挂载；家目录不在此列——见 flag doc）
+    let mut mounts = Vec::new();
+    for v in &volume {
+        let (host, container) = v
+            .split_once(':')
+            .with_context(|| format!("--volume 格式应为 src:dst（收到：{v}）"))?;
+        if host.is_empty() || container.is_empty() {
+            bail!("--volume 的 src/dst 不能为空（收到：{v}）");
+        }
+        mounts.push(MountConfig {
+            host_path: host.to_string(),
+            container_path: container.to_string(),
+            read_only: false,
+        });
+    }
+
     // 容器配置（网络默认 Host 模式，产品语义；distrobox 同款）
     let container_config = ContainerConfig {
         name: name.clone(),
         params: easytidy_core::models::ContainerParams {
             image: image.clone(),
+            mounts,
             ..Default::default()
         },
         silent_boot: false,
@@ -426,8 +460,8 @@ async fn cmd_create(
                 error!("容器内准备失败（忽略，重建可修复）：{e}");
             }
 
-            // 注册到配置文件
-            let config_file = ConfigFile::default_instance()?;
+            // 注册到配置文件（--config-dir 覆盖）
+            let config_file = config_file_for(&config_dir)?;
 
             if let Err(e) = config_file.register_container(container_config) {
                 error!("注册容器配置失败：{}", e);
@@ -447,11 +481,15 @@ async fn cmd_create(
 /// 从 configfile 读取容器配置 → `Podman::rebuild`（commit 当前层 → 保留旧容器 →
 /// 用新配置重建并启动 → 确认新容器就绪后才删旧；失败自动回滚，环境不中断）→
 /// 打印新 ID。改配置的途径：直接编辑 `~/.config/easytidy/config.toml` 或后续 GUI。
-async fn cmd_rebuild(podman: Podman, container: String) -> Result<()> {
+async fn cmd_rebuild(
+    podman: Podman,
+    container: String,
+    config_dir: Option<PathBuf>,
+) -> Result<()> {
     info!("重建容器：{}", container);
 
-    // 从 configfile 读取容器配置
-    let config_file = ConfigFile::default_instance()?;
+    // 从 configfile 读取容器配置（--config-dir 覆盖）
+    let config_file = config_file_for(&config_dir)?;
     let Some(config) = config_file.get_container(&container)? else {
         bail!("容器配置不存在：{container}（请先 create，或编辑 <容器配置目录>/{container}.toml 的 mounts/network）");
     };
@@ -486,8 +524,9 @@ async fn cmd_start(podman: Podman, container: String) -> Result<()> {
 ///
 /// - 容器未运行 → 启动（`Podman::start` 顺带触发 passthrough auto-start 拉起）
 /// - `gui=true`（非静默模式）→ 等待 server socket 就绪后拉起 Worker GUI
-async fn cmd_boot(container: String, gui: bool) -> Result<()> {
-    let podman = Podman::connect().await?;
+///
+/// 复用调用方已建的 podman 连接（dispatch 层），避免双连接。
+async fn cmd_boot(podman: Podman, container: String, gui: bool) -> Result<()> {
     ensure_running(&podman, &container).await?;
     info!("自启动：容器 {container} 已就绪");
 
@@ -564,14 +603,19 @@ async fn cmd_restart(podman: Podman, container: String) -> Result<()> {
 }
 
 /// 删除容器。
-async fn cmd_rm(podman: Podman, container: String, force: bool) -> Result<()> {
+async fn cmd_rm(
+    podman: Podman,
+    container: String,
+    force: bool,
+    config_dir: Option<PathBuf>,
+) -> Result<()> {
     info!("删除容器：{} (force: {})", container, force);
 
     podman.remove(&container, force).await?;
     println!("容器 {} 删除成功", container);
 
-    // 从配置文件注销
-    let config_file = ConfigFile::default_instance()?;
+    // 从配置文件注销（--config-dir 覆盖）
+    let config_file = config_file_for(&config_dir)?;
 
     if let Err(e) = config_file.unregister_container(&container) {
         error!("注销容器配置失败：{}", e);
@@ -586,9 +630,12 @@ async fn cmd_env_new(
     name: String,
     flavor: Option<String>,
     image: Option<String>,
+    config_dir: Option<PathBuf>,
 ) -> Result<()> {
     match flavor {
-        Some(f) => cmd_flavor_apply(podman, f, Some(name)).await,
+        Some(f) => {
+            cmd_flavor_apply(podman, f, Some(name), config_dir.clone()).await
+        }
         None => {
             let Some(image) = image else {
                 bail!("env new 需要 --flavor <f> 或 --image <img>");
@@ -606,7 +653,15 @@ async fn cmd_env_new(
                 .create_with_config(&name, &image, &bins, &config)
                 .await?;
             podman.start(&name).await?;
-            let config_file = ConfigFile::default_instance()?;
+            // 容器内准备（fontconfig / useradd / 家目录补齐）：best-effort，失败
+            // 不阻断（对齐 cmd_create / GUI env_new；core 契约见 podman/user.rs）
+            if let Err(e) = podman
+                .prepare_container(&name, &config.params)
+                .await
+            {
+                error!("容器内准备失败（忽略，重建可修复）：{e}");
+            }
+            let config_file = config_file_for(&config_dir)?;
             config_file.register_container(config)?;
             println!(
                 "新环境 {name} 已创建并运行（ID: {}）",
@@ -618,9 +673,9 @@ async fn cmd_env_new(
 }
 
 /// 删除环境：容器 + 配置 + 桌面图标 + socket 目录全清理（快照为资产保留并提示）。
-async fn cmd_env_rm(podman: Podman, name: String) -> Result<()> {
+async fn cmd_env_rm(podman: Podman, name: String, config_dir: Option<PathBuf>) -> Result<()> {
     podman.remove(&name, true).await?;
-    let config_file = ConfigFile::default_instance()?;
+    let config_file = config_file_for(&config_dir)?;
     if let Err(e) = config_file.unregister_container(&name) {
         error!("注销配置失败：{}", e);
     }
@@ -689,6 +744,7 @@ async fn cmd_flavor_apply(
     podman: Podman,
     flavor_name: String,
     container: Option<String>,
+    config_dir: Option<PathBuf>,
 ) -> Result<()> {
     let flavor = easytidy_core::flavor::Flavor::load(&flavor_name)?;
     let name = container.unwrap_or_else(|| flavor_name.clone());
@@ -708,6 +764,15 @@ async fn cmd_flavor_apply(
     println!("容器 {name} 创建成功（ID: {}）", &id[..12.min(id.len())]);
 
     podman.start(&name).await?;
+    // 容器内准备（fontconfig / useradd / 家目录补齐）：best-effort，失败不阻断。
+    // flavor 的 setup 命令（装包等）依赖 fontconfig/用户建号已就绪——对齐
+    // cmd_create / GUI（core 契约见 podman/user.rs）。
+    if let Err(e) = podman
+        .prepare_container(&name, &config.params)
+        .await
+    {
+        error!("容器内准备失败（忽略，setup 可能受影响）：{e}");
+    }
     println!(
         "容器 {name} 已启动，开始执行 setup（{} 条命令）...",
         flavor.setup.len()
@@ -731,8 +796,9 @@ async fn cmd_flavor_apply(
         }
     }
 
-    // 注册配置（entry 应用 + GUI 透传 env/mounts 落盘，供后续 run/passthrough 使用）
-    let config_file = ConfigFile::default_instance()?;
+    // 注册配置（entry 应用 + GUI 透传 env/mounts 落盘，供后续 run/passthrough 使用；
+    // --config-dir 覆盖）
+    let config_file = config_file_for(&config_dir)?;
     config_file.register_container(config)?;
 
     println!("✅ flavor {flavor_name} 已应用。启动容器内应用：");
@@ -812,6 +878,7 @@ async fn cmd_inspect(podman: Podman, container: String) -> Result<()> {
 /// 3. hello 握手
 /// 4. pty.open（获取 stream_id）
 /// 5. 循环：stdin → Raw 帧 → stdout，SIGWINCH → pty.resize，pty.exited → 退出
+///
 /// 确保容器运行中（未运行则 `podman.start`）。容器不存在 → Err。
 async fn ensure_running(podman: &Podman, name: &str) -> Result<()> {
     let containers = podman.list_containers().await?;
@@ -965,7 +1032,7 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
 
     let open_resp_msg = match open_resp_frame {
         Frame::Json(msg) => msg,
-        Frame::Raw { .. } => bail!("pty.open 响应为 JSON 帧"),
+        Frame::Raw { .. } => bail!("pty.open 响应应为 JSON 帧（收到 Raw 帧）"),
     };
     // 错误响应优先检查（payload=null，直接 from_value 会报解析错误掩盖真实原因）
     if let Some(err) = &open_resp_msg.err {
@@ -1033,13 +1100,18 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
     let running_clone = running.clone();
     let exit_code = tokio::spawn(async move {
         let mut exit_code: Option<i32> = None;
+        // 请求 id 单调计数器（握手=1 / pty.open=2 已用；resize 从 3 自增——
+        // id 是请求↔响应关联键，硬编码会撞）
+        let mut next_id: u64 = 3;
 
         loop {
             tokio::select! {
-                // 处理帧接收
-                Some(frame_result) = framed.next() => {
+                // 帧接收——**不带 `Some(...)` 模式**：否则 socket 关闭返回 None 时
+                // 该分支被 select! 禁用，stdin/signal 永不结束 → 永久挂起。区分
+                // Some(Ok)=正常帧 / Some(Err)=解码错 / None=对端关闭。
+                frame_result = framed.next() => {
                     match frame_result {
-                        Ok(frame) => {
+                        Some(Ok(frame)) => {
                             match frame {
                                 Frame::Raw { stream_id: sid, data } => {
                                     if sid == stream_id {
@@ -1073,8 +1145,18 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
                                 }
                             }
                         }
-                        Err(e) => {
+                        Some(Err(e)) => {
                             error!("帧解码错误：{}", e);
+                            break;
+                        }
+                        // 对端关闭（server 退出/崩溃）但未发 pty.exited——给非 0
+                        // 退出码，区别于正常退出码 0（原实现会永久挂起，只有
+                        // Ctrl+D 能退出且退出码还是 0）。
+                        None => {
+                            if exit_code.is_none() {
+                                info!("server 连接关闭（未收到 pty.exited）");
+                                exit_code = Some(1);
+                            }
                             break;
                         }
                     }
@@ -1094,8 +1176,10 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
                             rows: new_rows,
                         };
 
+                        let resize_id = next_id;
+                        next_id += 1;
                         let resize_msg = Message {
-                            id: 3,
+                            id: resize_id,
                             kind: MsgKind::Req,
                             op: "pty.resize".to_string(),
                             payload: serde_json::to_value(resize).unwrap(),
@@ -1129,8 +1213,18 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
     Ok(code)
 }
 
+/// 按 `--config-dir` 覆盖解析 ConfigFile（None = 默认实例）。
+/// global flag `--config-dir` 透传到所有读容器配置的命令（create/rebuild/rm/
+/// env new/rm/flavor apply），避免"只有 open 生效、其余静默忽略"。
+fn config_file_for(config_dir: &Option<PathBuf>) -> Result<ConfigFile> {
+    match config_dir {
+        Some(d) => Ok(ConfigFile::with_base_dir(d.clone())),
+        None => ConfigFile::default_instance().map_err(|e| anyhow::anyhow!("{e}")),
+    }
+}
+
 /// 读注册表中容器的 `silent_boot`；无配置/无条目/读失败 → false（Default 语义）。
-/// `config_dir` = 容器配置根目录覆盖（`--config`），缺省走 FileLoader `CONTAINERS`。
+/// `config_dir` = 容器配置根目录覆盖（`--config-dir`），缺省走 FileLoader `CONTAINERS`。
 fn silent_boot_for(config_dir: Option<&Path>, name: &str) -> bool {
     let cf = match config_dir {
         Some(d) => ConfigFile::with_base_dir(d.to_path_buf()),
@@ -1152,10 +1246,11 @@ fn silent_boot_for(config_dir: Option<&Path>, name: &str) -> bool {
 /// notify-send → stderr 兜底。快捷方式拉起的 CLI 带完整会话 PATH，
 /// `spawn` 成功即视为可用（NotFound 则试下一个）。
 fn show_error_in_terminal(message: &str) {
-    // 消息自生成 + 容器名，无用户输入，单引号安全
+    // 单引号串内转义：`'` → `'\''`（闭合单引号 + 转义单引号 + 重开单引号）
+    // ——`\'` 在单引号内是字面量（非法转义），会让脚本变成未闭合引号。
     let script = format!(
         "printf '%s\\n' '{}'; read -r _",
-        message.replace('\'', r"\'")
+        message.replace('\'', r"'\''")
     );
     let attempts: &[(&str, &[&str])] = &[
         ("xterm", &["-hold", "-e", "sh", "-c"]),
@@ -1286,6 +1381,17 @@ async fn cmd_run_root(podman: &Podman, container: &str, command: Vec<String>) ->
     cmd_run_root_attach(podman, container).await
 }
 
+/// 从 `client list` 的 stdout（RcListResp JSON `{"sessions":[{id,alive,spawn_pid},...]}`）
+/// 解析首个 alive session 的 id。无 alive session / 解析失败 → None（回退 `client new`）。
+fn parse_alive_session_id(stdout: &str) -> Option<u64> {
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let sessions = v.get("sessions")?.as_array()?;
+    sessions
+        .iter()
+        .find(|s| s.get("alive").and_then(|a| a.as_bool()) == Some(true))
+        .and_then(|s| s.get("id").and_then(|i| i.as_u64()))
+}
+
 /// 附接 root 终端（容器内 root 通道）。
 ///
 /// 新设计（2026-09-01）：root 通道（easytidy-dock daemon）跑在**容器内**。本函数：
@@ -1306,19 +1412,46 @@ async fn cmd_run_root_attach(podman: &Podman, container: &str) -> Result<i32> {
     let dock_bin = easytidy_core::podman::Podman::DOCK_TARGET;
     bootstrap_dock_daemon(podman, container, dock_bin).await?;
 
-    // Step 3: exec client new（TTY：client 进程有 tty → 其内部 SIGWINCH 触发 rc.resize）
-    let cmd = vec![
+    // Step 3: 幂等 attach（对齐 GUI：每容器一个 root bash）——先 `client list`
+    // 查 alive session，有则 attach 复用（daemon fan-out）、无则 new。原实现无条件
+    // `client new`，每次 detach 退出后重进都新增一个 root bash，无限累积。
+    let list_cmd = vec![
         dock_bin.to_string(),
         "client".to_string(),
-        "new".to_string(),
-        "--cols".to_string(),
-        cols.to_string(),
-        "--rows".to_string(),
-        rows.to_string(),
+        "list".to_string(),
     ];
-    let exec = podman.exec_pty(container, "0", cols, rows, cmd).await?;
+    let list_out = podman.exec_oneshot(container, "0", list_cmd).await?;
+    let client_cmd = match parse_alive_session_id(&list_out.stdout) {
+        Some(sid) => {
+            info!("复用已有 root session {sid}");
+            vec![
+                dock_bin.to_string(),
+                "client".to_string(),
+                "attach".to_string(),
+                "--session-id".to_string(),
+                sid.to_string(),
+                "--cols".to_string(),
+                cols.to_string(),
+                "--rows".to_string(),
+                rows.to_string(),
+            ]
+        }
+        None => {
+            info!("无存活 root session，新建");
+            vec![
+                dock_bin.to_string(),
+                "client".to_string(),
+                "new".to_string(),
+                "--cols".to_string(),
+                cols.to_string(),
+                "--rows".to_string(),
+                rows.to_string(),
+            ]
+        }
+    };
+    let exec = podman.exec_pty(container, "0", cols, rows, client_cmd).await?;
     let exec_id = exec.exec_id.clone();
-    let mut input = exec.input;
+    let input = exec.input;
     let mut output = exec.output;
 
     // CLI 终端进入 raw 模式（交互 shell）

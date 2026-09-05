@@ -25,7 +25,11 @@ pub struct RcAttach {
     pub cols: u16,
     /// 终端行数
     pub rows: u16,
-    /// 要 attach 的 session_id（daemon 内）
+    /// 要 attach 的 daemon session_id。
+    ///
+    /// **`0`（默认）= attach 首个存活会话**（当前产品每容器单 root session，
+    /// 语义即"那个"会话；`client new` / 早期 GUI attach 都靠此）。
+    /// 非 `0` = 指定该 session_id，不存在则回退/报错（按 daemon 实现）。
     #[serde(default)]
     pub session_id: u64,
 }
