@@ -145,7 +145,7 @@ fn collect_amd_devices(dri_dir: &Path, sys_drm_dir: &Path, kfd_path: &Path) -> V
 /// rootless keep-id 剥除宿主 render 补充组，`/dev/kfd`（0660 root:render）无
 /// 当前用户 ACL 时，容器进程被 DAC 拒（EACCES）——**设备透传是好的，但 ROCm
 /// 计算（rocminfo/rocm-smi/HIP）不可用**。有效解法为宿主侧放行：
-/// `sudo chmod 666 /dev/kfd`（docs/17 §6 解法 2a，多轮实测最有效）——宿主侧
+/// `sudo chmod 666 /dev/kfd`（docs/17 §3.1，多轮实测最有效）——宿主侧
 /// 配置由用户执行，easytidy 只预检提示、不代跑 root 命令。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KfdAccess {
@@ -157,7 +157,7 @@ pub enum KfdAccess {
     Blocked { mode: u32 },
 }
 
-/// 以「尝试读写打开」为 ground truth 判定 [`KfdAccess`]（与 docs/17 §7 的容器内
+/// 以「尝试读写打开」为 ground truth 判定 [`KfdAccess`]（与 docs/17 §5 的容器内
 /// 验证同法：宿主当前用户打不开 ⇔ keep-id 容器内进程同样被 DAC 拒）。
 pub fn kfd_access() -> KfdAccess {
     kfd_access_at(Path::new("/dev/kfd"))

@@ -403,14 +403,14 @@ impl Podman {
                 )));
             }
             // kfd 预检（docs/17）：设备透传 OK 但宿主 DAC 拒当前用户 → 容器内 ROCm
-            // 计算会被拒（EACCES）。只 warn 不阻断（renderD 渲染仍可用，docs/17 §7
+            // 计算会被拒（EACCES）。只 warn 不阻断（renderD 渲染仍可用，docs/17 §4
             // “无害”结论）；宿主侧放行（sudo chmod 666 /dev/kfd）由用户自己执行。
             if let crate::env::host::KfdAccess::Blocked { mode } = crate::env::host::kfd_access() {
                 tracing::warn!(
                     "容器 {name} AMD 透传：/dev/kfd 当前用户不可访问（宿主权限 {:o}）——\
                      容器内渲染节点（renderD*）可用，但 ROCm 计算（rocminfo/rocm-smi/HIP）\
                      会被 DAC 拒（EACCES）。宿主侧修复：`sudo chmod 666 /dev/kfd`\
-                     （持久化 udev rule 见 docs/17 §6 解法 2a）",
+                     （持久化 udev rule 见 docs/17 §3.1）",
                     mode & 0o777
                 );
             }
