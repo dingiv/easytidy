@@ -15,6 +15,8 @@ export function normalizeConfig(cfg: ContainerConfig): ContainerConfig {
       ports: cfg.network.ports.map((p) => ({ ...p })),
     },
     env: [...(cfg.env ?? [])],
+    uidmaps: (cfg.uidmaps ?? []).map((m) => ({ ...m })),
+    gidmaps: (cfg.gidmaps ?? []).map((m) => ({ ...m })),
   };
 }
 

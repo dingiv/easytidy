@@ -64,8 +64,8 @@ pub fn inject_gui_passthrough(params: &mut ContainerParams, env: &mut Vec<String
 /// - AMD → create 前调 [`detect_amd_gpu_devices`] 探测裸设备（AMD 无自动 CDI
 ///   工具链，`amd.com/gpu=all` 在真实宿主恒 unresolvable → 不采用 CDI）
 ///
-/// `security_opts`（label=disable / apparmor=unconfined）属独立关切，保留显式
-/// 声明（见 `ContainerParams::security_opts`），此处不隐式注入。
+/// `extra_opts`（label=disable / apparmor=unconfined）属独立关切，保留显式
+/// 声明（见 `ContainerParams::extra_opts`），此处不隐式注入。
 ///
 /// 与 [`inject_gui_passthrough`] 同款幂等去重：env key 已存在则跳过（模板作者
 /// 显式写的优先，引擎不覆盖）。
@@ -140,6 +140,44 @@ fn collect_amd_devices(dri_dir: &Path, sys_drm_dir: &Path, kfd_path: &Path) -> V
     out
 }
 
+/// ROCm 计算入口 `/dev/kfd` 的可访问性（create 期预检，见 docs/17）。
+///
+/// rootless keep-id 剥除宿主 render 补充组，`/dev/kfd`（0660 root:render）无
+/// 当前用户 ACL 时，容器进程被 DAC 拒（EACCES）——**设备透传是好的，但 ROCm
+/// 计算（rocminfo/rocm-smi/HIP）不可用**。有效解法为宿主侧放行：
+/// `sudo chmod 666 /dev/kfd`（docs/17 §6 解法 2a，多轮实测最有效）——宿主侧
+/// 配置由用户执行，easytidy 只预检提示、不代跑 root 命令。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KfdAccess {
+    /// /dev/kfd 不存在（宿主无 amdgpu compute）
+    Absent,
+    /// 当前用户可读写打开（0666 / owner / group / ACL 放行）
+    Open,
+    /// 存在但当前用户打不开（DAC 拒）——宿主权限位（如 0o660）
+    Blocked { mode: u32 },
+}
+
+/// 以「尝试读写打开」为 ground truth 判定 [`KfdAccess`]（与 docs/17 §7 的容器内
+/// 验证同法：宿主当前用户打不开 ⇔ keep-id 容器内进程同样被 DAC 拒）。
+pub fn kfd_access() -> KfdAccess {
+    kfd_access_at(Path::new("/dev/kfd"))
+}
+
+/// [`kfd_access`] 的纯函数实现（路径注入以便单测）。
+fn kfd_access_at(path: &Path) -> KfdAccess {
+    use std::os::unix::fs::PermissionsExt;
+    let meta = match path.metadata() {
+        Ok(m) => m,
+        Err(_) => return KfdAccess::Absent,
+    };
+    match std::fs::OpenOptions::new().read(true).write(true).open(path) {
+        Ok(_) => KfdAccess::Open,
+        Err(_) => KfdAccess::Blocked {
+            mode: meta.permissions().mode(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +239,37 @@ mod tests {
         // dri 目录缺失 → 空（不 panic）
         let missing = tmp.join("no-such-dev-dri");
         assert!(collect_amd_devices(&missing, &sys, &kfd).is_empty());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_kfd_access_absent_open_blocked() {
+        let tmp = std::env::temp_dir().join(format!("easytidy-kfd-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // Absent：路径不存在
+        assert_eq!(kfd_access_at(&tmp.join("no-such")), KfdAccess::Absent);
+
+        // Open：普通文件（当前用户 owner rw）
+        let open_file = tmp.join("kfd-open");
+        std::fs::write(&open_file, "").unwrap();
+        assert_eq!(kfd_access_at(&open_file), KfdAccess::Open);
+
+        // Blocked：0000 模式——root 有 CAP_DAC_OVERRIDE 会照常打开，root 下跳过
+        if unsafe { libc::getuid() } != 0 {
+            let blocked_file = tmp.join("kfd-blocked");
+            std::fs::write(&blocked_file, "").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&blocked_file, std::fs::Permissions::from_mode(0o000)).unwrap();
+            match kfd_access_at(&blocked_file) {
+                KfdAccess::Blocked { mode } => {
+                    assert_eq!(mode & 0o777, 0o000, "0000 模式（非 root）应打不开")
+                }
+                other => panic!("expect Blocked, got {other:?}"),
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

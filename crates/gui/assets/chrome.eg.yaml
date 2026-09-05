@@ -25,7 +25,7 @@ user_home: true
 
 # GPU 透传（NVIDIA Container Toolkit）：勾选后注入 nvidia.com/gpu=all CDI + NVIDIA_* env
 gpu_nvidia: true
-security_opts:
+extra_opts:
   - label=disable
   - apparmor=unconfined
 

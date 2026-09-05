@@ -166,7 +166,7 @@ mod tests {
         assert!(cfg.params.gpu_nvidia);
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
-        assert!(cfg.params.security_opts.is_empty(), "gpu 不应隐式加 security_opts");
+        assert!(cfg.params.extra_opts.is_empty(), "gpu 不应隐式加 extra_opts");
 
         // gpu_amd: true → params.gpu_amd，无 NVIDIA_* env
         let json_a = r#"{

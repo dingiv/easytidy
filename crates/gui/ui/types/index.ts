@@ -102,6 +102,18 @@ export interface MountConfig {
   read_only: boolean;
 }
 
+/// UID/GID 重映射条目（对应 podman `--uidmap container:host:length` /
+/// `--gidmap`）。显式映射与 `keep_id` **互斥**——非空时覆盖 keep-id，
+/// 由显式映射精确决定容器 uid/gid 落位。
+export interface IdMapping {
+  /// 容器内起始 UID/GID
+  container_id: number;
+  /// 宿主对应起始 UID/GID
+  host_id: number;
+  /// 映射长度（连续区间个数）
+  length: number;
+}
+
 /// Network mode: host networking, or bridge with port mappings
 export type NetworkMode = 'host' | 'mapped';
 
@@ -129,8 +141,13 @@ export interface ContainerConfig {
   network: ContainerNetworkConfig;
   /// 容器环境变量（"KEY=VALUE" 列表）
   env: string[];
-  /// 用户一致性映射开关（keep-id：宿主 uid ↔ 容器同 uid 锁死 1:1）
+  /// 用户一致性映射开关（keep-id：宿主 uid ↔ 容器同 uid 锁死 1:1）。
+  /// 与 `uidmaps`/`gidmaps` 互斥——显式映射非空时此开关失效。
   keep_id: boolean;
+  /// 显式 UID 重映射列表（与 keep_id 互斥；非空时覆盖 keep-id）
+  uidmaps?: IdMapping[];
+  /// 显式 GID 重映射列表（与 keep_id 互斥；非空时覆盖 keep-id）
+  gidmaps?: IdMapping[];
   /// 容器默认用户 uid（null = 宿主登录用户 uid）
   user_uid?: number | null;
   /// 容器默认用户 gid（null = 宿主登录用户 gid）

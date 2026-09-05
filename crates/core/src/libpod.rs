@@ -288,8 +288,14 @@ pub fn keep_id_create_body(
     // 容器默认用户（PID 1 与 podman exec 的默认身份）；None = "0:0"（root）。
     // 新模型恒传 "<uid>:<gid>"——server 直接以该用户运行（无 root、无 su）
     default_user: Option<&str>,
-    // keep-id 用户命名空间；false = 无 userns（容器内 uid 落宿主 subuid 段）
+    // keep-id 用户命名空间；false = 无 userns（容器内 uid 落宿主 subuid 段）。
+    // 与 uidmaps/gidmaps 互斥：显式映射非空时此值被忽略（不写 keep-id userns）。
     keep_id: bool,
+    // 显式 UID/GID 重映射（podman `--uidmap`/`--gidmap`，形状
+    // `{container_id, host_id, length}`）。非空时覆盖 keep-id，写进 libpod 顶层
+    // `uidmappings`/`gidmappings`（落 OCI `linux.uidMappings`/`gidMappings`）。
+    uidmaps: Vec<crate::models::IdMapping>,
+    gidmaps: Vec<crate::models::IdMapping>,
     // 设备直通：裸设备 "host:container[:perms]" 列表（SpecGenerator devices 的 Path）
     devices: Vec<String>,
     // GPU 透传：
@@ -301,9 +307,9 @@ pub fn keep_id_create_body(
     amd_gpu_devices: Vec<String>,
     // PID 命名空间模式（"host" 等）；None = private。非 private 时禁用 init
     pid: Option<&str>,
-    // 安全选项（"label=disable" / "apparmor=unconfined" / "seccomp=..." 原始串）；
+    // 额外选项（"label=disable" / "apparmor=unconfined" / "seccomp=..." 原始串）；
     // 解析进 SpecGenerator 对应字段
-    security_opts: Vec<String>,
+    extra_opts: Vec<String>,
 ) -> Value {
     // libpod SpecGenerator 的 env 是 map[string]string（Docker compat 才是数组）
     let mut env_map = serde_json::Map::new();
@@ -396,7 +402,7 @@ pub fn keep_id_create_body(
     let mut apparmor_profile: Option<String> = None;
     let mut selinux_opts: Vec<String> = Vec::new();
     let mut seccomp_profile_path: Option<String> = None;
-    for opt in &security_opts {
+    for opt in &extra_opts {
         let (key, val) = match opt.split_once('=') {
             Some(kv) => kv,
             None => continue,
@@ -438,13 +444,32 @@ pub fn keep_id_create_body(
     // 各类带 ENTRYPOINT 的镜像）会包住我们的 command → server 启动失败（参数被消费）。
     // 显式置空数组 → 镜像 ENTRYPOINT 不生效，`command` 即为 PID 1 的字面命令。
     body["entrypoint"] = json!([]);
-    // libpod 专属：keep-id 用户命名空间。注意：字段放**顶层** userns
-    // （实测 namespaces.userns 被忽略）。
+    // 用户命名空间：显式映射（uidmaps/gidmaps）与 keep-id **互斥**（podman 实测
+    // `--uidmap` 与 `--userns` 不能同开）。显式映射非空 → 写 libpod 顶层
+    // `uidmappings`/`gidmappings`（落 OCI `linux.uidMappings`），**不**写 keep-id
+    // userns；否则 keep_id 开 → keep-id；再否则无 userns（默认 rootless）。
     // 真实映射语义（实测文件属主，2026-08-07；/proc/self/uid_map 字面
-    // 不代表最终属主）：容器 uid 1000（node）= 宿主登录用户（1000）；
+    // 不代表最终属主）：keep-id 下容器 uid 1000（node）= 宿主登录用户（1000）；
     // 容器 uid 0（root）= 宿主 subuid 100000（容器文件系统属主，
-    // **不是宿主默认用户**——root 写宿主 home 属主呈现 100000）
-    if keep_id {
+    // **不是宿主默认用户**——root 写宿主 home 属主呈现 100000）。
+    if !uidmaps.is_empty() || !gidmaps.is_empty() {
+        // libpod create body 顶层字段（实测：`userns.uidmaps` 无效、顶层 `uidmappings`
+        // 生效并落 OCI linux.uidMappings）；形状须为 `{containerID, hostID, size}`
+        // （PascalCase + size，非 container_id/length）。
+        let to_api = |ms: &[crate::models::IdMapping]| -> Vec<Value> {
+            ms.iter()
+                .map(|m| {
+                    json!({ "containerID": m.container_id, "hostID": m.host_id, "size": m.length })
+                })
+                .collect()
+        };
+        if !uidmaps.is_empty() {
+            body["uidmappings"] = json!(to_api(&uidmaps));
+        }
+        if !gidmaps.is_empty() {
+            body["gidmappings"] = json!(to_api(&gidmaps));
+        }
+    } else if keep_id {
         body["userns"] = json!({ "nsmode": "keep-id" });
     }
     // 设备直通（裸设备 + GPU CDI 引用）；空则省略

@@ -402,6 +402,18 @@ impl Podman {
                      无 /dev/kfd"
                 )));
             }
+            // kfd 预检（docs/17）：设备透传 OK 但宿主 DAC 拒当前用户 → 容器内 ROCm
+            // 计算会被拒（EACCES）。只 warn 不阻断（renderD 渲染仍可用，docs/17 §7
+            // “无害”结论）；宿主侧放行（sudo chmod 666 /dev/kfd）由用户自己执行。
+            if let crate::env::host::KfdAccess::Blocked { mode } = crate::env::host::kfd_access() {
+                tracing::warn!(
+                    "容器 {name} AMD 透传：/dev/kfd 当前用户不可访问（宿主权限 {:o}）——\
+                     容器内渲染节点（renderD*）可用，但 ROCm 计算（rocminfo/rocm-smi/HIP）\
+                     会被 DAC 拒（EACCES）。宿主侧修复：`sudo chmod 666 /dev/kfd`\
+                     （持久化 udev rule 见 docs/17 §6 解法 2a）",
+                    mode & 0o777
+                );
+            }
             devs
         } else {
             Vec::new()
@@ -433,11 +445,13 @@ impl Podman {
                 None,
                 Some(user_spec.as_str()),
                 true,
+                config.params.uidmaps.clone(),
+                config.params.gidmaps.clone(),
                 config.params.devices.clone(),
                 config.params.gpu_nvidia,
                 amd_gpu_devices,
                 config.params.pid.as_deref(),
-                config.params.security_opts.clone(),
+                config.params.extra_opts.clone(),
             );
             let id = libpod.create_container(name, body).await?;
             tracing::info!("容器 {} 创建成功（ID: {}，keep-id）", name, id);
@@ -466,11 +480,13 @@ impl Podman {
             None,
             Some(user_spec.as_str()),
             false,
+            config.params.uidmaps.clone(),
+            config.params.gidmaps.clone(),
             config.params.devices.clone(),
             config.params.gpu_nvidia,
             amd_gpu_devices,
             config.params.pid.as_deref(),
-            config.params.security_opts.clone(),
+            config.params.extra_opts.clone(),
         );
         let id = libpod.create_container(name, body).await?;
         tracing::info!("容器 {} 创建成功（ID: {}，libpod）", name, id);
@@ -1592,6 +1608,8 @@ mod tests {
             Some("1000:1000"),
             true,
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
             false,
             Vec::new(),
             None,
@@ -1614,6 +1632,8 @@ mod tests {
             None,
             None,
             false,
+            Vec::new(),
+            Vec::new(),
             Vec::new(),
             false,
             Vec::new(),
@@ -1650,6 +1670,8 @@ mod tests {
             Some("1000:1000"),
             false,
             Vec::new(),
+            Vec::new(),
+            Vec::new(),
             false,
             Vec::new(),
             None,
@@ -1682,6 +1704,8 @@ mod tests {
                 None,
                 Some("1000:1000"),
                 true,
+                Vec::new(),
+                Vec::new(),
                 devices,
                 gpu_nvidia,
                 amd_devices,
@@ -1765,7 +1789,7 @@ mod tests {
         assert!(body.get("pidns").is_none());
         assert_eq!(body["init"], true);
 
-        // security_opts 解析：label → selinux_opts，apparmor → apparmor_profile，
+        // extra_opts 解析：label → selinux_opts，apparmor → apparmor_profile，
         // seccomp → seccomp_profile_path（与 podman CLI --security-opt 映射一致）
         let body = make(
             Vec::new(),
@@ -1782,6 +1806,49 @@ mod tests {
         let body = make(Vec::new(), false, Vec::new(), None, to_vec(&["mask=/foo", "nonsense"]));
         assert!(body.get("apparmor_profile").is_none());
         assert!(body.get("selinux_opts").is_none());
+    }
+
+    #[test]
+    fn test_libpod_body_uidmaps_keepid_mutual_exclusion() {
+        // 显式 uid/gid 映射与 keep-id 互斥（podman 实测 --uidmap 与 --userns 不能同开）：
+        // 映射非空 → 写 libpod 顶层 uidmappings/gidmappings（API 形状
+        // {containerID, hostID, size}），**不**写 keep-id userns，即便 keep_id=true。
+        use crate::models::IdMapping;
+        let m = IdMapping { container_id: 0, host_id: 1000, length: 1 };
+        let base = |keep_id: bool, uidmaps: Vec<IdMapping>, gidmaps: Vec<IdMapping>| {
+            crate::libpod::keep_id_create_body(
+                "c1", "alpine:latest", vec!["/bin/sh".into()], Vec::new(),
+                std::collections::HashMap::new(), Vec::new(), None, None, None, None,
+                Some("1000:1000"),
+                keep_id,
+                uidmaps,
+                gidmaps,
+                Vec::new(),  // devices
+                false,       // gpu_nvidia
+                Vec::new(),  // amd
+                None,        // pid
+                Vec::new(),  // extra_opts
+            )
+        };
+
+        // 1) 显式映射非空 + keep_id=true → uidmappings 生效且无 userns（映射赢）
+        let body = base(true, vec![m, m], vec![m]);
+        assert_eq!(body["uidmappings"][0]["containerID"], 0);
+        assert_eq!(body["uidmappings"][0]["hostID"], 1000);
+        assert_eq!(body["uidmappings"][0]["size"], 1);
+        assert_eq!(body["gidmappings"][0]["hostID"], 1000);
+        assert!(body.get("userns").is_none(), "显式映射非空时不应写 keep-id userns");
+
+        // 2) 映射空 + keep_id=true → keep-id userns，无 uidmappings
+        let body = base(true, Vec::new(), Vec::new());
+        assert_eq!(body["userns"]["nsmode"], "keep-id");
+        assert!(body.get("uidmappings").is_none());
+        assert!(body.get("gidmappings").is_none());
+
+        // 3) 映射空 + keep_id=false → 无 userns 无 uidmappings（默认 rootless 映射）
+        let body = base(false, Vec::new(), Vec::new());
+        assert!(body.get("userns").is_none());
+        assert!(body.get("uidmappings").is_none());
     }
 
     /// 真机端到端：探测镜像 /etc/passwd → 容器侧 `${HOME}` 展开为镜像默认用户

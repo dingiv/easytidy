@@ -58,6 +58,8 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   network: { mode: 'host', ports: [] },
   env: [],
   keep_id: true,
+  uidmaps: [],
+  gidmaps: [],
   user_uid: null,
   user_gid: null,
   user_name: null,
@@ -338,10 +340,14 @@ export function ContainerConfigEditor({
         </h3>
         <UserPane
           keepId={value.keep_id}
+          uidmaps={value.uidmaps ?? []}
+          gidmaps={value.gidmaps ?? []}
           userUid={value.user_uid ?? null}
           userGid={value.user_gid ?? null}
           userName={value.user_name ?? null}
           onKeepIdChange={(keep_id) => update({ keep_id })}
+          onUidmapsChange={(uidmaps) => update({ uidmaps })}
+          onGidmapsChange={(gidmaps) => update({ gidmaps })}
           onUserUidChange={(user_uid) => update({ user_uid })}
           onUserGidChange={(user_gid) => update({ user_gid })}
           onUserNameChange={(user_name) => update({ user_name })}

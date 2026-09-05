@@ -1,24 +1,43 @@
-// 用户身份面板：keep-id 开关 + uid/gid 映射 + 容器内用户名（可选）。
+// 用户身份面板：keep-id 开关 + 显式 UID/GID 重映射 + uid/gid + 容器内用户名。
 //
 // 新身份模型（协议 v2，容器以配置 uid/gid 直接运行，无 root 启动）：
 // - **keep-id 开**：宿主登录 uid ↔ 容器同 uid 锁死 1:1（podman userns keep-id）；
 //   此时 user_uid 应等于宿主 uid（不等 → warning，不阻断）
-// - **keep-id 关**：用户显式配置 uid/gid 映射（rootless 下宿主经 /etc/subuid
-//   映射；容器内 uid 0 = 宿主 subuid 100000）
+// - **显式 uid/gid 映射**（uidmaps/gidmaps 非空）：podman `--uidmap`/`--gidmap`，
+//   精确决定容器 uid/gid 落位。与 keep-id **互斥**（podman 实测 `--uidmap` 与
+//   `--userns=keep-id` 不能同开）——映射非空时 keep-id 开关被忽略。
 // - **user_name 有值**：首次创建经宿主 root exec useradd 建号（/home/<name>）；
 //   无值 = 跟随容器默认用户（镜像同 uid 的 passwd 条目，whoami 显示其名字；
 //   无条目则显示 uid 数字），家目录 = 该用户 passwd home（容器层持久）
 // uid/gid 留空 = 宿主登录用户值。keep-id 语义实证见 docs/12。
 
-import { Alert, Input, InputNumber, Space, Switch, Table, Typography } from 'antd';
-import type { ContainerConfigView, HostUser } from '../../types';
+import { useState } from 'react';
+import {
+  App as AntApp,
+  Alert,
+  Button,
+  Empty,
+  Input,
+  InputNumber,
+  Space,
+  Switch,
+  Table,
+  Tooltip,
+  Typography,
+} from 'antd';
+import { DeleteOutlined, PlusOutlined } from '@ant-design/icons';
+import type { ContainerConfigView, HostUser, IdMapping } from '../../types';
 
 interface UserPaneProps {
   keepId: boolean;
+  uidmaps: IdMapping[];
+  gidmaps: IdMapping[];
   userUid: number | null;
   userGid: number | null;
   userName: string | null;
   onKeepIdChange(v: boolean): void;
+  onUidmapsChange(v: IdMapping[]): void;
+  onGidmapsChange(v: IdMapping[]): void;
   onUserUidChange(v: number | null): void;
   onUserGidChange(v: number | null): void;
   onUserNameChange(v: string | null): void;
@@ -33,11 +52,103 @@ interface UidRow {
   note: string;
 }
 
+/** 单条 IdMapping 列表编辑器（表格 + 添加行）。UID / GID 复用同一组件。 */
+function IdMapEditor({
+  title,
+  maps,
+  onAdd,
+  onRemove,
+}: {
+  title: string;
+  maps: IdMapping[];
+  onAdd(m: IdMapping): void;
+  onRemove(idx: number): void;
+}) {
+  const { message } = AntApp.useApp();
+  const [draft, setDraft] = useState<IdMapping>({ container_id: 0, host_id: 0, length: 1 });
+
+  const add = () => {
+    if (draft.length <= 0) {
+      message.error('长度需 ≥ 1');
+      return;
+    }
+    onAdd(draft);
+    setDraft({ container_id: 0, host_id: 0, length: 1 });
+  };
+
+  return (
+    <div className="config-subsection">
+      <Typography.Text strong>{title}</Typography.Text>
+      <Table
+        size="small"
+        rowKey={(_rec, i) => `${title}-${i}`}
+        columns={[
+          { title: '容器起始', dataIndex: 'container_id', key: 'container_id', width: 110 },
+          { title: '宿主起始', dataIndex: 'host_id', key: 'host_id', width: 110 },
+          { title: '长度', dataIndex: 'length', key: 'length', width: 90 },
+          {
+            title: '操作',
+            key: 'actions',
+            width: 60,
+            render: (_: unknown, _rec: IdMapping, i: number) => (
+              <Button
+                type="text"
+                danger
+                size="small"
+                icon={<DeleteOutlined />}
+                onClick={() => onRemove(i)}
+              />
+            ),
+          },
+        ]}
+        dataSource={maps}
+        pagination={false}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="未配置" /> }}
+      />
+      <div className="add-row">
+        <Space size="small">
+          <InputNumber
+            min={0}
+            addonBefore="容器"
+            value={draft.container_id}
+            onChange={(v) => setDraft((d) => ({ ...d, container_id: v ?? 0 }))}
+            style={{ width: 130 }}
+          />
+          <InputNumber
+            min={0}
+            addonBefore="宿主"
+            value={draft.host_id}
+            onChange={(v) => setDraft((d) => ({ ...d, host_id: v ?? 0 }))}
+            style={{ width: 130 }}
+          />
+          <InputNumber
+            min={1}
+            addonBefore="长度"
+            value={draft.length}
+            onChange={(v) => setDraft((d) => ({ ...d, length: v ?? 1 }))}
+            style={{ width: 120 }}
+          />
+          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={add}>
+            添加
+          </Button>
+        </Space>
+      </div>
+      <span className="section-hint">
+        每行 = 一个连续区间：容器 [容器起始, +长度) ↔ 宿主 [宿主起始, +长度)。多行拼成完整映射。
+      </span>
+    </div>
+  );
+}
+
 export function UserPane({
-  keepId, userUid, userGid, userName,
-  onKeepIdChange, onUserUidChange, onUserGidChange, onUserNameChange,
+  keepId, uidmaps, gidmaps, userUid, userGid, userName,
+  onKeepIdChange, onUidmapsChange, onGidmapsChange,
+  onUserUidChange, onUserGidChange, onUserNameChange,
   hostUser, effective,
 }: UserPaneProps) {
+  /** 显式映射是否启用（任一非空）——与 keep-id 互斥 */
+  const hasExplicit = uidmaps.length > 0 || gidmaps.length > 0;
+
   /** uid 映射语义对照表数据（keep-id 语义见 docs/12 实证） */
   const uidMapRows = (): UidRow[] => {
     const hu = hostUser;
@@ -95,17 +206,49 @@ export function UserPane({
       <div className="config-field">
         <label>用户一致性映射（keep-id）</label>
         <Space>
-          <Switch
-            checked={keepId}
-            onChange={onKeepIdChange}
-            checkedChildren="开"
-            unCheckedChildren="关"
-          />
+          <Tooltip
+            title={
+              hasExplicit
+                ? '已配置显式 UID/GID 映射——podman 实测 `--uidmap` 与 `--userns=keep-id` 互斥，keep-id 此时被忽略（由显式映射决定 uid/gid 落位）'
+                : undefined
+            }
+          >
+            <Switch
+              checked={keepId}
+              disabled={hasExplicit}
+              onChange={onKeepIdChange}
+              checkedChildren="开"
+              unCheckedChildren="关"
+            />
+          </Tooltip>
           <Typography.Text type="secondary">
             宿主 uid ↔ 容器同 uid 锁死 1:1（GUI 容器请保持开启）
           </Typography.Text>
         </Space>
       </div>
+
+      {hasExplicit && (
+        <Alert
+          type="warning"
+          showIcon
+          message="已配置显式 UID/GID 映射"
+          description="podman 实测 `--uidmap`/`--gidmap` 与 `--userns=keep-id` 互斥：映射非空时 keep-id 开关被忽略，容器 uid/gid 落位完全由下方显式映射决定。清空全部映射行可恢复 keep-id。"
+          className="mode-hint"
+        />
+      )}
+
+      <IdMapEditor
+        title="显式 UID 重映射"
+        maps={uidmaps}
+        onAdd={(m) => onUidmapsChange([...uidmaps, m])}
+        onRemove={(idx) => onUidmapsChange(uidmaps.filter((_, i) => i !== idx))}
+      />
+      <IdMapEditor
+        title="显式 GID 重映射"
+        maps={gidmaps}
+        onAdd={(m) => onGidmapsChange([...gidmaps, m])}
+        onRemove={(idx) => onGidmapsChange(gidmaps.filter((_, i) => i !== idx))}
+      />
 
       <div className="config-field">
         <label>容器默认用户 uid</label>
@@ -163,7 +306,7 @@ export function UserPane({
           className="mode-hint"
         />
       )}
-      {!keepId && (
+      {!keepId && !hasExplicit && (
         <Alert
           type="warning"
           showIcon
@@ -173,25 +316,27 @@ export function UserPane({
         />
       )}
 
-      <div className="config-subsection">
-        <Typography.Text strong>uid 映射关系</Typography.Text>
-        <Table
-          size="small"
-          rowKey={(r) => r.key}
-          dataSource={uidMapRows()}
-          pagination={false}
-          columns={[
-            { title: '容器内身份', dataIndex: 'container', key: 'container' },
-            { title: '宿主身份', dataIndex: 'host', key: 'host' },
-            { title: '能力', dataIndex: 'note', key: 'note' },
-          ]}
-        />
-        <span className="section-hint">
-          {effective?.userns_mode
-            ? `podman 实际 userns 模式：${effective.userns_mode}（keep-id 语义见 docs/12；字面 uid_map 不代表实际属主）。`
-            : '容器未创建，以上为按当前配置的预期映射（keep-id 语义见 docs/12）。'}
-        </span>
-      </div>
+      {!hasExplicit && (
+        <div className="config-subsection">
+          <Typography.Text strong>uid 映射关系</Typography.Text>
+          <Table
+            size="small"
+            rowKey={(r) => r.key}
+            dataSource={uidMapRows()}
+            pagination={false}
+            columns={[
+              { title: '容器内身份', dataIndex: 'container', key: 'container' },
+              { title: '宿主身份', dataIndex: 'host', key: 'host' },
+              { title: '能力', dataIndex: 'note', key: 'note' },
+            ]}
+          />
+          <span className="section-hint">
+            {effective?.userns_mode
+              ? `podman 实际 userns 模式：${effective.userns_mode}（keep-id 语义见 docs/12；字面 uid_map 不代表实际属主）。`
+              : '容器未创建，以上为按当前配置的预期映射（keep-id 语义见 docs/12）。'}
+          </span>
+        </div>
+      )}
 
       <div className="config-subsection">
         <Typography.Text strong>当前生效（只读）</Typography.Text>

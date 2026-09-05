@@ -46,6 +46,21 @@ pub struct MountConfig {
     pub read_only: bool,
 }
 
+/// UID/GID 重映射条目（对应 podman `--uidmap container:host:length` /
+/// OCI `linux.uidMappings` 的 `{containerID, hostID, size}`）。
+///
+/// 显式映射与 `keep_id` **互斥**（podman 实测 `--uidmap` 与 `--userns` 不能同开）：
+/// `uidmaps`/`gidmaps` 非空时 keep-id 失效，由显式映射完全决定 uid/gid 落位。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdMapping {
+    /// 容器内起始 UID/GID
+    pub container_id: u32,
+    /// 宿主对应起始 UID/GID
+    pub host_id: u32,
+    /// 映射长度（连续区间个数）
+    pub length: u32,
+}
+
 /// 端口映射。
 ///
 /// `protocol` 默认 "tcp"（也支持 "udp" / "sctp"）。
@@ -123,6 +138,12 @@ pub struct ContainerParams {
     /// `gui=true` 的 flavor 展开时强制开启。
     /// 旧字段名 `user_home`（用户一致性映射）经自定义 Deserialize 自动迁移。
     pub keep_id: bool,
+    /// 显式 UID 重映射（podman `--uidmap` 列表）。非空时与 `keep_id` 互斥——
+    /// 覆盖 keep-id，由显式映射精确决定容器 uid 落位（见 [`IdMapping`]）。
+    /// 旧配置无此字段，缺省空 = 走 keep-id / 默认 rootless 映射。
+    pub uidmaps: Vec<IdMapping>,
+    /// 显式 GID 重映射（podman `--gidmap` 列表）。非空时与 `keep_id` 互斥。
+    pub gidmaps: Vec<IdMapping>,
     /// 容器默认用户 uid（`None` = 创建时取宿主登录 uid）
     pub user_uid: Option<u32>,
     /// 容器默认用户 gid（`None` = 创建时取宿主登录 gid）
@@ -151,9 +172,10 @@ pub struct ContainerParams {
     /// 设备直通（podman `--device` 列表；裸设备 "host:container[:perms]"，
     /// 或 CDI 引用如 "nvidia.com/gpu=all"）
     pub devices: Vec<String>,
-    /// 安全选项（podman `--security-opt` 列表；如 "label=disable" /
-    /// "apparmor=unconfined" / "seccomp=unconfined"。防 SELinux/AppArmor 拦截设备节点）
-    pub security_opts: Vec<String>,
+    /// 额外选项（podman 透传原始串列表，如 "label=disable" / "apparmor=unconfined" /
+    /// "seccomp=unconfined"，解析进 SpecGenerator 对应字段）。
+    /// 旧字段名 `security_opts` 经自定义 Deserialize 自动迁移。
+    pub extra_opts: Vec<String>,
     /// PID 命名空间模式（如 "host"；默认 private。与 init 互斥——设为非 private
     /// 时不注入 init/catatonit）
     pub pid: Option<String>,
@@ -169,6 +191,8 @@ impl Default for ContainerParams {
             mounts: Vec::new(),
             network: NetworkConfig::default(),
             keep_id: true,
+            uidmaps: Vec::new(),
+            gidmaps: Vec::new(),
             user_uid: None,
             user_gid: None,
             user_name: None,
@@ -176,23 +200,29 @@ impl Default for ContainerParams {
             gpu_nvidia: false,
             gpu_amd: false,
             devices: Vec::new(),
-            security_opts: Vec::new(),
+            extra_opts: Vec::new(),
             pid: None,
         }
     }
 }
 
 /// 手动 Serialize：固定字段顺序 + 默认跳过 false / 空 / None（与原 `#[derive(Serialize)]`
-/// 行为对齐；旧字段名 `gpu` / `user_home` 不再写出——避免下一轮 round-trip 时污染）。
+/// 行为对齐；旧字段名 `gpu` / `user_home` / `security_opts` 不再写出——避免下一轮 round-trip 时污染）。
 impl Serialize for ContainerParams {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("ContainerParams", 16)?;
+        let mut st = s.serialize_struct("ContainerParams", 17)?;
         st.serialize_field("image", &self.image)?;
         st.serialize_field("entry", &self.entry)?;
         st.serialize_field("entry_args", &self.entry_args)?;
         st.serialize_field("mounts", &self.mounts)?;
         st.serialize_field("network", &self.network)?;
         st.serialize_field("keep_id", &self.keep_id)?;
+        if !self.uidmaps.is_empty() {
+            st.serialize_field("uidmaps", &self.uidmaps)?;
+        }
+        if !self.gidmaps.is_empty() {
+            st.serialize_field("gidmaps", &self.gidmaps)?;
+        }
         if self.user_uid.is_some() {
             st.serialize_field("user_uid", &self.user_uid)?;
         }
@@ -210,7 +240,7 @@ impl Serialize for ContainerParams {
             st.serialize_field("gpu_amd", &self.gpu_amd)?;
         }
         st.serialize_field("devices", &self.devices)?;
-        st.serialize_field("security_opts", &self.security_opts)?;
+        st.serialize_field("extra_opts", &self.extra_opts)?;
         if self.pid.is_some() {
             st.serialize_field("pid", &self.pid)?;
         }
@@ -241,6 +271,8 @@ impl<'de> Deserialize<'de> for ContainerParams {
                     mounts: bool,
                     network: bool,
                     keep_id: bool,
+                    uidmaps: bool,
+                    gidmaps: bool,
                     user_uid: bool,
                     user_gid: bool,
                     user_name: bool,
@@ -248,7 +280,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                     gpu_nvidia: bool,
                     gpu_amd: bool,
                     devices: bool,
-                    security_opts: bool,
+                    extra_opts: bool,
                     pid: bool,
                 }
                 let mut seen = Seen::default();
@@ -260,6 +292,8 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 let mut mounts: Option<Vec<MountConfig>> = None;
                 let mut network: Option<NetworkConfig> = None;
                 let mut keep_id: Option<bool> = None;
+                let mut uidmaps: Option<Vec<IdMapping>> = None;
+                let mut gidmaps: Option<Vec<IdMapping>> = None;
                 let mut user_uid: Option<Option<u32>> = None;
                 let mut user_gid: Option<Option<u32>> = None;
                 let mut user_name: Option<Option<String>> = None;
@@ -267,7 +301,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 let mut gpu_nvidia: Option<bool> = None;
                 let mut gpu_amd: Option<bool> = None;
                 let mut devices: Option<Vec<String>> = None;
-                let mut security_opts: Option<Vec<String>> = None;
+                let mut extra_opts: Option<Vec<String>> = None;
                 let mut pid: Option<Option<String>> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
@@ -313,6 +347,20 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             }
                             keep_id = Some(map.next_value()?);
                             seen.keep_id = true;
+                        }
+                        "uidmaps" => {
+                            if seen.uidmaps {
+                                return Err(de::Error::duplicate_field("uidmaps"));
+                            }
+                            uidmaps = Some(map.next_value()?);
+                            seen.uidmaps = true;
+                        }
+                        "gidmaps" => {
+                            if seen.gidmaps {
+                                return Err(de::Error::duplicate_field("gidmaps"));
+                            }
+                            gidmaps = Some(map.next_value()?);
+                            seen.gidmaps = true;
                         }
                         "user_uid" => {
                             if seen.user_uid {
@@ -363,12 +411,14 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             devices = Some(map.next_value()?);
                             seen.devices = true;
                         }
-                        "security_opts" => {
-                            if seen.security_opts {
-                                return Err(de::Error::duplicate_field("security_opts"));
+                        "extra_opts" | "security_opts" => {
+                            // 旧字段名 `security_opts` 作别名接受（同 `user_home` →
+                            // `keep_id` 模式），存量磁盘配置不静默丢安全选项
+                            if seen.extra_opts {
+                                return Err(de::Error::duplicate_field("extra_opts"));
                             }
-                            security_opts = Some(map.next_value()?);
-                            seen.security_opts = true;
+                            extra_opts = Some(map.next_value()?);
+                            seen.extra_opts = true;
                         }
                         "pid" => {
                             if seen.pid {
@@ -392,6 +442,8 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 if let Some(v) = mounts { p.mounts = v; }
                 if let Some(v) = network { p.network = v; }
                 if let Some(v) = keep_id { p.keep_id = v; }
+                if let Some(v) = uidmaps { p.uidmaps = v; }
+                if let Some(v) = gidmaps { p.gidmaps = v; }
                 if let Some(v) = user_uid { p.user_uid = v; }
                 if let Some(v) = user_gid { p.user_gid = v; }
                 if let Some(v) = user_name { p.user_name = v; }
@@ -399,7 +451,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 if let Some(v) = gpu_nvidia { p.gpu_nvidia = v; }
                 if let Some(v) = gpu_amd { p.gpu_amd = v; }
                 if let Some(v) = devices { p.devices = v; }
-                if let Some(v) = security_opts { p.security_opts = v; }
+                if let Some(v) = extra_opts { p.extra_opts = v; }
                 if let Some(v) = pid { p.pid = v; }
 
                 Ok(p)
@@ -515,7 +567,7 @@ persistent = true
         assert!(!config.params.gpu_nvidia);
         assert!(!config.params.gpu_amd);
         assert!(config.params.devices.is_empty());
-        assert!(config.params.security_opts.is_empty());
+        assert!(config.params.extra_opts.is_empty());
         assert!(config.params.pid.is_none());
     }
 
@@ -528,7 +580,7 @@ image = "ubuntu:24.04"
 gui = true
 gpu_nvidia = true
 devices = ["/dev/uinput:/dev/uinput"]
-security_opts = ["label=disable", "apparmor=unconfined"]
+extra_opts = ["label=disable", "apparmor=unconfined"]
 pid = "host"
 silent_boot = false
 persistent = true
@@ -539,7 +591,7 @@ persistent = true
         assert!(!config.params.gpu_amd);
         assert_eq!(config.params.devices, vec!["/dev/uinput:/dev/uinput".to_string()]);
         assert_eq!(
-            config.params.security_opts,
+            config.params.extra_opts,
             vec!["label=disable".to_string(), "apparmor=unconfined".to_string()]
         );
         assert_eq!(config.params.pid.as_deref(), Some("host"));
@@ -550,7 +602,30 @@ persistent = true
         assert_eq!(v["gui"], true);
         assert_eq!(v["pid"], "host");
         assert_eq!(v["devices"][0], "/dev/uinput:/dev/uinput");
-        assert_eq!(v["security_opts"][1], "apparmor=unconfined");
+        assert_eq!(v["extra_opts"][1], "apparmor=unconfined");
+    }
+
+    #[test]
+    fn test_security_opts_legacy_field_migrates_to_extra_opts() {
+        // 旧字段名 `security_opts`（重命名前磁盘存量）自动迁移到 `extra_opts`
+        // （同 `user_home` → `keep_id` 别名模式）——不得静默丢安全选项
+        let toml_str = r#"
+name = "chrome"
+image = "ubuntu:24.04"
+security_opts = ["label=disable", "apparmor=unconfined"]
+silent_boot = false
+persistent = true
+"#;
+        let config: ContainerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            config.params.extra_opts,
+            vec!["label=disable".to_string(), "apparmor=unconfined".to_string()]
+        );
+
+        // round-trip 只写新字段名（旧名不再写出，避免下一轮污染）
+        let v = serde_json::to_value(&config).unwrap();
+        assert!(v.get("security_opts").is_none());
+        assert_eq!(v["extra_opts"][0], "label=disable");
     }
 
     #[test]
@@ -677,6 +752,12 @@ user_name = "tidy"
                     }],
                 },
                 keep_id: true,
+                uidmaps: vec![IdMapping {
+                    container_id: 0,
+                    host_id: 1000,
+                    length: 1,
+                }],
+                gidmaps: vec![],
                 user_uid: Some(1000),
                 user_gid: Some(1000),
                 user_name: Some("tidy".to_string()),
@@ -684,7 +765,7 @@ user_name = "tidy"
                 gpu_nvidia: true,
                 gpu_amd: false,
                 devices: vec!["/dev/uinput:/dev/uinput".to_string()],
-                security_opts: vec!["label=disable".to_string(), "apparmor=unconfined".to_string()],
+                extra_opts: vec!["label=disable".to_string(), "apparmor=unconfined".to_string()],
                 pid: Some("host".to_string()),
             },
             env: vec!["DISPLAY=:0".to_string()],
