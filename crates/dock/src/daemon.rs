@@ -258,7 +258,7 @@ async fn handle_client(
             framed
                 .send(resp(cmd.id, "rc.ping", &RcPingResp { alive: true }, None))
                 .await?;
-            return Ok(());
+            Ok(())
         }
         "rc.list" => {
             let sessions = state.sessions.read().await;
@@ -273,7 +273,7 @@ async fn handle_client(
             framed
                 .send(resp(cmd.id, "rc.list", &RcListResp { sessions: list }, None))
                 .await?;
-            return Ok(());
+            Ok(())
         }
         "rc.new" => {
             let req: RcNew = serde_json::from_value(cmd.payload)?;
