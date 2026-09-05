@@ -872,7 +872,10 @@ impl Podman {
     /// start 容器并确认「真正起来了」：容器进入 running 且 dock daemon 就绪。
     ///
     /// - 容器 running：轮询 `is_running`（`start` 返回 Ok 后容器可能需数秒进入 running）
-    /// - dock daemon 就绪：轮询 `dock_alive`（bootstrap/prepare 有延迟）
+    /// - dock daemon 就绪：先主动 `bootstrap`（幂等：daemon 是懒启动——由首次
+    ///   root 终端使用时 bootstrap 拉起，容器 entrypoint 不起它；重建后旧容器
+    ///   的 daemon 已死，新容器必须显式 bootstrap，否则 ping 永不成功），
+    ///   再轮询 `dock_alive`
     ///
     /// 两级都通过才返回 Ok——用于重建时「确认新容器真的可用」后再删旧容器。
     async fn start_and_confirm(&self, name: &str) -> Result<()> {
@@ -893,7 +896,15 @@ impl Podman {
             )));
         }
 
-        // 等 dock daemon 就绪（最多 ~15s；bootstrap/prepare 有延迟）
+        // 确保 dock daemon 在跑（幂等：socket 可连即返回，否则 setsid 启动）。
+        // daemon 不是容器 entrypoint 启动的（见上方文档），重建后的新容器
+        // 不 bootstrap 就永远 ping 不通。
+        if let Err(e) = self.dock_bootstrap(name).await {
+            tracing::warn!("dock bootstrap 失败（{name}）：{e}");
+        }
+
+        // 等 dock daemon 就绪（最多 ~15s；bootstrap 内部已等 socket，这里通常
+        // 一两轮确认即过）
         let mut alive = false;
         for _ in 0..30 {
             if self.dock_alive(name).await {
@@ -906,6 +917,28 @@ impl Podman {
             return Err(Error::Connect(format!(
                 "容器 {name} 已 running 但 dock daemon 未就绪（easytidy-dock client ping 无响应）"
             )));
+        }
+        Ok(())
+    }
+
+    /// 确保容器内 dock daemon 在跑（幂等）：exec root 跑 `easytidy-dock bootstrap`
+    /// （socket 可连即返回；否则 `setsid` 启动 daemon 后等 socket）。
+    async fn dock_bootstrap(&self, container: &str) -> Result<()> {
+        use futures::StreamExt;
+
+        let cmd = vec![Self::DOCK_TARGET.to_string(), "bootstrap".to_string()];
+        let exec = self.exec_no_tty(container, "0", cmd).await?;
+        // 等 bootstrap 进程退出（daemon 是其 setsid 子进程，bootstrap 退出后
+        // 继续独立运行）。输出收集供 debug 溯源。
+        let mut stream = exec.output;
+        let mut out = String::new();
+        while let Some(item) = stream.next().await {
+            if let Ok(bytes) = item {
+                out.push_str(&String::from_utf8_lossy(&bytes));
+            }
+        }
+        if !out.trim().is_empty() {
+            tracing::debug!("dock bootstrap 输出（{container}）：{}", out.trim());
         }
         Ok(())
     }
