@@ -276,6 +276,7 @@ fn urlencoding(s: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn keep_id_create_body(
     name: &str,
+    hostname: &str,
     image: &str,
     cmd: Vec<String>,
     env: Vec<String>,
@@ -425,7 +426,7 @@ pub fn keep_id_create_body(
         "user": default_user.unwrap_or("0:0"),
         "env": env_map,
         "labels": labels,
-        "hostname": name,
+        "hostname": hostname,
         // catatonit = PID 1；PID 命名空间非 private 时禁用（无法注入 init）
         "init": init_enabled,
         "mounts": podman_mounts,

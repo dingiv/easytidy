@@ -476,8 +476,9 @@ pub async fn env_start(podman: tauri::State<'_, PodmanState>, name: String) -> R
     Ok(())
 }
 
-/// 重建环境：两种形态（安全流程相同：commit → 保留旧容器 → 同名重建并启动
-/// → 确认新容器就绪后才删旧，失败自动回滚，环境不中断）。
+/// 重建环境：两种形态（安全流程相同：停原容器 → commit → 创建并启动
+/// `<name>_tmp` 容器（身份为正式名）→ 确认新容器就绪后才删原容器并改名
+/// 正式名；失败自动回滚（删 tmp、恢复原容器运行），环境不中断）。
 /// - 默认（`quick=false`）：commit 用 `commit --squash`（单层扁平、体积小）。
 ///   应用外部修改的配置文件用；配置编辑走配置管理器（apply）。
 /// - 快速（`quick=true`）：commit 用普通 commit（保留分层历史、更快）。

@@ -123,7 +123,7 @@ function ConfigManagerInner({ containerName }: ConfigManagerProps) {
           </Button>
           <Popconfirm
             title="快速重建容器"
-            description={`将提交并快速重建容器（普通 commit + 安全流程：保留旧容器、失败自动回滚）以应用新的挂载、网络、环境变量与用户配置，期间容器会短暂停止。${
+            description={`将提交并快速重建容器（普通 commit + 安全流程：新容器确认就绪后才删原容器，失败自动回滚）以应用新的挂载、网络、环境变量与用户配置，期间容器会短暂停止。${
               !(edit?.keep_id ?? true) ? '警告：用户一致性映射（keep-id）已关闭！' : ''
             }`}
             okText="快速重建"

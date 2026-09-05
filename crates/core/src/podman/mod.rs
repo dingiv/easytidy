@@ -213,6 +213,24 @@ impl Podman {
         bins: &crate::ContainerBins,
         config: &ContainerConfig,
     ) -> Result<String> {
+        self.create_with_config_named(name, name, image, bins, config).await
+    }
+
+    /// 同 [`Self::create_with_config`]，但「正式身份名」（`name`）与「podman
+    /// 容器名」（`container_name`）分离：hostname / `easytidy.name` 标签 /
+    /// 宿主侧 socket 目录全按 `name`，仅 podman 注册的容器名是
+    /// `container_name`。
+    ///
+    /// 重建流程用：正式名被原容器占用，先以 `<name>_tmp` 创建（身份仍为
+    /// 正式名），原容器删除后再改名。
+    pub async fn create_with_config_named(
+        &self,
+        name: &str,
+        container_name: &str,
+        image: &str,
+        bins: &crate::ContainerBins,
+        config: &ContainerConfig,
+    ) -> Result<String> {
         use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
 
@@ -433,6 +451,7 @@ impl Podman {
                 None => None,
             };
             let body = crate::libpod::keep_id_create_body(
+                container_name,
                 name,
                 image,
                 server_cmd.clone(),
@@ -453,8 +472,10 @@ impl Podman {
                 config.params.pid.as_deref(),
                 config.params.extra_opts.clone(),
             );
-            let id = libpod.create_container(name, body).await?;
-            tracing::info!("容器 {} 创建成功（ID: {}，keep-id）", name, id);
+            let id = libpod.create_container(container_name, body).await?;
+            tracing::info!(
+                "容器 {container_name}（身份 {name}）创建成功（ID: {id}，keep-id）"
+            );
             return Ok(id);
         }
         // 非 keep-id 路径同样走 libpod 端点创建（仅支持 podman；
@@ -468,6 +489,7 @@ impl Podman {
         };
         let libpod = crate::libpod::Libpod::new().await?;
         let body = crate::libpod::keep_id_create_body(
+            container_name,
             name,
             image,
             server_cmd,
@@ -488,8 +510,10 @@ impl Podman {
             config.params.pid.as_deref(),
             config.params.extra_opts.clone(),
         );
-        let id = libpod.create_container(name, body).await?;
-        tracing::info!("容器 {} 创建成功（ID: {}，libpod）", name, id);
+        let id = libpod.create_container(container_name, body).await?;
+        tracing::info!(
+            "容器 {container_name}（身份 {name}）创建成功（ID: {id}，libpod）"
+        );
         Ok(id)
     }
 
@@ -753,7 +777,8 @@ impl Podman {
     ///
     /// **安全重建，默认形态**：commit 用 `commit --squash`（单层扁平镜像，
     /// 体积小）。普通 commit 形态（保留分层、更快）见 [`Self::rebuild_quick`]——
-    /// 两者安全流程完全相同。
+    /// 两者安全流程完全相同（停原容器 → commit → 起 tmp 确认就绪 → 删原
+    /// 容器改名，失败自动回滚）。
     pub async fn rebuild(
         &self,
         name: &str,
@@ -778,24 +803,24 @@ impl Podman {
 
     /// 两种形态共用的安全重建（`squash` 决定 commit 方式）。
     ///
-    /// 「新容器确认就绪后才删旧」的安全流程（旧容器全程保留到确认，失败自动
-    /// 回滚）：
-    /// 1. libpod `commit` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
+    /// 「先起 tmp 确认就绪，再删原容器改名」的安全流程（原容器原地停止保留、
+    /// 全程不改名；失败只需删 tmp + start 原容器即回滚）：
+    /// 0. 清理残留 `<name>_tmp`（上次中断重建的遗留；仅 easytidy 管理的
+    ///    容器才删，避免误删用户自建同名容器）
+    /// 1. `stop` 原容器（停止态 commit 快照一致、无需运行期 pause）
+    /// 2. libpod `commit` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
     ///    （仅容器层；bind mount 不入 commit —— 正是所需）——**数据保险**；
     ///    `squash=true` → `commit --squash` 单层扁平（体积小、较慢），
     ///    `false` → 普通 commit（保留分层、更快）
-    /// 2. `rename` 旧容器为临时名 `<name>-old-<tag>`（**保留**！释放正式名，
-    ///    旧容器数据仍在容器层 + 镜像双重保存）
-    /// 3. `stop` 旧（释放 socket——旧 dock daemon 退出，`dock.sock` 让出给新容器；
-    ///    这是重建必然的短暂中断）
-    /// 4. `create_with_config`（正式名 `<name>`，commit 的镜像 + 新配置，label/
-    ///    socket/server 注册全按 `<name>` 绑定）
-    /// 5. `start_and_confirm`（start + 确认容器 running 且 dock daemon 就绪）
-    /// 6. **确认就绪** → `remove` 旧（此时安全：新容器已起、数据已在新容器）
-    /// 7. 返回新容器 ID
+    /// 3. `create_with_config_named` 创建 tmp 容器 `<name>_tmp`（身份 = 正式名：
+    ///    hostname / `easytidy.name` 标签 / socket 目录全用 `<name>`；正式名
+    ///    被原容器占用，故先以 tmp 名创建）
+    /// 4. `start_and_confirm`（start tmp + 确认 running 且 dock daemon 就绪）
+    /// 5. **确认就绪** → `remove` 原容器 → `rename` `<name>_tmp` → `<name>`
+    /// 6. 返回新容器 ID
     ///
-    /// 错误处理：第 4 / 5 步任一失败 → **回滚**（删未就绪的新容器，把旧容器
-    /// rename 回正式名并重新 start，环境恢复运行）；数据始终有 commit 镜像兜底。
+    /// 错误处理：任一步失败 → **回滚**（删 tmp，start 原容器恢复运行——原
+    /// 容器从未改名，回滚只需一个 start）；数据始终有 commit 镜像兜底。
     /// 调用方负责在成功后把 `config` 回写 configfile（GUI apply / CLI rebuild 均执行）。
     async fn rebuild_with_commit(
         &self,
@@ -804,11 +829,24 @@ impl Podman {
         bins: &crate::ContainerBins,
         squash: bool,
     ) -> Result<String> {
+        let tmp_name = format!("{name}_tmp");
+
         // 先记下现有 socket 目录（重建后 socket 目录 = easytidy/<name>；成功后清理
-        // 旧代孤儿 `<name>-<hash>`。纯 name 目录即当前代——按新目录做白名单，见第 7 步）
+        // 旧代孤儿 `<name>-<hash>`。纯 name 目录即当前代——按新目录做白名单，见最后一步）
         let legacy_socket_dirs = crate::resolve_socket_dirs(name);
 
-        // 1. commit 当前容器层（bind mount 不入镜像）→ 数据保险
+        // 0. 清理残留 tmp（上次中断重建的遗留；仅 easytidy 管理的才删）
+        if self.has_easytidy_container(&tmp_name).await? {
+            tracing::warn!("清理残留 {tmp_name} 容器（上次重建中断的遗留）");
+            self.remove(&tmp_name, true).await?;
+        }
+
+        // 1. 停原容器（随后 commit 停止态快照一致）
+        if self.is_running(name).await? {
+            self.stop(name).await?;
+        }
+
+        // 2. commit 当前容器层（bind mount 不入镜像）→ 数据保险
         let tag = Self::rebuild_image_tag(name);
         let image_ref = format!("localhost/easytidy-rebuild:{tag}");
         let message = if squash {
@@ -817,42 +855,57 @@ impl Podman {
             "easytidy rebuild snapshot via commit"
         };
         let libpod = crate::libpod::Libpod::new().await?;
-        libpod
+        if let Err(e) = libpod
             .commit(name, "localhost/easytidy-rebuild", Some(&tag), squash, message, &[])
-            .await?;
-
-        // 2. rename 旧容器为临时名（保留！释放 <name> 的名字）
-        let old_name = format!("{name}-old-{tag}");
-        self.rename(name, &old_name).await?;
-
-        // 3. stop 旧（释放 socket——旧 dock daemon 退出，dock.sock 让出给新容器）
-        if self.is_running(&old_name).await? {
-            self.stop(&old_name).await?;
+            .await
+        {
+            self.restore_original(name).await;
+            return Err(Error::Connect(format!(
+                "重建失败：原容器 commit 未成功（已回滚，原容器已恢复运行）：{e}"
+            )));
         }
 
-        // 4. create 新容器（正式名 <name>；失败 → 回滚，旧容器数据未损）
-        let id = match self.create_with_config(name, &image_ref, bins, config).await {
+        // 3. 创建 tmp 容器（身份 = 正式名；失败 → 恢复原容器运行）
+        let id = match self
+            .create_with_config_named(name, &tmp_name, &image_ref, bins, config)
+            .await
+        {
             Ok(id) => id,
             Err(e) => {
-                self.rollback(&old_name, name).await;
+                self.restore_original(name).await;
                 return Err(Error::Connect(format!(
-                    "重建失败：创建新容器未成功（已回滚，旧容器已恢复运行）：{e}"
+                    "重建失败：创建 tmp 容器未成功（已回滚，原容器已恢复运行）：{e}"
                 )));
             }
         };
 
-        // 5. start + 确认新容器真正就绪（running + dock daemon）；失败 → 回滚
-        if let Err(e) = self.start_and_confirm(name).await {
-            let _ = self.remove(name, true).await; // 清理未就绪的新容器
-            self.rollback(&old_name, name).await; // 恢复旧容器运行
+        // 4. start + 确认新容器真正就绪（running + dock daemon）；失败 → 删 tmp，
+        //    恢复原容器
+        if let Err(e) = self.start_and_confirm(&tmp_name).await {
+            let _ = self.remove(&tmp_name, true).await; // 清理未就绪的 tmp
+            self.restore_original(name).await;
             return Err(Error::Connect(format!(
-                "重建失败：新容器未能确认就绪（已回滚，旧容器已恢复运行）：{e}"
+                "重建失败：新容器未能确认就绪（已回滚，原容器已恢复运行）：{e}"
             )));
         }
 
-        // 6. 新容器确认就绪 → 删旧（安全：新已起、数据已在新容器）
-        if let Err(e) = self.remove(&old_name, true).await {
-            tracing::warn!("重建后清理旧容器 {old_name} 失败（不影响新容器运行）：{e}");
+        // 5. 确认就绪 → 删原容器（删除失败 → 回滚：删新留旧，恢复原容器运行）
+        if let Err(e) = self.remove(name, true).await {
+            let _ = self.remove(&tmp_name, true).await;
+            self.restore_original(name).await;
+            return Err(Error::Connect(format!(
+                "重建失败：原容器无法删除（已回滚，原容器已恢复运行）：{e}"
+            )));
+        }
+
+        // 6. rename tmp → 正式名（此时名字已腾出）
+        if let Err(e) = self.rename(&tmp_name, name).await {
+            // 罕见状态：原容器已删、新容器以 tmp 名运行（身份完整）。提示手动
+            // 恢复；下次重建会由第 0 步清理 + 重新走完整流程。
+            return Err(Error::Connect(format!(
+                "重建失败：tmp 容器改名 {name} 未成功（新容器正以 {tmp_name} 名运行，\n \
+                 手动恢复：podman rename {tmp_name} {name}）：{e}"
+            )));
         }
 
         // 7. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建；旧
@@ -867,6 +920,41 @@ impl Podman {
         }
 
         Ok(id)
+    }
+
+    /// 回滚辅助：把已停止的原容器重新 start（尽力而为；失败仅 warn——回滚是
+    /// 尽力恢复，不阻断错误上报；数据始终有 commit 镜像兜底）。
+    async fn restore_original(&self, name: &str) {
+        match self.is_running(name).await {
+            Ok(true) => {} // 已在运行（防御；正常重建中不会）
+            Ok(false) | Err(_) => {
+                if let Err(e) = self.start(name).await {
+                    tracing::warn!(
+                        "重建失败后恢复原容器 {name} 运行失败：{e}（手动：podman start {name}）"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 容器存在且是 easytidy 管理的（`manager=easytidy` 标签）→ true。
+    /// 不存在 → false（不报错）。
+    async fn has_easytidy_container(&self, name: &str) -> Result<bool> {
+        let detail = match self.docker.inspect_container(name, None).await {
+            Ok(d) => d,
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("404") || msg.contains("No such") || msg.contains("not found") {
+                    return Ok(false);
+                }
+                return Err(Error::Connect(format!("检查容器 {name} 失败：{msg}")));
+            }
+        };
+        Ok(detail
+            .config
+            .and_then(|c| c.labels)
+            .map(|l| l.get("manager").map(|v| v == "easytidy").unwrap_or(false))
+            .unwrap_or(false))
     }
 
     /// start 容器并确认「真正起来了」：容器进入 running 且 dock daemon 就绪。
@@ -943,24 +1031,6 @@ impl Podman {
         Ok(())
     }
 
-    /// 回滚重建：把临时名的旧容器 rename 回正式名并重新 start（尽力而为）。
-    ///
-    /// 任一步失败仅 warn（回滚是尽力恢复，不阻断错误上报）；数据始终有 commit
-    /// 镜像兜底。
-    async fn rollback(&self, old_name: &str, name: &str) {
-        if let Err(e) = self.rename(old_name, name).await {
-            tracing::warn!("回滚 rename（{old_name} → {name}）失败：{e}");
-            return;
-        }
-        match self.is_running(name).await {
-            Ok(true) => {} // 已在运行（防御；正常 stop 后不会）
-            Ok(false) | Err(_) => {
-                if let Err(e) = self.start(name).await {
-                    tracing::warn!("回滚 start（{name}）失败：{e}");
-                }
-            }
-        }
-    }
 
     /// 检查容器当前生效的 mounts 与网络配置（GUI "当前生效" 状态）。
     ///
@@ -1643,6 +1713,7 @@ mod tests {
         // keep_id_create_body：default_user 透传 + keep-id 时顶层 userns 块
         let body = crate::libpod::keep_id_create_body(
             "c1",
+            "c1",
             "alpine:latest",
             vec!["/bin/sh".into()],
             Vec::new(),
@@ -1667,6 +1738,7 @@ mod tests {
 
         // default_user = None → "0:0"（旧行为保留，仅供无身份场景）
         let body = crate::libpod::keep_id_create_body(
+            "c1",
             "c1",
             "alpine:latest",
             vec!["/bin/sh".into()],
@@ -1705,6 +1777,7 @@ mod tests {
         });
         let body = crate::libpod::keep_id_create_body(
             "c1",
+            "c1",
             "alpine:latest",
             vec!["/bin/sh".into()],
             Vec::new(),
@@ -1739,6 +1812,7 @@ mod tests {
                     pid: Option<&str>,
                     security: Vec<String>| {
             crate::libpod::keep_id_create_body(
+                "c1",
                 "c1",
                 "alpine:latest",
                 vec!["/bin/sh".into()],
@@ -1864,7 +1938,7 @@ mod tests {
         let m = IdMapping { container_id: 0, host_id: 1000, length: 1 };
         let base = |keep_id: bool, uidmaps: Vec<IdMapping>, gidmaps: Vec<IdMapping>| {
             crate::libpod::keep_id_create_body(
-                "c1", "alpine:latest", vec!["/bin/sh".into()], Vec::new(),
+                "c1", "c1", "alpine:latest", vec!["/bin/sh".into()], Vec::new(),
                 std::collections::HashMap::new(), Vec::new(), None, None, None, None,
                 Some("1000:1000"),
                 keep_id,
