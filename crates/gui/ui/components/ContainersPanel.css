@@ -119,3 +119,21 @@
 .env-section-title {
   margin: 0 !important;
 }
+
+/* ---------- 快照/重建统一下拉菜单项 ---------- */
+
+.action-menu-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+}
+
+.action-menu-hint {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.action-menu-last {
+  margin-left: 6px;
+}

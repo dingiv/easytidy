@@ -476,11 +476,18 @@ pub async fn env_start(podman: tauri::State<'_, PodmanState>, name: String) -> R
     Ok(())
 }
 
-/// 重建环境：按注册表（每容器一个 `<name>.toml`）当前配置 commit → 保留旧容器 →
-/// 同名重建并启动 → 确认新容器就绪后才删旧（失败自动回滚，环境不中断）。
-/// 应用外部修改的配置文件用；配置编辑走配置管理器（apply）。
+/// 重建环境：两种形态
+/// - 安全（默认，`quick=false`）：commit → 保留旧容器 → 同名重建并启动 →
+///   确认新容器就绪后才删旧（失败自动回滚，环境不中断）。应用外部修改的
+///   配置文件用；配置编辑走配置管理器（apply）。
+/// - 快速（`quick=true`）：commit 数据 → 删旧 → 同名重建 → 启动（无回滚、
+///   不确认就绪；失败时数据仍有 commit 镜像兜底）。
 #[tauri::command]
-pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) -> Result<(), String> {
+pub async fn env_rebuild(
+    podman: tauri::State<'_, PodmanState>,
+    name: String,
+    quick: Option<bool>,
+) -> Result<(), String> {
     let config_file =
         ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
     let config = config_file
@@ -490,15 +497,21 @@ pub async fn env_rebuild(podman: tauri::State<'_, PodmanState>, name: String) ->
 
     let p = podman.get().await.map_err(|e| e.to_string())?;
     let bins = easytidy_core::ContainerBins::resolve().map_err(|e| e.to_string())?;
-    p.rebuild(&name, &config, &bins)
-        .await
-        .map_err(|e| format!("重建失败：{e}"))?;
+    if quick.unwrap_or(false) {
+        p.rebuild_quick(&name, &config, &bins)
+            .await
+            .map_err(|e| format!("快速重建失败：{e}"))?;
+    } else {
+        p.rebuild(&name, &config, &bins)
+            .await
+            .map_err(|e| format!("重建失败：{e}"))?;
+    }
     // 容器内准备（fontconfig + 可选 useradd）：失败不阻断重建（落日志）
     if let Err(e) = p.prepare_container(&name, &config.params).await {
         tracing::error!("容器内准备失败（{name}）：{e}");
     }
     podman.return_podman(p).await;
-    info!("环境 {name} 已按注册配置重建并启动");
+    info!("环境 {name} 已按注册配置重建并启动（quick={}）", quick.unwrap_or(false));
     Ok(())
 }
 

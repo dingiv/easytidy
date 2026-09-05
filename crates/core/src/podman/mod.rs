@@ -830,6 +830,48 @@ impl Podman {
         Ok(id)
     }
 
+    /// 快速重建（无回滚、不确认就绪）：commit 数据 → 停 → 删旧 → 同名重建 → 启动。
+    ///
+    /// 与 [`Self::rebuild`]（安全重建）的差异：**不保留旧容器、不确认新容器
+    /// 就绪、失败不回滚**——流程更短、速度更快，环境中断几秒；create 失败时旧
+    /// 容器已删（数据仍有第 1 步的 commit 镜像兜底）。GUI「快速重建」用。
+    pub async fn rebuild_quick(
+        &self,
+        name: &str,
+        config: &ContainerConfig,
+        bins: &crate::ContainerBins,
+    ) -> Result<String> {
+        // 先记下现有 socket 目录（清理规则同安全重建：纯 name 目录即当前代，跳过）
+        let legacy_socket_dirs = crate::resolve_socket_dirs(name);
+
+        // 1. commit 当前容器层（bind mount 不入镜像）→ 数据兜底
+        let tag = Self::rebuild_image_tag(name);
+        let image_ref = format!("localhost/easytidy-rebuild:{tag}");
+        self.commit_container(name, &image_ref).await?;
+
+        // 2. 停 + 删旧（快速模式不保留旧容器、无回滚）
+        if self.is_running(name).await? {
+            self.stop(name).await?;
+        }
+        self.remove(name, true).await?;
+
+        // 3. 同名 create + start（不确认就绪：快速模式；失败由调用方报错，
+        //    数据可从 commit 镜像恢复）
+        let id = self.create_with_config(name, &image_ref, bins, config).await?;
+        self.start(name).await?;
+
+        // 4. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建）
+        let new_socket_dir = crate::socket_dir_for(name)?;
+        for legacy in legacy_socket_dirs {
+            if legacy != new_socket_dir {
+                tracing::debug!("快速重建后清理旧代 socket 目录：{}", legacy.display());
+                let _ = std::fs::remove_dir_all(&legacy);
+            }
+        }
+
+        Ok(id)
+    }
+
     /// start 容器并确认「真正起来了」：容器进入 running 且 dock daemon 就绪。
     ///
     /// - 容器 running：轮询 `is_running`（`start` 返回 Ok 后容器可能需数秒进入 running）
