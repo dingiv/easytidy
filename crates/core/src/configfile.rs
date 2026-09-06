@@ -40,7 +40,10 @@ impl ConfigFile {
         crate::appdata::migrate_legacy_configs();
         let base_dir = crate::appdata::containers_dir()?;
         LEGACY_MIGRATED.call_once(|| {
-            if let Err(e) = Self::migrate_from_legacy(&base_dir) {
+            let Ok(legacy) = crate::appdata::config_file_path() else {
+                return;
+            };
+            if let Err(e) = Self::migrate_from_legacy(&base_dir, &legacy) {
                 tracing::warn!("旧容器配置迁移失败（不影响新配置读写）：{e}");
             }
         });
@@ -137,32 +140,57 @@ impl ConfigFile {
 
     /// 一次性迁移：旧单文件注册表（`app_data_dir()/config.toml`）→ 每容器文件。
     ///
-    /// 幂等（目标文件已存在则跳过）、不删旧文件、解析失败不阻断（best-effort）。
-    fn migrate_from_legacy(base_dir: &std::path::Path) -> Result<()> {
-        let old = crate::appdata::config_file_path()?;
+    /// 幂等（目标文件已存在则跳过）、解析/写失败不归档（保留供排查）、
+    /// **成功后归档旧文件**（rename 为 `config.toml.migrated`，不删、保留数据）。
+    ///
+    /// 归档是必须的：旧文件若留着，每次启动重跑迁移会把**已删除**的容器条目
+    /// 重新写回（「僵尸注册表」复活孤儿）。
+    fn migrate_from_legacy(base_dir: &std::path::Path, old: &std::path::Path) -> Result<()> {
         if !old.exists() {
             return Ok(());
         }
-        let Ok(content) = std::fs::read_to_string(&old) else {
+        let Ok(content) = std::fs::read_to_string(old) else {
             return Ok(());
         };
         let legacy: LegacyRegistry = match toml::from_str(&content) {
             Ok(c) => c,
             Err(e) => {
+                // 解析失败：不归档（保留旧文件供排查/修复后重试）
                 tracing::debug!("旧配置文件解析失败，跳过迁移（{}）：{e}", old.display());
                 return Ok(());
             }
         };
+        let mut had_failure = false;
         for (name, cfg) in legacy.containers {
             let dest = base_dir.join(format!("{name}.toml"));
             if dest.exists() {
                 continue;
             }
             let Ok(s) = toml::to_string_pretty(&cfg) else {
+                had_failure = true;
                 continue;
             };
             if std::fs::write(&dest, s).is_ok() {
                 tracing::info!("迁移容器配置：{} → {}", old.display(), dest.display());
+            } else {
+                had_failure = true;
+            }
+        }
+        // 归档旧单文件注册表：全部容器条目已落到每容器文件（新建或已存在），
+        // 旧文件成为「僵尸注册表」会在每次启动把已删除的容器重新复活。
+        // 仅当无失败时归档（不删，保留数据；失败则保留供排查）。
+        if !had_failure {
+            let archived = old
+                .file_name()
+                .map(|f| old.with_file_name(format!("{}.migrated", f.to_string_lossy())))
+                .unwrap_or_else(|| old.join("config.toml.migrated"));
+            match std::fs::rename(&old, &archived) {
+                Ok(()) => tracing::info!(
+                    "旧单文件注册表已归档：{} → {}",
+                    old.display(),
+                    archived.display()
+                ),
+                Err(e) => tracing::warn!("归档旧注册表失败（不影响新配置）：{e}"),
             }
         }
         Ok(())
@@ -277,6 +305,95 @@ persistent = false
         let names: Vec<_> = list.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["legacy_a", "legacy_b"]);
         assert!(cf.get_container("legacy_b").unwrap().unwrap().silent_boot);
+    }
+
+        /// 造一个旧单文件注册表（供 migrate_from_legacy 测试用）。
+    fn write_legacy(tmp: &TempDir, body: &str) -> std::path::PathBuf {
+        let legacy_dir = tmp.path().to_path_buf();
+        fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy = legacy_dir.join("config.toml");
+        fs::write(&legacy, body).unwrap();
+        legacy
+    }
+
+    #[test]
+    fn test_migrate_archives_legacy_after_success() {
+        // 迁移成功 → 拆出每容器文件 + 归档旧单文件（rename 为 .migrated）
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("containers");
+        fs::create_dir_all(&base).unwrap();
+        let legacy = write_legacy(
+            &tmp,
+            r#"schema_version = 1
+
+[containers.alpha]
+name = "alpha"
+image = "alpine:latest"
+silent_boot = false
+persistent = true
+
+[containers.beta]
+name = "beta"
+image = "ubuntu:24.04"
+silent_boot = false
+persistent = false
+"#,
+        );
+
+        ConfigFile::migrate_from_legacy(&base, &legacy).unwrap();
+
+        assert!(base.join("alpha.toml").exists(), "应拆出 alpha");
+        assert!(base.join("beta.toml").exists(), "应拆出 beta");
+        assert!(!legacy.exists(), "旧单文件应被归档（不再存在）");
+        assert!(
+            tmp.path().join("config.toml.migrated").exists(),
+            "应归档为 config.toml.migrated（数据保留）"
+        );
+    }
+
+    #[test]
+    fn test_migrate_is_one_time_no_zombie_resurrect() {
+        // 核心回归：归档后，删除某容器配置再重跑迁移 → 不会从旧文件复活（僵尸注册表修复）
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("containers");
+        fs::create_dir_all(&base).unwrap();
+        let legacy = write_legacy(
+            &tmp,
+            r#"schema_version = 1
+
+[containers.desk_pilot]
+name = "desk_pilot"
+image = "localhost/desk_pilot:9.3.3"
+silent_boot = false
+persistent = true
+"#,
+        );
+
+        // 首次迁移：拆出 + 归档
+        ConfigFile::migrate_from_legacy(&base, &legacy).unwrap();
+        assert!(base.join("desk_pilot.toml").exists());
+
+        // 用户删除孤儿容器配置
+        fs::remove_file(base.join("desk_pilot.toml")).unwrap();
+
+        // 重启（重跑迁移）：旧文件已归档 → 不应复活
+        ConfigFile::migrate_from_legacy(&base, &legacy).unwrap();
+        assert!(
+            !base.join("desk_pilot.toml").exists(),
+            "归档后重跑不应复活已删除的容器配置（僵尸注册表）"
+        );
+    }
+
+    #[test]
+    fn test_migrate_keeps_legacy_on_parse_failure() {
+        // 解析失败 → 不归档（保留旧文件供排查）
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path().join("containers");
+        fs::create_dir_all(&base).unwrap();
+        let legacy = write_legacy(&tmp, "this is not valid toml {{{");
+
+        ConfigFile::migrate_from_legacy(&base, &legacy).unwrap();
+        assert!(legacy.exists(), "解析失败时不应归档旧文件");
     }
 
     #[test]
