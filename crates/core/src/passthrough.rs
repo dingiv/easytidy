@@ -1,7 +1,7 @@
 //! Passthrough 应用拉起（宿主侧经容器 server socket）。
 //!
 //! 配置（应用列表 + auto-start + 收藏 pinned）**存容器内**
-//! `/home/easytidy/.config/easytidy/passthrough.toml`，由容器内 server 自读自管，
+//! `{home}/.easytidy/passthrough.toml`，由容器内 server 自读自管，
 //! 容器自包含——容器删除/同名重建即随之清空。宿主侧不再持有 per-container
 //! 配置（修复「新建容器继承旧容器收藏」bug）。
 //!

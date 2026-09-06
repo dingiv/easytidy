@@ -469,7 +469,7 @@ pub struct PtRevokeResp {
 
 /// 配置中的应用条目（容器内 passthrough 配置：应用列表 + auto_start）。
 ///
-/// 存在**容器内** `/home/easytidy/.config/easytidy/passthrough.toml`（随容器层/快照
+/// 存在**容器内** `{home}/.easytidy/passthrough.toml`（随容器层/快照
 /// 持久，容器自包含）；server 启动自读并拉起 auto_start 应用。宿主只留收藏(pinned)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PtConfiguredApp {

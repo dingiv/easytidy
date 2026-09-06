@@ -480,7 +480,7 @@ async fn cmd_create(
 ///
 /// 从 configfile 读取容器配置 → `Podman::rebuild`（commit 当前层 → 保留旧容器 →
 /// 用新配置重建并启动 → 确认新容器就绪后才删旧；失败自动回滚，环境不中断）→
-/// 打印新 ID。改配置的途径：直接编辑 `~/.config/easytidy/config.toml` 或后续 GUI。
+/// 打印新 ID。改配置的途径：直接编辑 `~/.easytidy/data/containers/<name>.toml` 或后续 GUI。
 async fn cmd_rebuild(
     podman: Podman,
     container: String,

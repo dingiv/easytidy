@@ -125,7 +125,7 @@ pub fn migrate_legacy_configs() {
     }
 
     // 配置文件
-    // （passthrough 配置已迁容器内 `/home/easytidy/.config/easytidy/passthrough.toml`，
+    // （passthrough 配置已迁容器内 `{home}/.easytidy/passthrough.toml`，
     //  宿主侧不再持有 per-container 配置，故不迁移旧宿主 passthrough.toml）
     for name in ["config.toml"] {
         let legacy = legacy_dir.join(name);
