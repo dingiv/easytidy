@@ -1052,6 +1052,18 @@ button:disabled {
   font-size: 13px;
 }
 
+/* 图标选择：容器路径输入行（左：路径输入+浏览+导入；右：预览） */
+.icon-picker-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.icon-picker-container {
+  flex: 1;
+  min-width: 0;
+}
+
 .icon-picker-browser {
   display: flex;
   gap: 12px;

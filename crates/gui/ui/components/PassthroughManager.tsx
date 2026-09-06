@@ -6,9 +6,9 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { App as AntApp, Dropdown, Radio, Switch, Tooltip } from 'antd';
+import { App as AntApp, Radio, Space, Switch, Tooltip } from 'antd';
 import {
-  DownOutlined,
+  CloseOutlined,
   PictureOutlined,
   PlayCircleOutlined,
   PushpinFilled,
@@ -203,26 +203,6 @@ export function PassthroughManager() {
     } catch (err: any) {
       setError(errMsg(err, 'Failed to export custom app'));
       console.error('passthrough_export (custom) failed:', err);
-    }
-  };
-
-  /** 新增应用表单：图标下拉（从宿主机导入 / 从容器导入 / 清除） */
-  const handleIconMenu = async ({ key }: { key: string }) => {
-    setError(null);
-    try {
-      if (key === 'host') {
-        // 从宿主机导入：宿主原生对话框（正常宿主 API，不涉及容器）
-        const hostPath = await invoke<string>('passthrough_pick_host_icon');
-        setCustomIcon(hostPath);
-      } else if (key === 'container') {
-        // 从容器导入：容器内迷你文件浏览器（独立选取模式弹窗）
-        setPickingNewIcon(true);
-      } else if (key === 'clear') {
-        setCustomIcon(null);
-      }
-    } catch (err: any) {
-      setError(errMsg(err, '导入图标失败'));
-      console.error('import icon failed:', err);
     }
   };
 
@@ -426,30 +406,30 @@ export function PassthroughManager() {
             value={customCmd}
             onChange={(e) => setCustomCmd(e.target.value)}
           />
-          {/* 图标两个导入路径：从宿主机导入（正常宿主 API）/ 从容器导入 */}
-          <Dropdown
-            menu={{
-              items: [
-                { key: 'host', label: '从宿主机导入…' },
-                { key: 'container', label: '从容器导入…' },
-                ...(customIcon ? [{ key: 'clear', label: '清除图标' }] : []),
-              ],
-              onClick: handleIconMenu,
-            }}
-            placement="bottomRight"
-          >
+          {/* 图标：选择图标弹窗（独立选取模式）；弹窗内含「从宿主机导入」独立按钮
+              + 容器路径输入框（浏览）；落盘后写入新应用 customIcon */}
+          <Space size={4}>
             <button
               className="secondary-button custom-icon-btn"
-              title={customIcon ? customIcon : '选择应用图标（宿主机/容器）'}
+              title={customIcon ? customIcon : '选择应用图标（宿主导入 / 容器路径）'}
+              onClick={() => setPickingNewIcon(true)}
             >
               {customIcon ? (
                 <img src={`file://${customIcon}`} className="custom-icon-preview" alt="" />
               ) : (
                 <PictureOutlined />
               )}
-              <DownOutlined style={{ fontSize: 10 }} />
             </button>
-          </Dropdown>
+            {customIcon && (
+              <button
+                className="secondary-button icon-only"
+                title="清除图标"
+                onClick={() => setCustomIcon(null)}
+              >
+                <CloseOutlined />
+              </button>
+            )}
+          </Space>
           <button className="primary-button" onClick={handleAddCustom} disabled={addingCustom}>
             {addingCustom ? '添加中…' : '添加'}
           </button>
