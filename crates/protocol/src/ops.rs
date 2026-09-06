@@ -221,7 +221,7 @@ pub struct ServerInfoResp {
     /// HTTP 静态文件服务端口（0 = 未启用）
     pub http_port: u16,
     /// 容器默认用户 home（server 即容器默认用户；宿主侧据此定位容器内
-    /// 用户可写资源，如 ~/.local/share/icons/easytidy 自定义应用图标目录）。
+    /// 用户可写资源，如 ~/.easytidy/icons 自定义应用图标目录）。
     /// `#[serde(default)]`：旧 server 无此字段 → 空串，前后端版本兼容。
     #[serde(default)]
     pub home_dir: String,
@@ -481,8 +481,8 @@ pub struct PtConfiguredApp {
     pub desktop_file: Option<String>,
     #[serde(default)]
     pub auto_start: bool,
-    /// 图标：扫描应用 = 容器内路径；custom = 宿主 ~/.easytidy/icons 路径（仅宿主
-    /// 展示/导出用，server 忽略）
+    /// 图标：均为**容器内**路径（扫描应用 = 应用自身图标；自定义应用 =
+    /// 导入到 {home}/.easytidy/icons/ 的图片）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
 }

@@ -1,7 +1,7 @@
 // 自定义应用图标选择弹窗（已有应用改图标）：
 // - 图标 = **容器内路径**输入框（AutoComplete 列目录补全 +「浏览」进目录挑选）
 // - 「从宿主机选用」：rfd 原生对话框选图片 → 后端复制进容器
-//   {home}/.local/share/icons/easytidy/ → 容器内路径回填输入框
+//   {home}/.easytidy/icons/ → 容器内路径回填输入框
 // - 确定：写入容器内配置（passthrough_set_custom_icon）；清除：去掉图标
 // 图标统一存容器内（容器自包含）；导出 .desktop 时再从容器拷出到宿主缓存。
 
@@ -212,7 +212,7 @@ export function IconPickerModal({ open, appId, currentIcon, onClose, onChanged }
                 popupMatchSelectWidth={false}
               >
                 <Input
-                  placeholder="容器内图片路径，如 ~/.local/share/icons/easytidy/app.png"
+                  placeholder="容器内图片路径，如 ~/.easytidy/icons/app.png"
                   allowClear
                   onPressEnter={confirm}
                 />

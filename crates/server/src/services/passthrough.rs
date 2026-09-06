@@ -1,10 +1,11 @@
 //! 容器内 passthrough 配置（应用列表 + 收藏）——随容器层持久、server 自读拉起。
 //!
-//! 配置存**容器内** `{user.home}/.easytidy/passthrough.toml`（user_map 失败回退
-//! `$HOME`，再回退 `/`），随容器可写层/快照/rebuild 提交持久，容器自包含。server 启动时
-//! 自读并拉起 auto_start 应用（不再依赖宿主推送）。路径与宿主侧 `~/.easytidy` 约定一致；
-//! 旧 XDG 位置 `.config/easytidy/passthrough.toml`（2026-08-25 4c0b31c 起用）首次访问时
-//! 一次性迁移到新位置。
+//! 配置存**容器内** `{user.home}/.easytidy/passthrough.toml`，与宿主侧 `~/.easytidy` 约定
+//! 一致；自定义应用图标同根存于 `{user.home}/.easytidy/icons/`。两者均随容器可写层/
+//! 快照/rebuild 提交持久，容器自包含。路径与旧 XDG 位置（`.config/easytidy/`、
+//! `.local/share/icons/easytidy/`）的一次性文件搬移由 `crate::storage::init` 统一负责
+//! （启动时）；本模块只负责配置里**绝对图标路径**的格式感知改写（旧图标目录前缀
+//! → 新图标目录前缀），首次访问时执行。
 //!
 //! 两类条目同存一文件：
 //! - `apps`：有状态条目（auto_start 应用 + 自定义应用）
@@ -25,48 +26,73 @@ use crate::setup::user_map;
 use crate::state::ServerState;
 use crate::services::apps::spawn_managed_process;
 
-/// 进程内一次性迁移守卫（旧 XDG 位置 `.config/easytidy` → 新位置 `.easytidy`）。
-static LEGACY_PATH_MIGRATED: std::sync::Once = std::sync::Once::new();
+/// 进程内一次性守卫（旧 XDG 图标目录前缀 → 新 `.easytidy/icons` 的配置改写）。
+static LEGACY_ICONS_MIGRATED: std::sync::Once = std::sync::Once::new();
 
-/// 一次性迁移：旧 XDG 位置 `.config/easytidy/passthrough.toml` → 新位置 `.easytidy/passthrough.toml`。
-/// 幂等：仅当新位置不存在且旧位置存在时 `rename` 搬过来；不覆盖已存在的新文件。
-fn migrate_legacy_path(new_path: &std::path::Path, old_path: &std::path::Path) {
-    if !new_path.exists() && old_path.exists() {
-        if let Some(parent) = new_path.parent() {
-            if std::fs::create_dir_all(parent).is_ok() {
-                match std::fs::rename(old_path, new_path) {
-                    Ok(()) => info!(
-                        "passthrough 配置已迁移：{} → {}",
-                        old_path.display(),
-                        new_path.display()
-                    ),
-                    Err(e) => warn!(
-                        "passthrough 配置迁移失败（{} → {}）：{e}",
-                        old_path.display(),
-                        new_path.display()
-                    ),
-                }
+/// 旧自定义应用图标目录相对 home 的路径（XDG icons 位置；仅作迁移源）。
+const LEGACY_ICONS_REL: &str = ".local/share/icons/easytidy";
+
+/// 新自定义应用图标目录相对 home 的路径（与 `crate::storage::icons_dir` 一致）。
+const ICONS_REL: &str = ".easytidy/icons";
+
+/// 容器内配置路径：`{user.home}/.easytidy/passthrough.toml`（由 `crate::storage` 统一管理）。
+///
+/// 首次访问时执行一次性图标路径改写：配置里指向旧 XDG 图标目录的绝对路径改写为
+/// 新 `.easytidy/icons` 前缀（文件搬移已由 `crate::storage::init` 完成）。
+fn container_passthrough_path() -> PathBuf {
+    let path = crate::storage::passthrough_path();
+
+    LEGACY_ICONS_MIGRATED.call_once(|| {
+        let home = user_map()
+            .map(|u| u.home.clone())
+            .unwrap_or_else(|| std::env::var("HOME").unwrap_or_default());
+        if home.is_empty() {
+            return;
+        }
+        let legacy_dir = format!("{home}/{LEGACY_ICONS_REL}");
+        let new_dir = format!("{home}/{ICONS_REL}");
+        rewrite_icon_paths(&path, &legacy_dir, &new_dir);
+    });
+
+    path
+}
+
+/// 把配置里指向旧图标目录的绝对路径前缀改写为新目录前缀（幂等；无旧前缀则不动）。
+///
+/// 只改 `apps`/`pinned` 里 `icon` 字段中以 `{legacy_dir}/` 开头的路径（我们的图标）；
+/// 指向系统位置（如 `/usr/share/icons/...`）的应用自身图标不受影响。
+fn rewrite_icon_paths(path: &std::path::Path, legacy_dir: &str, new_dir: &str) {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(mut cfg) = toml::from_str::<ContainerPassthroughConfig>(&content) else {
+        return;
+    };
+    let legacy_prefix = format!("{legacy_dir}/");
+    let new_prefix = format!("{new_dir}/");
+    let mut changed = 0usize;
+    for app in cfg.apps.iter_mut().chain(cfg.pinned.iter_mut()) {
+        if let Some(icon) = app.icon.as_mut() {
+            if let Some(rest) = icon.strip_prefix(&legacy_prefix) {
+                *icon = format!("{new_prefix}{rest}");
+                changed += 1;
             }
         }
     }
-}
-
-/// 容器内配置路径：`{user.home}/.easytidy/passthrough.toml`（与宿主侧 `~/.easytidy` 约定一致）。
-///
-/// 首次访问时执行一次性迁移：旧 XDG 位置 `.config/easytidy/passthrough.toml` 若存在且
-/// 新位置不存在，则搬过来（现有容器升级不丢配置）。
-fn container_passthrough_path() -> PathBuf {
-    let home = user_map()
-        .map(|u| u.home.clone())
-        .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".to_string()));
-    let new_path = PathBuf::from(&home).join(".easytidy/passthrough.toml");
-
-    LEGACY_PATH_MIGRATED.call_once(|| {
-        let old_path = PathBuf::from(&home).join(".config/easytidy/passthrough.toml");
-        migrate_legacy_path(&new_path, &old_path);
-    });
-
-    new_path
+    if changed > 0 {
+        match toml::to_string(&cfg) {
+            Ok(s) => match std::fs::write(path, s) {
+                Ok(()) => info!(
+                    "passthrough 图标路径已迁移：{} → {}（{} 个）",
+                    legacy_dir,
+                    new_dir,
+                    changed
+                ),
+                Err(e) => warn!("图标路径改写写回失败：{e}"),
+            },
+            Err(e) => warn!("图标路径改写序列化失败：{e}"),
+        }
+    }
 }
 
 /// 容器内配置文件的磁盘格式（应用列表 + 收藏，同存一文件，容器自包含）
@@ -227,47 +253,100 @@ mod tests {
     }
 
     #[test]
-    fn test_migrate_legacy_path_moves_old_to_new() {
-        // 旧 XDG 位置有配置、新位置不存在 → 搬到新位置（内容保留、旧文件消失）
+    fn test_rewrite_icon_paths_moves_custom_icons() {
+        // 配置里指向旧 XDG 图标目录的自定义应用图标 → 改写为新 .easytidy/icons 前缀
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join(".config/easytidy/passthrough.toml");
-        let new = dir.path().join(".easytidy/passthrough.toml");
-        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::write(&old, "schema_version = 1\napps = []\n").unwrap();
+        let path = dir.path().join(".easytidy/passthrough.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"custom:chrome\"\n\n"
+                .to_string() +
+                "name = \"Chrome\"\ncmd = \"google-chrome\"\n"
+                    + "icon = \"/home/node/.local/share/icons/easytidy/phoebe.png\"\n",
+        )
+        .unwrap();
 
-        migrate_legacy_path(&new, &old);
+        rewrite_icon_paths(
+            &path,
+            "/home/node/.local/share/icons/easytidy",
+            "/home/node/.easytidy/icons",
+        );
 
-        assert!(new.exists(), "应迁移到新位置");
-        assert!(!old.exists(), "旧位置应消失");
-        assert_eq!(std::fs::read_to_string(&new).unwrap(), "schema_version = 1\napps = []\n");
+        let cfg = read_container_config(&path);
+        assert_eq!(
+            cfg.pinned[0].icon.as_deref(),
+            Some("/home/node/.easytidy/icons/phoebe.png"),
+            "自定义图标路径应改写为新前缀"
+        );
     }
 
     #[test]
-    fn test_migrate_legacy_path_no_overwrite_when_new_exists() {
-        // 新位置已存在 → 不覆盖（幂等安全）
+    fn test_rewrite_icon_paths_keeps_system_icons() {
+        // 指向系统位置（/usr/share/icons/...）的应用自身图标不受影响
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join(".config/easytidy/passthrough.toml");
-        let new = dir.path().join(".easytidy/passthrough.toml");
-        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
-        std::fs::create_dir_all(new.parent().unwrap()).unwrap();
-        std::fs::write(&old, "OLD").unwrap();
-        std::fs::write(&new, "NEW").unwrap();
+        let path = dir.path().join(".easytidy/passthrough.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"a\"\nname = \"A\"\n"
+                .to_string() +
+                "cmd = \"x\"\nicon = \"/usr/share/icons/hicolor/256x256/apps/x.png\"\n",
+        )
+        .unwrap();
 
-        migrate_legacy_path(&new, &old);
+        rewrite_icon_paths(
+            &path,
+            "/home/node/.local/share/icons/easytidy",
+            "/home/node/.easytidy/icons",
+        );
 
-        assert_eq!(std::fs::read_to_string(&new).unwrap(), "NEW", "不应覆盖新文件");
-        assert!(old.exists(), "新已存在时旧文件保留（不搬）");
+        let cfg = read_container_config(&path);
+        assert_eq!(
+            cfg.pinned[0].icon.as_deref(),
+            Some("/usr/share/icons/hicolor/256x256/apps/x.png"),
+            "系统图标路径不应被改写"
+        );
     }
 
     #[test]
-    fn test_migrate_legacy_path_noop_when_old_missing() {
-        // 旧位置不存在 → 什么都不做（不报错、不建空新文件）
+    fn test_rewrite_icon_paths_idempotent_when_no_legacy() {
+        // 已是新前缀（或无旧前缀）→ 不改写、不报错（幂等）
         let dir = tempfile::tempdir().unwrap();
-        let old = dir.path().join(".config/easytidy/passthrough.toml");
-        let new = dir.path().join(".easytidy/passthrough.toml");
+        let path = dir.path().join(".easytidy/passthrough.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original =
+            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"a\"\nname = \"A\"\ncmd = \"x\"\n"
+                .to_string()
+                + "icon = \"/home/node/.easytidy/icons/a.png\"\n";
+        std::fs::write(&path, &original).unwrap();
 
-        migrate_legacy_path(&new, &old);
+        rewrite_icon_paths(
+            &path,
+            "/home/node/.local/share/icons/easytidy",
+            "/home/node/.easytidy/icons",
+        );
 
-        assert!(!new.exists(), "旧不存在时不应创建新文件");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "无旧前缀时不应改动文件"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_icon_paths_noop_when_file_missing() {
+        // 配置文件不存在 → 什么都不做（不报错、不建文件）
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".easytidy/passthrough.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        rewrite_icon_paths(
+            &path,
+            "/home/node/.local/share/icons/easytidy",
+            "/home/node/.easytidy/icons",
+        );
+
+        assert!(!path.exists(), "文件不存在时不应创建");
     }
 }

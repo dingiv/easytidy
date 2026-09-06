@@ -48,7 +48,7 @@ export function PassthroughManager() {
   const [pickingHostIcon, setPickingHostIcon] = useState(false);
 
   /** 「从宿主机选用」：宿主 rfd 选图片 → 后端复制进容器
-   *  {home}/.local/share/icons/easytidy/ → 容器内路径回填输入框 */
+   *  {home}/.easytidy/icons/ → 容器内路径回填输入框 */
   const pickHostIcon = async () => {
     setPickingHostIcon(true);
     setError(null);
@@ -433,7 +433,7 @@ export function PassthroughManager() {
             <label className="custom-form-label">图标</label>
             <div className="custom-form-icon">
               <input
-                placeholder="容器内路径，如 ~/.local/share/icons/easytidy/app.png（可留空）"
+                placeholder="容器内路径，如 ~/.easytidy/icons/app.png（可留空）"
                 value={customIcon ?? ''}
                 onChange={(e) => setCustomIcon(e.target.value || null)}
                 title="图标容器内路径（可直接键入，或「从宿主机选用」）"

@@ -557,7 +557,7 @@ pub async fn passthrough_remove_app(
 
 /// 容器 server 信息（http_port + 容器默认用户 home）。
 /// 宿主侧用 home_dir 定位容器内用户可写资源
-/// （如自定义应用图标目录 ~/.local/share/icons/easytidy）。
+/// （如自定义应用图标目录 ~/.easytidy/icons）。
 #[tauri::command]
 pub async fn server_info(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -585,17 +585,17 @@ async fn server_info_inner(sess: &GuiSession) -> Result<serde_json::Value, Strin
 }
 
 // ============================================================================
-// 图标命令（自定义应用图标统一存**容器内** `{home}/.local/share/icons/easytidy/`；
+// 图标命令（自定义应用图标统一存**容器内** `{home}/.easytidy/icons/`，与宿主侧 `~/.easytidy` 约定一致；
 // 容器自包含；宿主 .desktop 的 Icon= 导出时从容器拷出到宿主缓存）
 // ============================================================================
 
-/// 图标目录相对用户 home 的后缀（XDG 用户 icons 目录下的 easytidy 子目录）
-const ICON_DIR_REL: &str = ".local/share/icons/easytidy";
+/// 图标目录相对用户 home 的后缀（统一数据根 `.easytidy` 下的 icons 子目录）
+const ICON_DIR_REL: &str = ".easytidy/icons";
 
-/// 容器内自定义应用图标目录：`{home}/.local/share/icons/easytidy`。
+/// 容器内自定义应用图标目录：`{home}/.easytidy/icons`（与 server `storage::icons_dir` 一致）。
 ///
 /// server 以容器默认用户运行（非 root，/usr/local 不可写），故用该用户 home
-/// 下的 XDG 位置；home 经 `server.info` 的 home_dir 字段获取（server 即该用户，
+/// 下的统一数据目录；home 经 `server.info` 的 home_dir 字段获取（server 即该用户，
 /// 零探测）。旧 server 无 home_dir 字段 → 明确报错。
 async fn container_icon_dir(sess: &GuiSession) -> Result<String, String> {
     let info = server_info_inner(sess).await?;
@@ -608,7 +608,7 @@ async fn container_icon_dir(sess: &GuiSession) -> Result<String, String> {
 }
 
 /// 从宿主机选择图标（rfd 原生文件对话框）→ 复制进容器
-/// `{home}/.local/share/icons/easytidy/<原文件名>` → 返回**容器内路径**。
+/// `{home}/.easytidy/icons/<原文件名>` → 返回**容器内路径**。
 ///
 /// 自定义应用图标统一存容器内（容器自包含）：用户从宿主选一个图片文件，
 /// 后端读取后经 server fs.mkdir + fs.write 写入容器，前端把容器内路径填回
