@@ -412,39 +412,51 @@ export function PassthroughManager() {
 
       <div className="custom-section">
         <h4>自定义应用（容器固定目录之外）</h4>
-        <div className="custom-form">
-          <input
-            placeholder="名称，如 Chrome (自定义)"
-            value={customName}
-            onChange={(e) => setCustomName(e.target.value)}
-          />
-          <input
-            placeholder="命令，如 google-chrome-stable --disable-dev-shm-usage"
-            value={customCmd}
-            onChange={(e) => setCustomCmd(e.target.value)}
-          />
-          {/* 图标：容器内路径输入 + 「从宿主机选用」（rfd 选图片 → 复制进容器 → 路径回填） */}
-          <input
-            placeholder="图标容器内路径，如 ~/.local/share/icons/easytidy/app.png"
-            value={customIcon ?? ''}
-            onChange={(e) => setCustomIcon(e.target.value || null)}
-            title="图标容器内路径（可直接键入，或「从宿主机选用」）"
-          />
-          <button
-            className="secondary-button"
-            onClick={pickHostIcon}
-            disabled={pickingHostIcon}
-            title="打开宿主原生文件对话框选图片，自动复制进容器并回填路径"
-          >
-            {pickingHostIcon ? '复制中…' : (
-              <>
-                <DownloadOutlined /> 从宿主机选用
-              </>
-            )}
-          </button>
-          <button className="primary-button" onClick={handleAddCustom} disabled={addingCustom}>
-            {addingCustom ? '添加中…' : '添加'}
-          </button>
+        <div className="custom-form custom-form-vertical">
+          <div className="custom-form-row">
+            <label className="custom-form-label">名称</label>
+            <input
+              placeholder="名称，如 Chrome (自定义)"
+              value={customName}
+              onChange={(e) => setCustomName(e.target.value)}
+            />
+          </div>
+          <div className="custom-form-row">
+            <label className="custom-form-label">命令</label>
+            <input
+              placeholder="命令，如 google-chrome-stable --disable-dev-shm-usage"
+              value={customCmd}
+              onChange={(e) => setCustomCmd(e.target.value)}
+            />
+          </div>
+          <div className="custom-form-row">
+            <label className="custom-form-label">图标</label>
+            <div className="custom-form-icon">
+              <input
+                placeholder="容器内路径，如 ~/.local/share/icons/easytidy/app.png（可留空）"
+                value={customIcon ?? ''}
+                onChange={(e) => setCustomIcon(e.target.value || null)}
+                title="图标容器内路径（可直接键入，或「从宿主机选用」）"
+              />
+              <button
+                className="secondary-button"
+                onClick={pickHostIcon}
+                disabled={pickingHostIcon}
+                title="打开宿主原生文件对话框选图片，自动复制进容器并回填路径"
+              >
+                {pickingHostIcon ? '复制中…' : (
+                  <>
+                    <DownloadOutlined /> 从宿主机选用
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+          <div className="custom-form-row custom-form-actions">
+            <button className="primary-button" onClick={handleAddCustom} disabled={addingCustom}>
+              {addingCustom ? '添加中…' : '添加'}
+            </button>
+          </div>
         </div>
         {customApps.map((custom) => {
           const isExported =
