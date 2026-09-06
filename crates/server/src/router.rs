@@ -259,6 +259,8 @@ pub(crate) async fn handle_server_info(msg: Message) -> Result<Frame> {
         op: "server.info".to_string(),
         payload: serde_json::to_value(ServerInfoResp {
             http_port: HTTP_PORT.load(std::sync::atomic::Ordering::SeqCst),
+            // 容器默认用户 home（server 自身身份；setup 后恒有值，防御性 unwrap_or_default）
+            home_dir: crate::setup::user_map().map(|u| u.home.clone()).unwrap_or_default(),
         })?,
         err: None,
     }))

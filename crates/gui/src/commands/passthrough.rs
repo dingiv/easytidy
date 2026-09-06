@@ -2,9 +2,11 @@
 
 use tracing::{info, warn};
 
+use base64::Engine as _;
+
 use easytidy_protocol::ops::{
-    CfgGet, CfgGetResp, CfgSet, PassthroughList, PassthroughListResp, PassthroughSet,
-    PtConfiguredApp,
+    CfgGet, CfgGetResp, CfgSet, FsMkdir, FsWrite, PassthroughList, PassthroughListResp,
+    PassthroughSet, PtConfiguredApp,
 };
 
 use crate::commands::apps::AppInfoFrontend;
@@ -237,8 +239,8 @@ pub async fn passthrough_set_boot_mode(
 /// 收藏/取消收藏应用（pin 到 GUI 工具栏）。
 ///
 /// pinned=true → upsert 到收藏列表（cmd/icon 一并保存，拉起与显示用最新值）；
-/// pinned=false → 移除。icon_path：扫描应用 = 容器内图标路径（工具栏经
-/// server 拉取显示），自定义应用 = 宿主 ~/.easytidy/icons 路径。
+/// pinned=false → 移除。icon_path：扫描应用与自定义应用均为**容器内**图标
+/// 路径（工具栏经 server 拉取显示）。
 #[tauri::command]
 pub async fn passthrough_set_pinned(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -424,16 +426,6 @@ async fn detect_early_exit(container: &str, pid: u32) -> Result<(), String> {
     Ok(())
 }
 
-/// 宿主侧文件是否存在（收藏自定义应用图标探测用）。
-///
-/// 收藏应用的图标引用存容器内配置：自定义应用 = 宿主 `~/.easytidy/icons` 路径。
-/// GUI 展示时探测该宿主路径是否存在——存在则正常显示，缺失（容器迁移/图标被清理）
-/// 则显示「图标异常」。纯宿主本地操作，不依赖容器会话。
-#[tauri::command]
-pub async fn fs_host_exists(path: String) -> bool {
-    std::path::Path::new(&path).exists()
-}
-
 /// 清理 Exec 的 %U/%f 等占位符（宿主侧不展开容器内文件参数；export/toggle 共用）
 fn clean_exec(exec: &str) -> String {
     exec.split_whitespace()
@@ -563,34 +555,76 @@ pub async fn passthrough_remove_app(
     Ok(())
 }
 
-// ============================================================================
-// 图标命令（自定义应用图标：宿主选择 / 容器选择 → 统一落盘 ~/.easytidy/icons）
-// ============================================================================
-
-/// 把图标字节写入 `~/.easytidy/icons/`（时间戳防冲突，保留扩展名），返回宿主路径。
-fn save_icon_to_appdata(bytes: &[u8], source_name: &str) -> Result<String, String> {
-    let ext = std::path::Path::new(source_name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .filter(|e| !e.is_empty())
-        .unwrap_or_else(|| "png".to_string());
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let dir = easytidy_core::appdata::icons_dir().map_err(|e| e.to_string())?;
-    let dst = dir.join(format!("icon-{secs}.{ext}"));
-    std::fs::write(&dst, bytes).map_err(|e| format!("复制图标到 ~/.easytidy/icons 失败：{e}"))?;
-    info!("图标已落盘：{}", dst.display());
-    Ok(dst.to_string_lossy().into_owned())
+/// 容器 server 信息（http_port + 容器默认用户 home）。
+/// 宿主侧用 home_dir 定位容器内用户可写资源
+/// （如自定义应用图标目录 ~/.local/share/icons/easytidy）。
+#[tauri::command]
+pub async fn server_info(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<serde_json::Value, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    server_info_inner(sess).await
 }
 
-/// 从宿主机选择图标（rfd 原生文件对话框）→ 复制到 ~/.easytidy/icons/。
-/// 自定义应用图标入口之一；返回宿主本地路径（写入**容器内** passthrough 配置的 icon）。
+/// server.info 请求（[`server_info`] tauri 命令与 [`container_icon_dir`] 共用）
+async fn server_info_inner(sess: &GuiSession) -> Result<serde_json::Value, String> {
+    let resp = send_json_request(
+        sess,
+        "server.info".to_string(),
+        serde_json::to_value(serde_json::json!({})).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    Ok(resp.payload)
+}
+
+// ============================================================================
+// 图标命令（自定义应用图标统一存**容器内** `{home}/.local/share/icons/easytidy/`；
+// 容器自包含；宿主 .desktop 的 Icon= 导出时从容器拷出到宿主缓存）
+// ============================================================================
+
+/// 图标目录相对用户 home 的后缀（XDG 用户 icons 目录下的 easytidy 子目录）
+const ICON_DIR_REL: &str = ".local/share/icons/easytidy";
+
+/// 容器内自定义应用图标目录：`{home}/.local/share/icons/easytidy`。
+///
+/// server 以容器默认用户运行（非 root，/usr/local 不可写），故用该用户 home
+/// 下的 XDG 位置；home 经 `server.info` 的 home_dir 字段获取（server 即该用户，
+/// 零探测）。旧 server 无 home_dir 字段 → 明确报错。
+async fn container_icon_dir(sess: &GuiSession) -> Result<String, String> {
+    let info = server_info_inner(sess).await?;
+    let home = info
+        .get("home_dir")
+        .and_then(|v| v.as_str())
+        .filter(|h| !h.is_empty())
+        .ok_or_else(|| "无法获取容器 home 目录（容器内 server 版本过旧，无 home_dir 字段）".to_string())?;
+    Ok(format!("{home}/{ICON_DIR_REL}"))
+}
+
+/// 从宿主机选择图标（rfd 原生文件对话框）→ 复制进容器
+/// `{home}/.local/share/icons/easytidy/<原文件名>` → 返回**容器内路径**。
+///
+/// 自定义应用图标统一存容器内（容器自包含）：用户从宿主选一个图片文件，
+/// 后端读取后经 server fs.mkdir + fs.write 写入容器，前端把容器内路径填回
+/// 输入框。导出 .desktop 时再经 [`passthrough_export`] 从容器拷出。
 #[tauri::command]
-pub async fn passthrough_pick_host_icon() -> Result<String, String> {
+pub async fn passthrough_pick_host_icon(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<String, String> {
     use std::io::Read;
+
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+
+    let icon_dir = container_icon_dir(sess).await?;
 
     // 原生对话框会阻塞主线程：spawn_blocking 避免卡 async runtime
     let picked = tokio::task::spawn_blocking(|| {
@@ -607,26 +641,43 @@ pub async fn passthrough_pick_host_icon() -> Result<String, String> {
     std::fs::File::open(&picked)
         .and_then(|mut f| f.read_to_end(&mut bytes))
         .map_err(|e| format!("读取宿主图标失败：{e}"))?;
-    save_icon_to_appdata(&bytes, &picked)
+
+    let fname = std::path::Path::new(&picked)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("icon.png")
+        .to_string();
+    let container_path = format!("{icon_dir}/{fname}");
+
+    // fs.write 不建父目录：先 mkdir -p 再全量写入
+    let mkdir_req = FsMkdir { path: icon_dir.clone() };
+    send_json_request(
+        sess,
+        "fs.mkdir".to_string(),
+        serde_json::to_value(mkdir_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let write_req = FsWrite {
+        path: container_path.clone(),
+        data_b64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        offset: None,
+    };
+    send_json_request(
+        sess,
+        "fs.write".to_string(),
+        serde_json::to_value(write_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
+    info!("图标已从宿主复制进容器：{picked} → {container_path}");
+    Ok(container_path)
 }
 
-/// 从容器内选择图标（前端容器文件浏览器选定路径）→ 经 server fs.read
-/// 拉取 → 复制到 ~/.easytidy/icons/。自定义应用图标入口之二。
-#[tauri::command]
-pub async fn passthrough_import_container_icon(
-    session: tauri::State<'_, Option<GuiSession>>,
-    container_path: String,
-) -> Result<String, String> {
-    let sess = session
-        .inner()
-        .as_ref()
-        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-    let bytes = fetch_container_file(sess, &container_path).await?;
-    save_icon_to_appdata(&bytes, &container_path)
-}
-
-/// 设置自定义应用图标（icon = 宿主 ~/.easytidy/icons 路径；None = 清除）。
-/// 写入**容器内**配置；导出时 Icon= 直接用该路径。
+/// 设置自定义应用图标（icon = **容器内**图片路径；None = 清除）。
+/// 写入**容器内**配置；导出时 Icon= 用该容器内路径拷出的宿主缓存。
 #[tauri::command]
 pub async fn passthrough_set_custom_icon(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -669,14 +720,27 @@ pub async fn passthrough_export(
     // Exec 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数）
     let exec = clean_exec(&app.exec);
 
-    // 图标：custom 应用优先用用户选定的宿主本地图标（~/.easytidy/icons/，
-    // Icon= 绝对路径直接可用），未选定回退内置品牌图标；扫描应用经
-    // server fs.read 搬运容器内图标 → 合成品牌化 → ~/.easytidy/icons/ 缓存
+    // 图标：两类应用均为**容器内**路径 → 导出时经 server 拷出到宿主缓存 →
+    // Icon= 用宿主路径。custom 保留原始图标；扫描应用合成品牌化（边框+水印）；
+    // 拷出失败（容器未运行/文件缺失）时 custom 回退内置品牌图标
     let mut icon_attr = None;
     if app.desktop_file.starts_with("custom:") {
-        if let Some(icon) = app.icon_path.as_ref() {
-            if std::path::Path::new(icon).is_file() {
-                icon_attr = Some(icon.clone());
+        if let Some(icon_path) = app.icon_path.as_ref() {
+            if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
+                if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
+                    if std::fs::create_dir_all(&icons_dir).is_ok() {
+                        let ext = std::path::Path::new(icon_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .filter(|e| !e.is_empty())
+                            .unwrap_or("png");
+                        let icon_file =
+                            icons_dir.join(format!("easytidy-custom-{container}-icon.{ext}"));
+                        if std::fs::write(&icon_file, &icon_data).is_ok() {
+                            icon_attr = Some(icon_file.to_string_lossy().into_owned());
+                        }
+                    }
+                }
             }
         }
         if icon_attr.is_none() {

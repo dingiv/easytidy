@@ -509,22 +509,6 @@ button:disabled {
   flex: none;
 }
 
-/* 图标下拉按钮（新增应用表单：从宿主机/从容器导入） */
-.custom-form .custom-icon-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  flex: none;
-}
-
-.custom-icon-preview {
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
-  object-fit: contain;
-}
-
 .custom-form input::placeholder {
   color: #6c7086;
 }

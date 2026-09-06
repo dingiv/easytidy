@@ -160,12 +160,11 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::passthrough_add_custom,
             commands::passthrough::passthrough_remove_app,
             commands::passthrough::export_gui_shortcut,
-            // 图标（自定义应用：宿主选择 / 容器选择 → ~/.easytidy/icons）
+            // 图标（自定义应用：宿主机选用 → 复制进容器；路径输入；存容器内）
             commands::passthrough::passthrough_pick_host_icon,
-            commands::passthrough::passthrough_import_container_icon,
             commands::passthrough::passthrough_set_custom_icon,
-            // 收藏自定义应用图标：宿主路径存在性探测（缺失 → 显示「图标异常」）
-            commands::passthrough::fs_host_exists,
+            // 容器 server 信息（home_dir 定位容器内用户可写资源）
+            commands::passthrough::server_info,
             // 收藏（pin 到工具栏）
             commands::passthrough::passthrough_set_pinned,
             commands::passthrough::passthrough_launch,

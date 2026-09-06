@@ -6,9 +6,9 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { App as AntApp, Radio, Space, Switch, Tooltip } from 'antd';
+import { App as AntApp, Radio, Switch, Tooltip } from 'antd';
 import {
-  CloseOutlined,
+  DownloadOutlined,
   PictureOutlined,
   PlayCircleOutlined,
   PushpinFilled,
@@ -16,6 +16,7 @@ import {
 } from '@ant-design/icons';
 import { AppIcon } from './AppIcon';
 import { IconPickerModal } from './IconPickerModal';
+import { PinnedAppIcon } from './PinnedAppIcon';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import type {
   AppInfo,
@@ -41,10 +42,26 @@ export function PassthroughManager() {
   const [exportingGui, setExportingGui] = useState(false);
   // 正在选择图标的自定义应用 id（null = 弹窗关闭）
   const [iconPickerFor, setIconPickerFor] = useState<string | null>(null);
-  // 新增应用表单：已选定的图标宿主路径（null = 未选）
+  // 新增应用表单：图标 = **容器内路径**（null = 未选）
   const [customIcon, setCustomIcon] = useState<string | null>(null);
-  // 新增应用表单的容器内选图标弹窗（独立选取模式）
-  const [pickingNewIcon, setPickingNewIcon] = useState(false);
+  // 新增应用表单：「从宿主机选用」进行中（rfd 对话框 + 复制进容器）
+  const [pickingHostIcon, setPickingHostIcon] = useState(false);
+
+  /** 「从宿主机选用」：宿主 rfd 选图片 → 后端复制进容器
+   *  {home}/.local/share/icons/easytidy/ → 容器内路径回填输入框 */
+  const pickHostIcon = async () => {
+    setPickingHostIcon(true);
+    setError(null);
+    try {
+      const p = await invoke<string>('passthrough_pick_host_icon');
+      setCustomIcon(p);
+    } catch (err: any) {
+      const msg = errMsg(err, '选择宿主图标失败');
+      if (!msg.includes('已取消')) setError(msg);
+    } finally {
+      setPickingHostIcon(false);
+    }
+  };
 
   /** 导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面，双击打开此管理界面） */
   const handleExportGuiShortcut = async () => {
@@ -406,30 +423,25 @@ export function PassthroughManager() {
             value={customCmd}
             onChange={(e) => setCustomCmd(e.target.value)}
           />
-          {/* 图标：选择图标弹窗（独立选取模式）；弹窗内含「从宿主机导入」独立按钮
-              + 容器路径输入框（浏览）；落盘后写入新应用 customIcon */}
-          <Space size={4}>
-            <button
-              className="secondary-button custom-icon-btn"
-              title={customIcon ? customIcon : '选择应用图标（宿主导入 / 容器路径）'}
-              onClick={() => setPickingNewIcon(true)}
-            >
-              {customIcon ? (
-                <img src={`file://${customIcon}`} className="custom-icon-preview" alt="" />
-              ) : (
-                <PictureOutlined />
-              )}
-            </button>
-            {customIcon && (
-              <button
-                className="secondary-button icon-only"
-                title="清除图标"
-                onClick={() => setCustomIcon(null)}
-              >
-                <CloseOutlined />
-              </button>
+          {/* 图标：容器内路径输入 + 「从宿主机选用」（rfd 选图片 → 复制进容器 → 路径回填） */}
+          <input
+            placeholder="图标容器内路径，如 ~/.local/share/icons/easytidy/app.png"
+            value={customIcon ?? ''}
+            onChange={(e) => setCustomIcon(e.target.value || null)}
+            title="图标容器内路径（可直接键入，或「从宿主机选用」）"
+          />
+          <button
+            className="secondary-button"
+            onClick={pickHostIcon}
+            disabled={pickingHostIcon}
+            title="打开宿主原生文件对话框选图片，自动复制进容器并回填路径"
+          >
+            {pickingHostIcon ? '复制中…' : (
+              <>
+                <DownloadOutlined /> 从宿主机选用
+              </>
             )}
-          </Space>
+          </button>
           <button className="primary-button" onClick={handleAddCustom} disabled={addingCustom}>
             {addingCustom ? '添加中…' : '添加'}
           </button>
@@ -443,17 +455,8 @@ export function PassthroughManager() {
               className={`app-item ${isExported ? 'exported' : ''}`}
             >
               <div className="app-icon">
-                {custom.icon ? (
-                  // 宿主本地图标（~/.easytidy/icons/）
-                  <img
-                    className="app-icon-img"
-                    src={`file://${custom.icon}`}
-                    alt=""
-                    style={{ width: 28, height: 28, objectFit: 'contain' }}
-                  />
-                ) : (
-                  <span>⚙️</span>
-                )}
+                {/* 图标 = 容器内路径（经 server 拉取显示；缺失自动占位） */}
+                <PinnedAppIcon id={custom.id} icon={custom.icon} size={28} />
               </div>
               <div className="app-info">
                 <div className="app-name">{custom.name}</div>
@@ -521,18 +524,16 @@ export function PassthroughManager() {
         })}
       </div>
 
-      {/* 自定义应用图标选择（宿主机 / 容器内两个入口；
-       *  行内=写入配置；新增表单=独立选取模式经 onPicked 回填） */}
-      <IconPickerModal
-        open={iconPickerFor !== null || pickingNewIcon}
-        appId={iconPickerFor}
-        onClose={() => {
-          setIconPickerFor(null);
-          setPickingNewIcon(false);
-        }}
-        onChanged={loadData}
-        onPicked={(path) => setCustomIcon(path)}
-      />
+      {/* 已有自定义应用：更换图标（容器内路径输入 + 从宿主机选用 + 浏览） */}
+      {iconPickerFor !== null && (
+        <IconPickerModal
+          open={iconPickerFor !== null}
+          appId={iconPickerFor}
+          currentIcon={customApps.find((a) => a.id === iconPickerFor)?.icon}
+          onClose={() => setIconPickerFor(null)}
+          onChanged={loadData}
+        />
+      )}
     </div>
   );
 }

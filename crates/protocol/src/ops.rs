@@ -220,6 +220,11 @@ pub struct FsWrite {
 pub struct ServerInfoResp {
     /// HTTP 静态文件服务端口（0 = 未启用）
     pub http_port: u16,
+    /// 容器默认用户 home（server 即容器默认用户；宿主侧据此定位容器内
+    /// 用户可写资源，如 ~/.local/share/icons/easytidy 自定义应用图标目录）。
+    /// `#[serde(default)]`：旧 server 无此字段 → 空串，前后端版本兼容。
+    #[serde(default)]
+    pub home_dir: String,
 }
 
 /// 容器内创建目录（文件夹拖入上传时递归建目录;create_dir_all 幂等）

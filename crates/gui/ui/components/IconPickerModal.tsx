@@ -1,28 +1,27 @@
-// 自定义应用图标选择弹窗（两个来源入口）：
-// - 从宿主机导入：**独立按钮** → rfd 原生文件对话框（passthrough_pick_host_icon）
-// - 从容器导入：**路径输入框**（移植 bind mount 的路径输入组件：AutoComplete
-//   列目录补全 +「浏览」按钮打开容器内路径选择器）→ 拉取落盘
-// 选定后图标数据统一落盘宿主机 ~/.easytidy/icons（import → set_custom_icon），
-// 桌面入口 Icon= 用绝对路径直接显示。
+// 自定义应用图标选择弹窗（已有应用改图标）：
+// - 图标 = **容器内路径**输入框（AutoComplete 列目录补全 +「浏览」进目录挑选）
+// - 「从宿主机选用」：rfd 原生对话框选图片 → 后端复制进容器
+//   {home}/.local/share/icons/easytidy/ → 容器内路径回填输入框
+// - 确定：写入容器内配置（passthrough_set_custom_icon）；清除：去掉图标
+// 图标统一存容器内（容器自包含）；导出 .desktop 时再从容器拷出到宿主缓存。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
 import { Modal, Button, Input, Spin, AutoComplete, Space } from 'antd';
-import { FolderOpenOutlined } from '@ant-design/icons';
+import { FolderOpenOutlined, DownloadOutlined } from '@ant-design/icons';
 import { mimeForPath } from './mime';
 import { ContainerPathPicker, parentDir } from './ContainerPathPicker';
 
 interface IconPickerModalProps {
   open: boolean;
-  /** 自定义应用 id（custom:<name>）；null = 独立选取模式：选定后
-   *  仅经 onPicked 返回宿主路径，由调用方决定用途（新增应用表单用） */
-  appId: string | null;
+  /** 自定义应用 id（custom:<name>） */
+  appId: string;
+  /** 当前图标的容器内路径（输入框初值） */
+  currentIcon?: string | null;
   onClose: () => void;
-  /** 图标已设置/清除（调用方重新拉取列表；appId 模式下） */
+  /** 图标已设置/清除（调用方重新拉取列表） */
   onChanged: () => void;
-  /** 独立选取模式：返回落盘后的宿主图标路径 */
-  onPicked?: (hostPath: string) => void;
 }
 
 interface FsEntry {
@@ -36,12 +35,12 @@ function isImagePath(path: string): boolean {
   return IMAGE_EXT.has(path.split('.').pop()?.toLowerCase() ?? '');
 }
 
-export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: IconPickerModalProps) {
-  // 容器图片路径输入框（移植自 bind mount 宿主路径输入：AutoComplete + 浏览）
+export function IconPickerModal({ open, appId, currentIcon, onClose, onChanged }: IconPickerModalProps) {
+  // 容器内图片路径输入框（AutoComplete 列目录补全 + 浏览）
   const [containerPath, setContainerPath] = useState('');
   // 补全选项（每键入一次从 fs_list 父目录拉取，前缀过滤）
   const [pathOpts, setPathOpts] = useState<{ value: string; label: React.ReactNode }[]>([]);
-  // 选中目录后保持下拉打开 → 续接下一级（bind mount 同款行为）
+  // 选中目录后保持下拉打开 → 续接下一级
   const [acOpen, setAcOpen] = useState(false);
   // 「浏览」：容器内路径选择器弹窗
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -54,14 +53,14 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
   useEffect(() => {
     if (!open) return;
     setError(null);
-    setContainerPath('');
+    setContainerPath(currentIcon ?? '');
     setPathOpts([]);
     setPreview(null);
     setAcOpen(false);
-  }, [open]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, currentIcon]);
 
-  /** 补全：fs_list 父目录 → 按已键入前缀过滤（移植 bind mount 宿主路径补全，
-   *  数据源从宿主建议命令换成容器 fs_list） */
+  /** 补全：fs_list 父目录 → 按已键入前缀过滤 */
   const searchPathOpts = async (value: string) => {
     if (!value) {
       setPathOpts([]);
@@ -101,78 +100,68 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerPath]);
 
-  /** 容器内图片预览（选中文件 / 浏览返回 / 回车时触发，不随每次键入） */
-  const previewOf = async (path: string) => {
-    if (!isImagePath(path)) {
+  /** 容器内图片预览（debounce：键入停顿 500ms 后拉取，仅图片路径） */
+  useEffect(() => {
+    if (!containerPath || !isImagePath(containerPath)) {
       setPreview(null);
       return;
     }
-    setPreviewing(true);
-    setPreview(null);
-    try {
-      const b64 = await invoke<string>('fetch_file_b64', { path });
-      setPreview(`data:${mimeForPath(path)};base64,${b64}`);
-    } catch {
-      setPreview(null); // 非图片/不可读：不阻塞
-    } finally {
-      setPreviewing(false);
-    }
-  };
+    const t = setTimeout(async () => {
+      setPreviewing(true);
+      setPreview(null);
+      try {
+        const b64 = await invoke<string>('fetch_file_b64', { path: containerPath });
+        setPreview(`data:${mimeForPath(containerPath)};base64,${b64}`);
+      } catch {
+        setPreview(null); // 非图片/不可读：不阻塞
+      } finally {
+        setPreviewing(false);
+      }
+    }, 500);
+    return () => clearTimeout(t);
+  }, [containerPath]);
 
-  /** AutoComplete 选中：目录 → 保持下拉钻进下一级；文件 → 预览 */
+  /** AutoComplete 选中：目录 → 保持下拉钻进下一级 */
   const handleSelect = (v: string) => {
     if (v.endsWith('/')) {
       setAcOpen(true);
-    } else {
-      void previewOf(v);
     }
   };
 
-  /** 图标落盘后统一出口：appId 模式写配置；独立模式经 onPicked 交还调用方 */
-  const applyPickedIcon = async (hostPath: string) => {
-    if (appId) {
-      await invoke('passthrough_set_custom_icon', { id: appId, icon: hostPath });
-      onChanged();
-    } else {
-      onPicked?.(hostPath);
-    }
-    onClose();
-  };
-
-  /** 入口一（独立按钮）：宿主原生文件对话框选图片 → 落盘 */
+  /** 「从宿主机选用」：rfd 选图片 → 后端复制进容器 → 路径回填输入框 */
   const pickFromHost = async () => {
     setBusy(true);
     setError(null);
     try {
-      const hostPath = await invoke<string>('passthrough_pick_host_icon');
-      await applyPickedIcon(hostPath);
+      const p = await invoke<string>('passthrough_pick_host_icon');
+      setContainerPath(p);
     } catch (err: any) {
-      setError(errMsg(err, '选择宿主图标失败'));
+      const msg = errMsg(err, '选择宿主图标失败');
+      if (!msg.includes('已取消')) setError(msg); // 取消不算错误
     } finally {
       setBusy(false);
     }
   };
 
-  /** 入口二（路径输入框）：导入容器内该路径的图片 → 落盘 */
-  const importContainer = async () => {
+  /** 确定：写入容器内配置 */
+  const confirm = async () => {
     const p = containerPath.replace(/\/+$/, '');
     if (!p) return;
     setBusy(true);
     setError(null);
     try {
-      const hostPath = await invoke<string>('passthrough_import_container_icon', {
-        containerPath: p,
-      });
-      await applyPickedIcon(hostPath);
+      await invoke('passthrough_set_custom_icon', { id: appId, icon: p });
+      onChanged();
+      onClose();
     } catch (err: any) {
-      setError(errMsg(err, '导入容器图标失败'));
+      setError(errMsg(err, '设置图标失败'));
     } finally {
       setBusy(false);
     }
   };
 
+  /** 清除图标 */
   const clearIcon = async () => {
-    if (!appId) return; // 独立模式：清除由调用方处理
     setBusy(true);
     setError(null);
     try {
@@ -191,27 +180,25 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
       title="选择应用图标"
       open={open}
       onCancel={onClose}
-      footer={null}
       width={640}
       destroyOnClose
+      footer={[
+        <Button key="clear" danger disabled={busy} onClick={clearIcon}>
+          清除图标
+        </Button>,
+        <Button key="cancel" onClick={onClose}>
+          取消
+        </Button>,
+        <Button key="ok" type="primary" disabled={!containerPath} loading={busy} onClick={confirm}>
+          确定
+        </Button>,
+      ]}
     >
       <div className="icon-picker">
-        <div className="icon-picker-sources">
-          <span className="icon-picker-label">图标来源：</span>
-          <Button onClick={pickFromHost} loading={busy} title="打开宿主原生文件对话框选择图片">
-            从宿主机导入
-          </Button>
-          {appId && (
-            <Button onClick={clearIcon} disabled={busy}>
-              清除图标
-            </Button>
-          )}
-        </div>
-
         <div className="icon-picker-row">
           <div className="icon-picker-container">
             <div className="icon-picker-label" style={{ marginBottom: 6 }}>
-              容器内图片路径（可键入补全，或「浏览」进目录挑选）：
+              图标（容器内路径，可键入补全，或「浏览」进目录挑选）：
             </div>
             <Space.Compact style={{ width: '100%' }}>
               <AutoComplete
@@ -225,11 +212,9 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
                 popupMatchSelectWidth={false}
               >
                 <Input
-                  placeholder="容器内图片路径，如 /usr/share/icons/…"
+                  placeholder="容器内图片路径，如 ~/.local/share/icons/easytidy/app.png"
                   allowClear
-                  onPressEnter={() =>
-                    containerPath && void previewOf(containerPath.replace(/\/+$/, ''))
-                  }
+                  onPressEnter={confirm}
                 />
               </AutoComplete>
               <Button
@@ -240,12 +225,12 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
                 浏览
               </Button>
               <Button
-                type="primary"
-                disabled={!containerPath}
+                icon={<DownloadOutlined />}
+                onClick={pickFromHost}
                 loading={busy}
-                onClick={importContainer}
+                title="打开宿主原生文件对话框选图片，自动复制进容器"
               >
-                导入
+                从宿主机选用
               </Button>
             </Space.Compact>
           </div>
@@ -258,7 +243,7 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
               <span className="icon-picker-preview-hint">
                 {containerPath && !isImagePath(containerPath)
                   ? '当前路径不是图片文件'
-                  : '选定容器内图片文件后预览'}
+                  : '选定容器内图片路径后预览'}
               </span>
             )}
           </div>
@@ -277,7 +262,6 @@ export function IconPickerModal({ open, appId, onClose, onChanged, onPicked }: I
         initialPath={parentDir(containerPath) || '/'}
         onPick={(p) => {
           setContainerPath(p);
-          void previewOf(p);
         }}
         onClose={() => setPickerOpen(false)}
       />
