@@ -184,11 +184,11 @@ impl ConfigFile {
                 .file_name()
                 .map(|f| old.with_file_name(format!("{}.migrated", f.to_string_lossy())))
                 .unwrap_or_else(|| old.join("config.toml.migrated"));
-            match std::fs::rename(&old, &archived) {
+            let from_display = old.display().to_string();
+            let to_display = archived.display().to_string();
+            match std::fs::rename(old, archived) {
                 Ok(()) => tracing::info!(
-                    "旧单文件注册表已归档：{} → {}",
-                    old.display(),
-                    archived.display()
+                    "旧单文件注册表已归档：{from_display} → {to_display}"
                 ),
                 Err(e) => tracing::warn!("归档旧注册表失败（不影响新配置）：{e}"),
             }
