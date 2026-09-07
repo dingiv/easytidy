@@ -5,8 +5,8 @@ use tracing::{info, warn};
 use base64::Engine as _;
 
 use easytidy_protocol::ops::{
-    CfgGet, CfgGetResp, CfgSet, FsMkdir, FsWrite, PassthroughList, PassthroughListResp,
-    PassthroughSet, PtConfiguredApp,
+    AppLogs, AppLogsResp, AppsPs, AppsPsResp, CfgGet, CfgGetResp, CfgSet, FsMkdir, FsWrite,
+    ManagedProcess, PassthroughList, PassthroughListResp, PassthroughSet, PtConfiguredApp,
 };
 
 use crate::commands::apps::AppInfoFrontend;
@@ -615,6 +615,66 @@ pub async fn passthrough_remove_app(
     }
     info!("passthrough 应用已移除（容器内）：{container} {id}");
     Ok(())
+}
+
+// ============================================================================
+// 应用控制台（app 日志/进程状态查询）——经共享连接轮询，供 AppConsolePane 使用
+// ============================================================================
+
+/// 获取某受管子进程的已捕获 stdio（server `apps.logs`：stdout+stderr 合并的
+/// 有界环形缓冲，超出上限丢最旧）。
+///
+/// 走 GuiSession 共享连接（不新建连接）——前端轮询用，每次调用开销小。
+/// 进程不存在（已退出被 prune / 未知 pid）时 server 返回空串（非错误）。
+#[tauri::command]
+pub async fn app_logs(
+    session: tauri::State<'_, Option<GuiSession>>,
+    pid: u32,
+) -> Result<String, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let resp = send_json_request(
+        sess,
+        "apps.logs".to_string(),
+        serde_json::to_value(AppLogs { pid }).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    let logs: AppLogsResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 apps.logs 失败：{e}"))?;
+    Ok(logs.stdio)
+}
+
+/// 列出 server 托管的进程（`apps.ps`：运行中 + 最近退出，带退出码与 stdio 长度）。
+///
+/// 供前端判断某 pid 是否仍在运行/已退出/退出码——应用控制台据此显示状态
+/// 并决定是否继续轮询。走共享连接（轮询用）。
+#[tauri::command]
+pub async fn app_ps(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<Vec<ManagedProcess>, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let resp = send_json_request(
+        sess,
+        "apps.ps".to_string(),
+        serde_json::to_value(AppsPs).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    let ps: AppsPsResp =
+        serde_json::from_value(resp.payload).map_err(|e| format!("解析 apps.ps 失败：{e}"))?;
+    Ok(ps.processes)
 }
 
 /// 容器 server 信息（http_port + 容器默认用户 home）。

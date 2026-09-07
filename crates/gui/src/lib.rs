@@ -171,6 +171,9 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::passthrough_launch,
             // 立即拉起容器内任意应用（Passthrough 管理器列表，无需先收藏）
             commands::passthrough::passthrough_launch_app,
+            // 应用控制台（受管子进程 stdio 日志 / 进程状态，前端轮询）
+            commands::passthrough::app_logs,
+            commands::passthrough::app_ps,
             // 容器自启动（systemd user unit）
             commands::passthrough::passthrough_set_boot_mode,
             // 配置（容器内 server 配置读写）
