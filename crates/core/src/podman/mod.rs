@@ -775,10 +775,13 @@ impl Podman {
 
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
     ///
-    /// **安全重建，默认形态**：commit 用 `commit --squash`（单层扁平镜像，
-    /// 体积小）。普通 commit 形态（保留分层、更快）见 [`Self::rebuild_quick`]——
-    /// 两者安全流程完全相同（停原容器 → commit → 起 tmp 确认就绪 → 删原
-    /// 容器改名，失败自动回滚）。
+    /// **安全重建，squash 形态**：commit 用 `commit --squash`（单层扁平镜像）。
+    /// **注意取舍**：squash 需把所有层合并重写成单个新层，耗时/体积与镜像
+    /// 总大小成正比（~20GB 大镜像实测 ~113s，而 plain commit 亚秒级），且因
+    /// 复制了 base 共享层反而**更占盘**。仅当需要一个自包含、便于 `podman save`
+    /// 转移的单层镜像时才选它。常规重建请用 [`Self::rebuild_quick`]（plain，
+    /// 更快更省盘）。两者安全流程完全相同（停原容器 → commit → 起 tmp 确认
+    /// 就绪 → 删原容器改名，失败自动回滚）。
     pub async fn rebuild(
         &self,
         name: &str,
@@ -788,10 +791,11 @@ impl Podman {
         self.rebuild_with_commit(name, config, bins, true).await
     }
 
-    /// 快速重建：与 [`Self::rebuild`] 流程完全相同（安全：保留旧容器、确认
+    /// 快速重建：与 [`Self::rebuild`] 安全流程完全相同（保留旧容器、确认
     /// 新容器就绪、失败自动回滚），唯一差异是 commit 用**普通 commit**
-    /// （保留源容器分层历史、无需扁平化，更快）。「快速」指 commit 速度，
-    /// 不是跳过安全流程。
+    /// （只写 upperdir 增量、复用 base 共享层，亚秒级且更省盘；无需像 squash
+    /// 那样把全部层合并重写）。「快速」指 commit 速度，不是跳过安全流程。
+    /// 这是**推荐**的常规重建路径。
     pub async fn rebuild_quick(
         &self,
         name: &str,
@@ -810,8 +814,8 @@ impl Podman {
     /// 1. `stop` 原容器（停止态 commit 快照一致、无需运行期 pause）
     /// 2. libpod `commit` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
     ///    （仅容器层；bind mount 不入 commit —— 正是所需）——**数据保险**；
-    ///    `squash=true` → `commit --squash` 单层扁平（体积小、较慢），
-    ///    `false` → 普通 commit（保留分层、更快）
+    ///    `squash=true` → `commit --squash` 单层扁平（慢、更占盘，仅宜做可转移
+    ///    快照）；`false` → 普通 commit（只写增量、亚秒级、更省盘，推荐）
     /// 3. `create_with_config_named` 创建 tmp 容器 `<name>_tmp`（身份 = 正式名：
     ///    hostname / `easytidy.name` 标签 / socket 目录全用 `<name>`；正式名
     ///    被原容器占用，故先以 tmp 名创建）
@@ -855,6 +859,14 @@ impl Podman {
             "easytidy rebuild snapshot via commit"
         };
         let libpod = crate::libpod::Libpod::new().await?;
+        // commit 形态明确入日志：squash=全量重写所有层（体积/耗时与镜像大小成正比，
+        // 大镜像可达分钟级）；plain=只写 upperdir 增量（复用 base 共享层，亚秒级）。
+        // 便于区分「重建」（squash）与「快速重建」（plain）到底走了哪条路径。
+        let commit_kind = if squash { "squash" } else { "plain" };
+        tracing::info!(
+            "环境 {name} 重建 commit（{commit_kind}）开始 → {image_ref}"
+        );
+        let commit_started = std::time::Instant::now();
         if let Err(e) = libpod
             .commit(name, "localhost/easytidy-rebuild", Some(&tag), squash, message, &[])
             .await
@@ -864,6 +876,10 @@ impl Podman {
                 "重建失败：原容器 commit 未成功（已回滚，原容器已恢复运行）：{e}"
             )));
         }
+        tracing::info!(
+            "环境 {name} 重建 commit（{commit_kind}）完成，耗时 {:.3}s → {image_ref}",
+            commit_started.elapsed().as_secs_f64()
+        );
 
         // 3. 创建 tmp 容器（身份 = 正式名；失败 → 恢复原容器运行）
         let id = match self
