@@ -101,13 +101,11 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::services::apps::parse_desktop_file;
     use crate::services::config::handle_config_get;
     use crate::services::fs::handle_fs_list;
     use easytidy_protocol::ops::{CfgGetResp, FsList, FsListResp};
     use easytidy_protocol::{FrameCodec, Handshake, HandshakeAck, PROTOCOL_VERSION};
     use futures::{SinkExt, StreamExt};
-    use tempfile::NamedTempFile;
     use tokio::net::{UnixListener, UnixStream};
     use tokio_util::codec::Framed;
 
@@ -264,28 +262,6 @@ mod tests {
         } else {
             panic!("Expected JSON frame");
         }
-    }
-
-    /// Test apps list parsing
-    #[test]
-    fn test_parse_desktop_file() {
-        let temp_file = NamedTempFile::new().unwrap();
-        let desktop_path = temp_file.path().with_extension("desktop");
-
-        let content = r#"[Desktop Entry]
-Name=Test App
-Exec=test-app --option
-Comment=A test application
-Icon=test-icon
-"#;
-
-        fs::write(&desktop_path, content).unwrap();
-
-        let app = parse_desktop_file(&desktop_path).unwrap();
-        assert_eq!(app.name, "Test App");
-        assert_eq!(app.exec, "test-app --option");
-        assert_eq!(app.comment, Some("A test application".to_string()));
-        assert_eq!(app.icon_path, Some("test-icon".to_string()));
     }
 
     /// 身份自发现：server 自身 uid 必有身份（名字可能为 uid<uid> 兜底）

@@ -1,6 +1,7 @@
 //! 桌面应用服务：.desktop 枚举/图标解析/launch + 托管进程（spawn/reaper）。
 use crate::state::{ChildInfo, ProcessStatus, ServerState, APP_LOG_MAX};
 use crate::setup::user_map;
+use crate::services::desktop::parse_desktop_file;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,7 +13,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use easytidy_protocol::{
-    AppGetIcon, AppGetIconResp, AppInfo, AppKill, AppLogs, AppLogsResp, AppsLaunch, AppsLaunchResp,
+    AppGetIcon, AppGetIconResp, AppKill, AppLogs, AppLogsResp, AppsLaunch, AppsLaunchResp,
     AppsLaunchResult, AppsListResp, AppsPsResp, ChildExited, Frame, ManagedProcess, Message,
     MsgKind,
 };
@@ -76,94 +77,8 @@ pub(crate) async fn handle_apps_list(msg: Message) -> Result<Frame> {
     }))
 }
 
-/// Parse a .desktop file
-pub(crate) fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
-    let content = fs::read_to_string(path)
-        .with_context(|| format!("Failed to read .desktop file: {}", path.display()))?;
-
-    let mut name = None;
-    let mut icon_path = None;
-    let mut exec = None;
-    let mut comment = None;
-    let mut categories = None;
-    let mut startup_notify = false;
-    let mut startup_wm_class = None;
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
-            continue;
-        }
-
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-
-            match key {
-                "Name" => name = Some(value.to_string()),
-                // Icon 常为主题名（如 "google-chrome"）而非路径——解析成实际
-                // 图标文件，宿主 passthrough 才能搬运；解析失败保留原值
-                "Icon" => icon_path = resolve_icon_path(value).or(Some(value.to_string())),
-                "Exec" => exec = Some(value.to_string()),
-                "Comment" => comment = Some(value.to_string()),
-                // NoDisplay 不再过滤（扫全：passthrough 场景用户要看到所有
-                // .desktop，如 python3.12.desktop 的 NoDisplay=true，实测遗漏）
-                "Categories" => categories = Some(value.to_string()),
-                "StartupNotify" => startup_notify = value == "true",
-                "StartupWMClass" => startup_wm_class = Some(value.to_string()),
-                _ => {}
-            }
-        }
-    }
-
-    let name = name.ok_or_else(|| anyhow!("Missing Name"))?;
-    let exec = exec.ok_or_else(|| anyhow!("Missing Exec"))?;
-
-    Ok(AppInfo {
-        desktop_file: path.display().to_string(),
-        name,
-        icon_path,
-        exec,
-        comment,
-        categories,
-        startup_notify,
-        startup_wm_class,
-    })
-}
-
-/// 把 .desktop 的 Icon 值解析为容器内实际图标文件路径。
-///
-/// Icon= 常为主题名（如 "google-chrome"）而非路径，按图标主题标准位置
-/// 依次探测（hicolor 多尺寸 + Adwaita + pixmaps，svg/png 均试）；已是
-/// 绝对路径或相对路径则原样返回。解析失败返回 None（保留原值显示）。
-pub(crate) fn resolve_icon_path(icon: &str) -> Option<String> {
-    if icon.starts_with('/') || icon.contains('/') {
-        return Some(icon.to_string());
-    }
-    let (base, exts): (&str, &[&str]) = if icon.ends_with(".svg") || icon.ends_with(".png") {
-        (icon.trim_end_matches(".svg").trim_end_matches(".png"), &["svg", "png"])
-    } else {
-        (icon, &["svg", "png"])
-    };
-    let sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "24x24", "16x16"];
-    for size in sizes {
-        for ext in exts {
-            for theme_root in ["/usr/share/icons/hicolor", "/usr/share/icons/Adwaita"] {
-                let p = format!("{theme_root}/{size}/apps/{base}.{ext}");
-                if Path::new(&p).exists() {
-                    return Some(p);
-                }
-            }
-        }
-    }
-    for ext in exts {
-        let p = format!("/usr/share/pixmaps/{base}.{ext}");
-        if Path::new(&p).exists() {
-            return Some(p);
-        }
-    }
-    None
-}
+// .desktop 解析（parse_desktop_file / resolve_icon_path）已抽到 crate::services::desktop；
+// apps 仅经上方 use 导入 parse_desktop_file（枚举时调用）。
 
 /// Handle apps.getIcon
 pub(crate) async fn handle_apps_get_icon(msg: Message) -> Result<Frame> {
