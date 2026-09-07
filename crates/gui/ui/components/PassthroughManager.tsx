@@ -9,6 +9,7 @@ import { errMsg } from '../lib/errors';
 import { App as AntApp, Radio, Switch, Tooltip } from 'antd';
 import {
   DownloadOutlined,
+  EditOutlined,
   PictureOutlined,
   PlayCircleOutlined,
   PushpinFilled,
@@ -39,6 +40,8 @@ export function PassthroughManager() {
   const [customName, setCustomName] = useState('');
   const [customCmd, setCustomCmd] = useState('');
   const [addingCustom, setAddingCustom] = useState(false);
+  // 正在编辑的自定义应用 id（null = 新增模式；非空 = 编辑模式，表单预填该应用）
+  const [editingId, setEditingId] = useState<string | null>(null);
   // 导出本容器 GUI 管理界面的桌面快捷方式
   const [exportingGui, setExportingGui] = useState(false);
   // 正在选择图标的自定义应用 id（null = 弹窗关闭）
@@ -224,7 +227,7 @@ export function PassthroughManager() {
     }
   };
 
-  const handleAddCustom = async () => {
+  const handleSaveCustom = async () => {
     if (!customName.trim() || !customCmd.trim()) {
       setError('名称与命令不能为空');
       return;
@@ -232,22 +235,55 @@ export function PassthroughManager() {
     setAddingCustom(true);
     setError(null);
     try {
-      const id = `custom:${customName.trim()}`;
-      await invoke('passthrough_add_custom', { name: customName.trim(), cmd: customCmd.trim() });
-      // 表单选定的图标 → 写入应用配置（导出时 Icon= 直接用）
-      if (customIcon) {
-        await invoke('passthrough_set_custom_icon', { id, icon: customIcon });
+      const trimmedName = customName.trim();
+      const trimmedCmd = customCmd.trim();
+      if (editingId) {
+        // 编辑模式：更新 name/cmd（name 变化时后端同步 id + 收藏引用）
+        await invoke('passthrough_update_custom', {
+          id: editingId,
+          name: trimmedName,
+          cmd: trimmedCmd,
+        });
+        // 名称可能变化 → 用新 id 写图标（null = 清除）
+        await invoke('passthrough_set_custom_icon', { id: `custom:${trimmedName}`, icon: customIcon });
+      } else {
+        // 新增模式
+        const id = `custom:${trimmedName}`;
+        await invoke('passthrough_add_custom', { name: trimmedName, cmd: trimmedCmd });
+        if (customIcon) {
+          await invoke('passthrough_set_custom_icon', { id, icon: customIcon });
+        }
       }
       setCustomName('');
       setCustomCmd('');
       setCustomIcon(null);
+      setEditingId(null);
       await loadData();
     } catch (err: any) {
-      setError(errMsg(err, 'Failed to add custom app'));
-      console.error('passthrough_add_custom failed:', err);
+      setError(errMsg(err, 'Failed to save custom app'));
+      console.error('passthrough save custom failed:', err);
     } finally {
       setAddingCustom(false);
     }
+  };
+
+  /** 进入编辑模式：预填表单（name/cmd/icon），滚动到表单 */
+  const handleEditCustom = (custom: { id: string; name: string; cmd: string; icon?: string | null }) => {
+    setEditingId(custom.id);
+    setCustomName(custom.name);
+    setCustomCmd(custom.cmd);
+    setCustomIcon(custom.icon ?? null);
+    setError(null);
+    document.getElementById('custom-form-anchor')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  /** 取消编辑：重置表单回新增模式 */
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setCustomName('');
+    setCustomCmd('');
+    setCustomIcon(null);
+    setError(null);
   };
 
   const handleRemoveCustom = async (id: string) => {
@@ -317,7 +353,12 @@ export function PassthroughManager() {
 
       <div className="custom-section">
         <h4>自定义应用（容器固定目录之外）</h4>
-        <div className="custom-form custom-form-vertical">
+        <div id="custom-form-anchor" className="custom-form custom-form-vertical">
+          {editingId && (
+            <div className="custom-form-editing">
+              正在编辑：<strong>{customApps.find((a) => a.id === editingId)?.name ?? editingId}</strong>
+            </div>
+          )}
           <div className="custom-form-row">
             <label className="custom-form-label">名称</label>
             <input
@@ -366,8 +407,13 @@ export function PassthroughManager() {
             />
           </div>
           <div className="custom-form-row custom-form-actions">
-            <button className="primary-button" onClick={handleAddCustom} disabled={addingCustom}>
-              {addingCustom ? '添加中…' : '添加'}
+            {editingId && (
+              <button className="secondary-button" onClick={handleCancelEdit} disabled={addingCustom}>
+                取消
+              </button>
+            )}
+            <button className="primary-button" onClick={handleSaveCustom} disabled={addingCustom}>
+              {addingCustom ? '保存中…' : editingId ? '保存' : '添加'}
             </button>
           </div>
         </div>
@@ -385,7 +431,7 @@ export function PassthroughManager() {
               </div>
               <div className="app-info">
                 <div className="app-name">{custom.name}</div>
-                <div className="app-desktop-file">{custom.cmd}</div>
+                <div className="app-exec" title={custom.cmd}>{custom.cmd}</div>
               </div>
               <div className="app-actions">
                 <Tooltip title="立即启动">
@@ -420,6 +466,14 @@ export function PassthroughManager() {
                     撤销
                   </button>
                 )}
+                <Tooltip title="编辑名称/命令">
+                  <button
+                    className="secondary-button icon-only"
+                    onClick={() => handleEditCustom(custom)}
+                  >
+                    <EditOutlined />
+                  </button>
+                </Tooltip>
                 <Tooltip title="更换图标（宿主机/容器）">
                   <button
                     className="secondary-button icon-only"
@@ -469,6 +523,7 @@ export function PassthroughManager() {
                 {app.comment && (
                   <div className="app-comment">{app.comment}</div>
                 )}
+                <div className="app-exec" title={app.exec}>{app.exec}</div>
                 <div className="app-desktop-file">{app.desktop_file}</div>
               </div>
               <div className="app-actions">

@@ -158,6 +158,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::passthrough_revoke,
             commands::passthrough::passthrough_set_auto_start,
             commands::passthrough::passthrough_add_custom,
+            commands::passthrough::passthrough_update_custom,
             commands::passthrough::passthrough_remove_app,
             commands::passthrough::export_gui_shortcut,
             // 图标（自定义应用：宿主机选用 → 复制进容器；路径输入；存容器内）

@@ -529,6 +529,68 @@ pub async fn passthrough_add_custom(
     })
 }
 
+/// 更新自定义应用（改名称/命令）。名称变化时同步 id（id = `custom:<name>`）
+/// 与收藏引用（防孤儿）；图标字段随应用条目保留。
+#[tauri::command]
+pub async fn passthrough_update_custom(
+    session: tauri::State<'_, Option<GuiSession>>,
+    id: String,
+    name: String,
+    cmd: String,
+) -> Result<(), String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let container = &sess.container_name;
+
+    if !id.starts_with("custom:") {
+        return Err("只能编辑自定义应用".to_string());
+    }
+    let new_name = name.trim().to_string();
+    let new_cmd = cmd.trim().to_string();
+    if new_name.is_empty() || new_cmd.is_empty() {
+        return Err("自定义应用名称与命令不能为空".to_string());
+    }
+    let new_id = format!("custom:{new_name}");
+
+    let mut cfg = read_container_config(sess).await?;
+    // 先校验（不可变借用，先于可变借用）：目标存在 + 新 id 不冲突
+    if !cfg.apps.iter().any(|a| a.id == id) {
+        return Err(format!("自定义应用 {id} 不存在"));
+    }
+    if new_id != id && cfg.apps.iter().any(|a| a.id == new_id) {
+        return Err(format!("自定义应用 {new_name} 已存在"));
+    }
+
+    // 改 app（可变借用 cfg.apps，块结束后不再用 app）
+    {
+        if let Some(app) = cfg.apps.iter_mut().find(|a| a.id == id) {
+            if new_id != id {
+                app.id = new_id.clone();
+                app.name = new_name.clone();
+            }
+            app.cmd = new_cmd.clone();
+        }
+    }
+    // 同步收藏引用（可变借用 cfg.pinned，独立于 cfg.apps）
+    if new_id != id {
+        for p in cfg.pinned.iter_mut() {
+            if p.id == id {
+                p.id = new_id.clone();
+                p.name = new_name.clone();
+                p.cmd = new_cmd.clone();
+            }
+        }
+    }
+
+    // 保存 + 日志（此时所有可变借用已结束）
+    let final_id = if new_id != id { new_id.clone() } else { id.clone() };
+    save_container_config(sess, &cfg).await?;
+    info!("自定义应用已更新（容器内）：{container} {id} → {final_id}");
+    Ok(())
+}
+
 /// 移除应用（容器内配置条目 + 清理可能存在的导出，防孤儿）
 #[tauri::command]
 pub async fn passthrough_remove_app(

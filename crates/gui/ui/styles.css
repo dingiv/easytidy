@@ -409,6 +409,27 @@ button:disabled {
   margin-top: 0.1rem;
 }
 
+/* 命令行（扫描应用 exec / 自定义应用 cmd）——单行截断，hover 看全文 */
+.app-exec {
+  color: #9399b2;
+  font-size: 0.72rem;
+  font-family: monospace;
+  margin-top: 0.15rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 自定义应用编辑模式指示条 */
+.custom-form-editing {
+  color: #f9e2af;
+  font-size: 0.75rem;
+  padding: 0.25rem 0.5rem;
+  background: rgba(249, 226, 175, 0.12);
+  border: 1px solid rgba(249, 226, 175, 0.3);
+  border-radius: 6px;
+}
+
 .app-actions {
   display: flex;
   align-items: center;
