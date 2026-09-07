@@ -13,8 +13,13 @@ use easytidy_protocol::AppInfo;
 
 /// 解析一个 `.desktop` 文件为 [`AppInfo`]。
 ///
-/// 逐行取 `Key=Value`（跳过空行/注释/`[section]` 头），只取
-/// Name/Icon/Exec/Comment/Categories/StartupNotify/StartupWMClass。
+/// 按 XDG 规范**只解析 `[Desktop Entry]` section**（主入口）的
+/// Name/Icon/Exec/Comment/Categories/StartupNotify/StartupWMClass；
+/// `[Desktop Action <id>]` 是右键菜单的次级启动项（非主入口），**忽略**。
+///
+/// 历史 bug：旧实现跳过 section 头、按 `Key=Value` 后者覆盖前者，会把含
+/// `[Desktop Action]` 的文件的 Name/Exec 误取成最后一个 action 的值（如
+/// google-chrome.desktop 被解析成 "New Incognito Window" + `--incognito`）。
 /// Name 与 Exec 必填（缺失 → 报错）。NoDisplay 不过滤（passthrough 场景
 /// 要看到所有 .desktop，如 python3.12.desktop 的 NoDisplay=true）。
 pub(crate) fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
@@ -29,9 +34,21 @@ pub(crate) fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
     let mut startup_notify = false;
     let mut startup_wm_class = None;
 
+    // 当前是否处于主入口 section（[Desktop Entry]）。
+    // 只有在该 section 内才读取主入口字段；[Desktop Action X] 内忽略。
+    let mut in_main_entry = false;
+
     for line in content.lines() {
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('[') {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            // section 头：切换当前 section（仅 [Desktop Entry] 为主入口）
+            in_main_entry = line.starts_with("[Desktop Entry]");
+            continue;
+        }
+        if !in_main_entry {
             continue;
         }
 
@@ -129,6 +146,45 @@ Icon=test-icon
         assert_eq!(app.exec, "test-app --option");
         assert_eq!(app.comment, Some("A test application".to_string()));
         assert_eq!(app.icon_path, Some("test-icon".to_string()));
+    }
+
+    /// 含 [Desktop Action] 的多 section 文件：主入口必须是 [Desktop Entry]
+    /// 的 Name/Exec，不是最后一个 [Desktop Action]（回归：google-chrome.desktop
+    /// 曾被误解析成 "New Incognito Window" + --incognito）
+    #[test]
+    fn test_parse_desktop_file_with_actions_picks_main_entry() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let desktop_path = temp_file.path().with_extension("desktop");
+
+        let content = r#"[Desktop Entry]
+Version=1.0
+Name=Google Chrome
+GenericName=Web Browser
+Comment=Access the Internet
+Exec=/usr/bin/google-chrome-stable --profile-directory="Default" %U
+Icon=google-chrome
+Type=Application
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=/usr/bin/google-chrome-stable --new-window
+
+[Desktop Action new-private-window]
+Name=New Incognito Window
+Exec=/usr/bin/google-chrome-stable --incognito
+"#;
+
+        fs::write(&desktop_path, content).unwrap();
+
+        let app = parse_desktop_file(&desktop_path).unwrap();
+        assert_eq!(app.name, "Google Chrome", "Name 应取主入口，非最后 action");
+        assert_eq!(
+            app.exec,
+            r#"/usr/bin/google-chrome-stable --profile-directory="Default" %U"#,
+            "Exec 应取主入口，非最后 action"
+        );
+        assert_eq!(app.comment, Some("Access the Internet".to_string()));
     }
 
     /// Icon= 绝对路径/含路径 → 原样返回
