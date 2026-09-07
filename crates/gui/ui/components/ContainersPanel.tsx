@@ -17,6 +17,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Dropdown,
   Empty,
   Popconfirm,
@@ -89,7 +90,7 @@ function ContainersPanelInner(
   { refreshTick = 0 }: ContainersPanelProps,
   ref: React.Ref<ContainerRef>,
 ) {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const [envs, setEnvs] = useState<EnvView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +98,9 @@ function ContainersPanelInner(
   const [acting, setActing] = useState<string | null>(null);
   // 下拉记忆：上次使用动作（localStorage，跨容器共享）；菜单置顶并标记
   const [lastAction, setLastAction] = useState<string>(readLastAction);
+  // 多选删除：选中的容器名集合 + 批量删除进行中
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [batchDeleting, setBatchDeleting] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -208,10 +212,97 @@ function ContainersPanelInner(
   const handleDelete = async (env: EnvView) => {
     try {
       await invoke('env_rm', { name: env.name });
+      // 若该容器在多选集合里，删除后同步移除（避免残留已删名字）
+      setSelected((prev) => {
+        if (!prev.has(env.name)) return prev;
+        const next = new Set(prev);
+        next.delete(env.name);
+        return next;
+      });
       await load();
     } catch (err: any) {
       setError(errMsg(err, `删除容器「${env.name}」失败`));
       console.error('env_rm failed:', err);
+    }
+  };
+
+  /** 多选删除：勾选 / 取消勾选单个容器 */
+  const toggleSelect = (name: string, checked: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+  };
+
+  const allSelected = envs.length > 0 && selected.size === envs.length;
+
+  /** 全选 / 取消全选 */
+  const toggleSelectAll = () => {
+    setSelected(allSelected ? new Set() : new Set(envs.map((e) => e.name)));
+  };
+
+  /** 批量删除：弹确认（列出将删容器名）→ 逐个 env_rm */
+  const confirmBatchDelete = () => {
+    const names = Array.from(selected);
+    if (names.length === 0) return;
+    modal.confirm({
+      title: `删除 ${names.length} 个容器?`,
+      width: 480,
+      content: (
+        <div>
+          <p style={{ marginBottom: 8 }}>
+            将删除以下容器（已接管的会一并清理注册配置、桌面图标与 socket 目录；其快照镜像作为独立资产保留）：
+          </p>
+          <ul style={{ maxHeight: 220, overflow: 'auto', paddingLeft: 18, margin: 0 }}>
+            {names.map((n) => (
+              <li key={n}>{n}</li>
+            ))}
+          </ul>
+        </div>
+      ),
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => batchDelete(names),
+    });
+  };
+
+  /** 逐个 env_rm（串行：PodmanState 为锁），收集成功/失败，汇总提示 */
+  const batchDelete = async (names: string[]) => {
+    setBatchDeleting(true);
+    let ok = 0;
+    const failed: { name: string; err: string }[] = [];
+    for (const name of names) {
+      try {
+        await invoke('env_rm', { name });
+        ok += 1;
+      } catch (err: any) {
+        failed.push({ name, err: errMsg(err, '删除失败') });
+        console.error('batch env_rm failed:', name, err);
+      }
+    }
+    setBatchDeleting(false);
+    setSelected(new Set());
+    await load();
+    if (failed.length === 0) {
+      message.success(`已删除 ${ok} 个容器`);
+    } else {
+      message.warning(`删除完成：成功 ${ok} 个，失败 ${failed.length} 个`);
+      modal.error({
+        title: `部分容器删除失败（${failed.length} 个）`,
+        width: 480,
+        content: (
+          <ul style={{ maxHeight: 260, overflow: 'auto', paddingLeft: 18, margin: 0 }}>
+            {failed.map((f) => (
+              <li key={f.name}>
+                <strong>{f.name}</strong>：{f.err}
+              </li>
+            ))}
+          </ul>
+        ),
+      });
     }
   };
 
@@ -222,6 +313,25 @@ function ContainersPanelInner(
           容器
         </Typography.Title>
         <Space>
+          <Button size="small" onClick={toggleSelectAll}>
+            {allSelected ? '取消全选' : '全选'}
+          </Button>
+          {selected.size > 0 && (
+            <>
+              <Typography.Text type="secondary">
+                已选 {selected.size} / {envs.length}
+              </Typography.Text>
+              <Button
+                size="small"
+                danger
+                icon={<DeleteOutlined />}
+                loading={batchDeleting}
+                onClick={confirmBatchDelete}
+              >
+                批量删除
+              </Button>
+            </>
+          )}
           <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
             刷新
           </Button>
@@ -258,9 +368,18 @@ function ContainersPanelInner(
             const missing = env.status === 'missing';
             const managed = env.managed;
             return (
-              <Card key={env.name} size="small" className="env-card">
+              <Card
+                key={env.name}
+                size="small"
+                className={`env-card ${selected.has(env.name) ? 'env-card-selected' : ''}`}
+              >
                 <div className="env-card-body">
-                  <div className="env-info">
+                  <div className="env-card-main">
+                    <Checkbox
+                      checked={selected.has(env.name)}
+                      onChange={(e) => toggleSelect(env.name, e.target.checked)}
+                    />
+                    <div className="env-info">
                     <div className="env-name-row">
                       <Typography.Text strong className="env-name">
                         {env.name}
@@ -273,6 +392,7 @@ function ContainersPanelInner(
                     <Typography.Text code className="env-image">
                       {env.image}
                     </Typography.Text>
+                  </div>
                   </div>
                   <Space wrap className="env-actions">
                     {running ? (

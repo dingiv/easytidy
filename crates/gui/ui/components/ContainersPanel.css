@@ -51,6 +51,21 @@
   flex-wrap: wrap;
 }
 
+/* 左侧：多选 Checkbox + 容器信息（Checkbox 常驻，便于多选删除） */
+.env-card-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
+/* 选中态：高亮边框 + 浅底色 */
+.env-card-selected {
+  border-color: #4096ff;
+  background: rgba(64, 150, 255, 0.08);
+}
+
 .env-info {
   display: flex;
   flex-direction: column;
