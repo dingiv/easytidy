@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
@@ -405,15 +405,15 @@ pub async fn env_new(
     let entry_icon = desktop::process_container_icon(&name, config.icon.as_deref());
     try_log!(config_file.register_container(config), "注册环境配置");
 
-    // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可——旧
-    // create_container 路径的行为，统一入口后由此处承接）。
+    // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可）。新格式
+    // （X-easytidy-gui=1）：应用菜单 + 桌面副本（需求 3.2），
     // Exec 指向 CLI 垫片（`easytidy open --container <name>`），点击时由
     // CLI 决定保活/弹 GUI/友好报错。
-    if let Err(e) = desktop::install_desktop_entry(
+    if let Err(e) = desktop::write_gui_entry(
         &name,
-        None,
-        entry_icon.as_deref(),
         &crate::commands::passthrough::cli_path(),
+        true,
+        entry_icon.as_deref(),
     ) {
         warn!("生成桌面图标失败（忽略）：{e}");
     }
@@ -444,10 +444,8 @@ pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Resu
     if let Err(e) = config_file.unregister_container(&name) {
         warn!("注销环境 {} 配置失败（忽略）：{}", name, e);
     }
-    // 清理桌面图标
-    if let Err(e) = desktop::uninstall_desktop_entry(&name) {
-        debug!("清理环境 {} 桌面图标失败（忽略）：{}", name, e);
-    }
+    // 清理桌面图标（新旧格式 × 菜单/桌面副本，全清）
+    let _ = desktop::remove_entry_desktops(&name);
     // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
     let _ = easytidy_core::remove_socket_dirs(&name);
 

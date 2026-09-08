@@ -692,9 +692,8 @@ async fn cmd_env_rm(podman: Podman, name: String, config_dir: Option<PathBuf>) -
     if let Err(e) = config_file.unregister_container(&name) {
         error!("注销配置失败：{}", e);
     }
-    if let Err(e) = easytidy_core::desktop::uninstall_desktop_entry(&name) {
-        debug!("清理桌面图标失败（忽略）：{e}");
-    }
+    // 桌面图标（新旧格式 × 菜单/桌面副本，全清）
+    let _ = easytidy_core::desktop::remove_entry_desktops(&name);
     // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
     let _ = easytidy_core::remove_socket_dirs(&name);
     println!("环境 {name} 已删除（无残留）");

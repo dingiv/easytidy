@@ -100,7 +100,7 @@ pub async fn apply_container_config(
     let config_file =
         ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
     // 容器入口图标：图标源变更时重写入口快捷方式（辅助动作，失败不阻断；
-    // 仅更新菜单项，桌面副本需 Worker「导出桌面图标」重新导出）
+    // 菜单项 + 桌面副本统一重写为新格式）
     let old_icon = config_file
         .get_container(&name)
         .map_err(|e| format!("读取旧容器配置失败：{e}"))?
@@ -116,13 +116,13 @@ pub async fn apply_container_config(
             let cli = crate::commands::passthrough::cli_path();
             let gui_entry = dir.join(format!("easytidy-gui-{name}.desktop"));
             let legacy_entry = dir.join(format!("easytidy-{name}.desktop"));
-            if gui_entry.exists() {
-                if let Err(e) = easytidy_core::desktop::write_gui_entry(&name, &cli, false, processed.as_deref()) {
+            if gui_entry.exists() || legacy_entry.exists() {
+                // 统一重写为新格式（菜单 + 桌面副本）；遗留旧格式文件顺手清掉
+                if let Err(e) = easytidy_core::desktop::write_gui_entry(&name, &cli, true, processed.as_deref()) {
                     warn!("更新容器入口快捷方式失败（图标变更，{name}）：{e}");
                 }
-            } else if legacy_entry.exists() {
-                if let Err(e) = easytidy_core::desktop::install_desktop_entry(&name, None, processed.as_deref(), &cli) {
-                    warn!("更新容器入口快捷方式失败（图标变更，{name}）：{e}");
+                if legacy_entry.exists() {
+                    let _ = std::fs::remove_file(&legacy_entry);
                 }
             }
         }
