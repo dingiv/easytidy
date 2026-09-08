@@ -75,6 +75,8 @@ pub(crate) fn parse_desktop_file(path: &Path) -> Result<AppInfo> {
     let exec = exec.ok_or_else(|| anyhow!("Missing Exec"))?;
 
     Ok(AppInfo {
+        // id 由调用方（apps 服务）按内容哈希填入；解析层先占位
+        id: String::new(),
         desktop_file: path.display().to_string(),
         name,
         icon_path,

@@ -15,7 +15,7 @@ use tracing::{debug, error, info, warn};
 use crate::http::HTTP_PORT;
 use crate::setup::injected_env;
 use crate::state::ServerState;
-use crate::services::apps::{handle_apps_get_icon, handle_apps_kill, handle_apps_launch, handle_apps_list, handle_apps_logs, handle_apps_ps};
+use crate::services::apps::{handle_apps_get_icon, handle_apps_kill, handle_apps_launch, handle_apps_launch_app, handle_apps_list, handle_apps_logs, handle_apps_ps};
 use crate::services::config::{handle_config_get, handle_config_set};
 use crate::services::fs::{handle_fs_copy, handle_fs_list, handle_fs_mkdir, handle_fs_read, handle_fs_stat, handle_fs_write};
 use crate::services::lifecycle::{handle_lifecycle_entry_launch, handle_lifecycle_shutdown};
@@ -135,6 +135,9 @@ pub(crate) async fn dispatch(
         }
         (MsgKind::Req, "apps.launch") => {
             Ok(Some(handle_apps_launch(msg, state, event_tx).await?))
+        }
+        (MsgKind::Req, "apps.launch_app") => {
+            Ok(Some(handle_apps_launch_app(msg, state, event_tx).await?))
         }
         (MsgKind::Req, "apps.ps") => {
             Ok(Some(handle_apps_ps(msg, state).await?))

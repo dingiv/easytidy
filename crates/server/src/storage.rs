@@ -57,6 +57,13 @@ pub(crate) fn passthrough_path() -> PathBuf {
     PathBuf::from(data_dir()).join("passthrough.toml")
 }
 
+/// 应用登记表路径（{home}/.easytidy/apps.toml）：扫描得到的 .desktop
+/// 应用（含稳定 id），每次扫描全量重写（server 生成数据，与用户态
+/// passthrough.toml 分离）。
+pub(crate) fn apps_registry_path() -> PathBuf {
+    PathBuf::from(data_dir()).join("apps.toml")
+}
+
 /// 自定义应用图标目录（{home}/.easytidy/icons）。
 pub(crate) fn icons_dir() -> PathBuf {
     PathBuf::from(data_dir()).join("icons")

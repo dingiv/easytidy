@@ -279,6 +279,13 @@ pub struct AppsListResp {
 /// 桌面应用信息
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppInfo {
+    /// 稳定应用 id（server 生成：`pt-<内容哈希 12hex>`——按 .desktop 读取的
+    /// 全部字段哈希，同一内容跨目录/跨扫描恒同；自定义应用 = `custom:<name>`）。
+    /// 宿主导出 / CLI launch / 收藏 / auto-start 一律按 id 引用。
+    /// `default` 兼容旧 server（未含 id 字段的响应 → 空串，列表可用、
+    /// 导出/launch 报「id 为空」提示重建容器）
+    #[serde(default)]
+    pub id: String,
     /// .desktop 文件路径
     pub desktop_file: String,
     /// 应用名称
@@ -340,6 +347,36 @@ pub struct AppsLaunchResult {
 pub struct AppGetIcon {
     /// 图标路径
     pub path: String,
+}
+
+/// 按引用拉起一个应用（id 或名称）：server 从登记表/自定义应用解析出
+/// exec 后自行决定「启动谁、如何启动」——调用方不传命令串。
+/// 解析顺序：扫描登记表 id 精确 → 扫描登记表 name 精确（忽略大小写）
+/// → 自定义应用 id 精确 → 自定义应用 name 精确。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppLaunchApp {
+    /// 应用 id 或名称
+    pub id_or_name: String,
+}
+
+/// AppLaunchApp 响应：拉起结果（失败给 error；未找到附可用引用列表）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AppLaunchAppResp {
+    /// 解析出的应用 id
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// 应用名称
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// 拉起的进程 pid
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
+    /// 失败原因
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// 未找到时的可用引用（id 列表，供报错展示）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<Vec<String>>,
 }
 
 /// AppGetIcon 响应：图标数据
@@ -648,6 +685,7 @@ mod tests {
     #[test]
     fn test_app_info_serde() {
         let app = AppInfo {
+            id: "pt-abcdef123456".to_string(),
             desktop_file: "/usr/share/applications/firefox.desktop".to_string(),
             name: "Firefox".to_string(),
             icon_path: Some("/usr/share/icons/hicolor/48x48/apps/firefox.png".to_string()),

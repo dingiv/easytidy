@@ -292,6 +292,9 @@ async fn run_server(
 
     // 容器内 auto-start 应用：server 自读配置并拉起（容器自包含，不依赖宿主推送）。
     // entry/entry_args（旧 --entry）已弃用：启动应用改由 passthrough auto-start 驱动。
+    // 先刷新一次应用登记表（.desktop 扫描 → apps.toml）：launch_app 优先读
+    // 登记表，启动期建好避免首次点桌面图标回退扫盘。
+    services::apps::refresh_registry();
     services::passthrough::launch_auto_start(&state).await;
 
     // Accept loop

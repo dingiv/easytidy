@@ -181,6 +181,17 @@ pub(crate) async fn handle_passthrough_set(
     }))
 }
 
+/// 自定义应用列表（passthrough.toml 中 id 以 `custom:` 开头的条目；
+/// apps.launch_app 解析自定义应用引用用）
+pub(crate) fn custom_apps() -> Vec<PtConfiguredApp> {
+    let cfg = read_container_config(&container_passthrough_path());
+    cfg.apps
+        .into_iter()
+        .chain(cfg.pinned)
+        .filter(|a| a.id.starts_with("custom:"))
+        .collect()
+}
+
 /// 启动自读拉起 auto-start 应用（fire-and-forget，单条独立成败；继承 server 透传 env）
 pub(crate) async fn launch_auto_start(state: &Arc<ServerState>) {
     let cfg = read_container_config(&container_passthrough_path());

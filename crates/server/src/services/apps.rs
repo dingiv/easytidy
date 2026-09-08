@@ -13,9 +13,9 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use easytidy_protocol::{
-    AppGetIcon, AppGetIconResp, AppKill, AppLogs, AppLogsResp, AppsLaunch, AppsLaunchResp,
-    AppsLaunchResult, AppsListResp, AppsPsResp, ChildExited, Frame, ManagedProcess, Message,
-    MsgKind,
+    AppGetIcon, AppGetIconResp, AppKill, AppLaunchApp, AppLaunchAppResp, AppLogs, AppLogsResp,
+    AppsLaunch, AppsLaunchResp, AppsLaunchResult, AppsListResp, AppsPsResp, AppInfo,
+    ChildExited, Frame, ManagedProcess, Message, MsgKind,
 };
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
@@ -33,13 +33,24 @@ fn unix_millis() -> u64 {
 /// 超过即由 prune 清理（防内存膨胀）
 const EXITED_TTL_MS: u64 = 120_000;
 
-/// Handle apps.list
+/// Handle apps.list（扫描 → 登记表刷新 → 返回列表）
 pub(crate) async fn handle_apps_list(msg: Message) -> Result<Frame> {
-    let mut apps = Vec::new();
+    let apps = refresh_registry();
 
-    // 扫描标准 .desktop 位置：系统目录 + 容器用户 home + server 自身 home
-    // （server 以 root 运行，$HOME=/root；用户 home 是 /home/node——之前
-    // 只扫 ~/ 漏掉用户 home 的 .desktop，实测）
+    Ok(Frame::Json(Message {
+        id: msg.id,
+        kind: MsgKind::Resp,
+        op: "apps.list".to_string(),
+        payload: serde_json::to_value(AppsListResp { apps })?,
+        err: None,
+    }))
+}
+
+/// 扫描容器内标准 .desktop 位置（系统目录 + 容器用户 home + server 自身
+/// home；server 以 root 运行时 $HOME=/root，用户 home 是 /home/node——
+/// 两者都要扫，实测）。
+fn scan_apps() -> Vec<AppInfo> {
+    let mut apps = Vec::new();
     let mut paths: Vec<String> = vec![
         "/usr/share/applications".to_string(),
         "/usr/local/share/applications".to_string(),
@@ -53,26 +64,213 @@ pub(crate) async fn handle_apps_list(msg: Message) -> Result<Frame> {
 
     for base in &paths {
         let base_path = PathBuf::from(base);
-
-        if let Ok(iter) = fs::read_dir(base_path) {
+        if let Ok(iter) = fs::read_dir(&base_path) {
             for entry in iter.flatten() {
                 let path = entry.path();
                 if path.extension().and_then(|s| s.to_str()) != Some("desktop") {
                     continue;
                 }
-
-                if let Ok(app) = parse_desktop_file(&path) {
+                if let Ok(mut app) = parse_desktop_file(&path) {
+                    app.id = compute_app_id(&app);
                     apps.push(app);
                 }
             }
         }
     }
+    apps
+}
+
+/// 稳定应用 id：`pt-<sha256 前 12 hex>`，哈希输入 = .desktop 读取的
+/// 全部字段（Name/Icon/Exec/Comment/Categories/StartupNotify/StartupWMClass）。
+///
+/// 同一内容（同一图标）跨目录 / 跨扫描恒同；任一字段变化（如 exec 命令
+/// 变更）= 新 id——id 是快捷方式的「内容身份」。字段间用 `\u{1f}` 分隔
+/// + `key=` 前缀，消除边界歧义。
+fn compute_app_id(app: &AppInfo) -> String {
+    use sha2::{Digest, Sha256};
+    let canon = format!(
+        "name={}\u{1f}icon={}\u{1f}exec={}\u{1f}comment={}\u{1f}categories={}\u{1f}startup_notify={}\u{1f}startup_wm_class={}",
+        app.name,
+        app.icon_path.as_deref().unwrap_or(""),
+        app.exec,
+        app.comment.as_deref().unwrap_or(""),
+        app.categories.as_deref().unwrap_or(""),
+        app.startup_notify,
+        app.startup_wm_class.as_deref().unwrap_or(""),
+    );
+    let mut hasher = Sha256::new();
+    hasher.update(canon.as_bytes());
+    let digest = hasher.finalize();
+    format!("pt-{}", &hex::encode(digest)[..12])
+}
+
+/// 登记表磁盘格式（{user.home}/.easytidy/apps.toml；每次扫描全量重写，
+/// 随容器层/快照持久）
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct AppRegistry {
+    schema_version: u32,
+    /// 扫描时间（unix 秒；排障用）
+    scanned_at: u64,
+    apps: Vec<AppInfo>,
+}
+
+/// 扫描 + 刷新登记表（全量重写；写失败仅告警，不阻断列表返回）。
+///
+/// 按 id 去重（保留先扫描者）：同一 .desktop 内容在多个 XDG 目录重复
+/// （系统 + 用户自定义）时 id 相同，只留一条。
+pub(crate) fn refresh_registry() -> Vec<AppInfo> {
+    let mut apps = scan_apps();
+    apps = dedup_by_id(apps);
+
+    let scanned_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let registry = AppRegistry {
+        schema_version: 1,
+        scanned_at,
+        apps: apps.clone(),
+    };
+    if let Err(e) = write_registry(&registry) {
+        warn!("应用登记表写入失败（忽略）：{e}");
+    }
+    apps
+}
+
+/// 原子写登记表到固定路径（{user.home}/.easytidy/apps.toml）
+fn write_registry(registry: &AppRegistry) -> Result<()> {
+    write_registry_to(&crate::storage::apps_registry_path(), registry)
+}
+
+/// 原子写登记表（tmp + rename；可注入路径，单测用）
+fn write_registry_to(path: &Path, registry: &AppRegistry) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建登记表目录失败：{}", parent.display()))?;
+    }
+    let content = toml::to_string_pretty(registry).context("序列化登记表失败")?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, &content).with_context(|| format!("写登记表失败：{}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| "登记表原子替换失败".to_string())?;
+    Ok(())
+}
+
+/// 读登记表（文件缺失/解析失败 → None，仅告警）
+pub(crate) fn read_registry_from(path: &Path) -> Option<AppRegistry> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match toml::from_str::<AppRegistry>(&content) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            warn!("解析应用登记表失败（忽略）：{e}");
+            None
+        }
+    }
+}
+
+/// 按 id 去重（保留先扫描者）：同一内容在多个 XDG 目录重复时 id 相同
+fn dedup_by_id(mut apps: Vec<AppInfo>) -> Vec<AppInfo> {
+    let mut seen = std::collections::HashSet::new();
+    apps.retain(|a| seen.insert(a.id.clone()));
+    apps
+}
+
+/// 解析应用引用（id 或名称）→ (id, name, exec)。server 全权决定「启动谁、
+/// 如何启动」：调用方只传引用。
+///
+/// 解析顺序：扫描登记表 id 精确 → 名称精确（忽略大小写）→ 自定义应用
+/// id 精确（`custom:<name>`）→ 自定义应用名称精确。
+///
+/// 登记表读取优先（快、不重复扫盘）；文件缺失/为空（新容器、尚未扫描）
+/// 回退一次新鲜扫描（顺带建登记表）。
+fn resolve_app(ref_: &str) -> Option<(String, String, String)> {
+    let mut apps = read_registry_from(&crate::storage::apps_registry_path())
+        .map(|r| r.apps)
+        .unwrap_or_default();
+    if apps.is_empty() {
+        apps = refresh_registry();
+    }
+    if let Some(a) = apps.iter().find(|a| a.id == ref_) {
+        return Some((a.id.clone(), a.name.clone(), a.exec.clone()));
+    }
+    if let Some(a) = apps.iter().find(|a| a.name.eq_ignore_ascii_case(ref_)) {
+        return Some((a.id.clone(), a.name.clone(), a.exec.clone()));
+    }
+    // 2) 自定义应用（passthrough.toml 用户态配置）
+    if let Some(app) = crate::services::passthrough::custom_apps()
+        .into_iter()
+        .find(|a| a.id == ref_ || a.name.eq_ignore_ascii_case(ref_))
+    {
+        return Some((app.id, app.name, app.cmd));
+    }
+    None
+}
+
+/// 可用引用列表（未找到时的报错提示：扫描 id + 自定义 id）
+fn available_refs() -> Vec<String> {
+    let mut out: Vec<String> = refresh_registry().into_iter().map(|a| a.id).collect();
+    for app in crate::services::passthrough::custom_apps() {
+        if !out.contains(&app.id) {
+            out.push(app.id);
+        }
+    }
+    out
+}
+
+/// Handle apps.launch_app（按 id/name 拉起：server 查登记表决定 exec）
+pub(crate) async fn handle_apps_launch_app(
+    msg: Message,
+    state: &Arc<ServerState>,
+    event_tx: mpsc::UnboundedSender<Frame>,
+) -> Result<Frame> {
+    let req: AppLaunchApp = serde_json::from_value(msg.payload)
+        .context("Failed to parse AppLaunchApp")?;
+
+    info!("apps.launch_app：{}", req.id_or_name);
+    let resp = match resolve_app(&req.id_or_name) {
+        Some((id, name, exec)) => match spawn_managed_process(
+            state,
+            &exec,
+            "passthrough",
+            name.clone(),
+            Some(event_tx.clone()),
+        )
+        .await
+        {
+            Ok(pid) => {
+                info!("应用已拉起：{} (id={}, pid={pid})", name, id);
+                AppLaunchAppResp {
+                    id: Some(id),
+                    name: Some(name),
+                    pid: Some(pid),
+                    error: None,
+                    available: None,
+                }
+            }
+            Err(e) => {
+                warn!("应用拉起失败：{} (id={id})：{e}", name);
+                AppLaunchAppResp {
+                    id: Some(id),
+                    name: Some(name),
+                    pid: None,
+                    error: Some(e.to_string()),
+                    available: None,
+                }
+            }
+        },
+        None => AppLaunchAppResp {
+            id: None,
+            name: None,
+            pid: None,
+            error: Some(format!("未找到应用：{}", req.id_or_name)),
+            available: Some(available_refs()),
+        },
+    };
 
     Ok(Frame::Json(Message {
         id: msg.id,
         kind: MsgKind::Resp,
-        op: "apps.list".to_string(),
-        payload: serde_json::to_value(AppsListResp { apps })?,
+        op: "apps.launch_app".to_string(),
+        payload: serde_json::to_value(resp)?,
         err: None,
     }))
 }
@@ -396,4 +594,86 @@ pub(crate) async fn child_prune_task(state: Arc<ServerState>) {
         }
     }
     info!("Child prune task ended");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture_app(name: &str, exec: &str, desktop_file: &str) -> AppInfo {
+        AppInfo {
+            id: String::new(),
+            desktop_file: desktop_file.to_string(),
+            name: name.to_string(),
+            icon_path: Some(format!("/usr/share/icons/hicolor/48x48/apps/{name}.png")),
+            exec: exec.to_string(),
+            comment: None,
+            categories: Some("Utility;".to_string()),
+            startup_notify: false,
+            startup_wm_class: None,
+        }
+    }
+
+    #[test]
+    fn test_compute_app_id_stable_and_format() {
+        let a = fixture_app("Foo", "foo --flag", "/usr/share/applications/foo.desktop");
+        let b = fixture_app("Foo", "foo --flag", "/usr/local/share/applications/foo.desktop");
+        let id_a = compute_app_id(&a);
+        // 同一内容跨目录：id 恒同（不含路径参与哈希）
+        assert_eq!(id_a, compute_app_id(&b));
+        assert_eq!(id_a, compute_app_id(&a), "同字段重复计算应稳定");
+        // 格式：pt-<12 hex>
+        assert!(id_a.starts_with("pt-"));
+        assert_eq!(id_a.len(), 3 + 12);
+        assert!(id_a[3..].chars().all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f')));
+    }
+
+    #[test]
+    fn test_compute_app_id_content_change_different_id() {
+        let a = fixture_app("Foo", "foo", "/usr/share/applications/foo.desktop");
+        let b = fixture_app("Foo", "foo --new-flag", "/usr/share/applications/foo.desktop");
+        assert_ne!(compute_app_id(&a), compute_app_id(&b), "exec 变化 = 新内容身份");
+        let c = fixture_app("Bar", "foo", "/usr/share/applications/foo.desktop");
+        assert_ne!(compute_app_id(&a), compute_app_id(&c), "name 变化 = 新内容身份");
+    }
+
+    #[test]
+    fn test_registry_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("apps.toml");
+        let registry = AppRegistry {
+            schema_version: 1,
+            scanned_at: 1234567890,
+            apps: vec![fixture_app("Foo", "foo", "/usr/share/applications/foo.desktop")],
+        };
+        write_registry_to(&path, &registry).unwrap();
+        let loaded = read_registry_from(&path).expect("登记表应可解析");
+        assert_eq!(loaded.schema_version, 1);
+        assert_eq!(loaded.scanned_at, 1234567890);
+        assert_eq!(loaded.apps.len(), 1);
+        assert_eq!(loaded.apps[0].name, "Foo");
+    }
+
+    #[test]
+    fn test_registry_missing_file_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_registry_from(&dir.path().join("nope.toml")).is_none());
+    }
+
+    #[test]
+    fn test_dedup_by_id_keeps_first() {
+        let mut a = fixture_app("Foo", "foo", "/usr/share/applications/foo.desktop");
+        let b = fixture_app("Foo", "foo", "/usr/local/share/applications/foo.desktop");
+        let c = fixture_app("Bar", "bar", "/usr/share/applications/bar.desktop");
+        a.id = compute_app_id(&a);
+        let mut b2 = b.clone();
+        b2.id = compute_app_id(&b2);
+        let mut c2 = c.clone();
+        c2.id = compute_app_id(&c2);
+        // 同 id（Foo 两份）+ 不同 id（Bar）→ 去重后 2 条，Foo 保留先扫描者
+        let out = dedup_by_id(vec![a, b2, c2]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].desktop_file, "/usr/share/applications/foo.desktop");
+        assert_eq!(out[1].name, "Bar");
+    }
 }
