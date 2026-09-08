@@ -34,8 +34,9 @@ import {
   ReloadOutlined,
   StopOutlined,
   ExportOutlined,
+  CopyOutlined,
 } from '@ant-design/icons';
-import type { EnvView } from '../types';
+import type { ContainerConfig, EnvView } from '../types';
 import './ContainersPanel.css';
 
 /** 快照/重建统一下拉的 4 个动作（均不询问用户确认，点击即执行）。
@@ -67,6 +68,8 @@ export interface ContainerRef {
 interface ContainersPanelProps {
   /** 由 MasterView 在创建/同步等动作后 +1,本面板监听触发 load() */
   refreshTick?: number;
+  /** 容器卡片「复制」：读注册配置后回调 MasterView 开新建容器表单（预填） */
+  onCopyConfig(config: ContainerConfig, sourceName: string): void;
 }
 
 /** 状态 → 中文标签 + 颜色(普通用户视角) */
@@ -87,7 +90,7 @@ function statusMeta(status: string): { label: string; color: string } {
 }
 
 function ContainersPanelInner(
-  { refreshTick = 0 }: ContainersPanelProps,
+  { refreshTick = 0, onCopyConfig }: ContainersPanelProps,
   ref: React.Ref<ContainerRef>,
 ) {
   const { message, modal } = AntApp.useApp();
@@ -223,6 +226,18 @@ function ContainersPanelInner(
     } catch (err: any) {
       setError(errMsg(err, `删除容器「${env.name}」失败`));
       console.error('env_rm failed:', err);
+    }
+  };
+
+  /** 复制配置：读注册表配置 → MasterView 开「新建容器」pane 预填（名字 <原名>_copy）。
+   *  仅已接管容器可用（未接管无注册配置）；missing 配置仍在,同样可复制。 */
+  const handleCopy = async (env: EnvView) => {
+    try {
+      const config = await invoke<ContainerConfig>('env_copy_config', { name: env.name });
+      onCopyConfig(config, env.name);
+    } catch (err: any) {
+      setError(errMsg(err, `复制容器「${env.name}」配置失败`));
+      console.error('env_copy_config failed:', err);
     }
   };
 
@@ -420,6 +435,18 @@ function ContainersPanelInner(
                         title="打开容器控制台(Worker GUI)"
                       >
                         控制台
+                      </Button>
+                    )}
+                    {/* 复制：读注册配置预填新建容器表单（名字 <原名>_copy）；
+                        仅已接管（未接管无配置）；missing 配置仍在,同样可复制 */}
+                    {managed && (
+                      <Button
+                        size="small"
+                        icon={<CopyOutlined />}
+                        onClick={() => handleCopy(env)}
+                        title="复制配置：用该容器的配置预填「新建容器」表单"
+                      >
+                        复制
                       </Button>
                     )}
                     {/* 快照/重建统一下拉：hover 展开全部动作（记忆：上次使用置顶+标记），

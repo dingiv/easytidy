@@ -30,7 +30,7 @@ import { FlavorsPanel } from './FlavorsPanel';
 import { EngineInfoPanel } from './EngineInfoPanel';
 import { ImagesPanel } from './ImagesPanel';
 import { TemplateEditorPane } from './TemplateEditorPane';
-import type { ConfTemplate } from '../types';
+import type { ConfTemplate, ContainerConfig } from '../types';
 import logo from '../assets/logo.png';
 
 type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info';
@@ -41,6 +41,10 @@ interface Pane {
   title: string;
   /** 仅 new-container:预选 conf 模板 */
   initialTemplate?: string;
+  /** 仅 new-container:由容器卡片「复制」预填的完整配置（名字已被改为 <原名>_copy） */
+  initialConfig?: ContainerConfig;
+  /** 仅 new-container:复制来源容器名（tab 标题 / 表单提示用） */
+  sourceName?: string;
   /** 仅 template-editor:待编辑模板快照（null = 新建） */
   templateData?: ConfTemplate | null;
 }
@@ -81,7 +85,15 @@ function MasterViewInner() {
 
   /** 打开 pane：'new-container' / 'template-editor' 始终新建,其他 kind 同类已开则聚焦 */
   const openPane = useCallback(
-    (kind: PaneKind, opts?: { initialTemplate?: string; template?: ConfTemplate | null }) => {
+    (
+      kind: PaneKind,
+      opts?: {
+        initialTemplate?: string;
+        template?: ConfTemplate | null;
+        initialConfig?: ContainerConfig;
+        sourceName?: string;
+      },
+    ) => {
       setPanes((prev) => {
         if (kind !== 'new-container' && kind !== 'template-editor') {
           const existing = prev.find((p) => p.kind === kind);
@@ -92,18 +104,22 @@ function MasterViewInner() {
         }
         const id = useUiStore.getState().nextPaneId();
         const title =
-          kind === 'new-container' && opts?.initialTemplate
-            ? `新建容器 · ${truncateFlavor(opts.initialTemplate)}`
-            : kind === 'template-editor'
-              ? opts?.template
-                ? `编辑模板 · ${opts.template.name}`
-                : '新建模板'
-              : PANE_TITLE[kind];
+          kind === 'new-container' && opts?.sourceName
+            ? `新建容器 · 复制自 ${truncateFlavor(opts.sourceName)}`
+            : kind === 'new-container' && opts?.initialTemplate
+              ? `新建容器 · ${truncateFlavor(opts.initialTemplate)}`
+              : kind === 'template-editor'
+                ? opts?.template
+                  ? `编辑模板 · ${opts.template.name}`
+                  : '新建模板'
+                : PANE_TITLE[kind];
         const pane: Pane = {
           id,
           kind,
           title,
           initialTemplate: opts?.initialTemplate,
+          initialConfig: opts?.initialConfig,
+          sourceName: opts?.sourceName,
           templateData: kind === 'template-editor' ? (opts?.template ?? null) : undefined,
         };
         setActivePaneId(id);
@@ -131,6 +147,14 @@ function MasterViewInner() {
   const handleLaunchFlavor = useCallback(
     (flavor: string) => {
       openPane('new-container', { initialTemplate: flavor });
+    },
+    [openPane],
+  );
+
+  /** 容器卡片「复制」：用已有容器配置预填新建表单（名字 <原名>_copy） */
+  const handleCopyConfig = useCallback(
+    (config: ContainerConfig, sourceName: string) => {
+      openPane('new-container', { initialConfig: config, sourceName });
     },
     [openPane],
   );
@@ -260,7 +284,11 @@ function MasterViewInner() {
                 style={{ display: activeId === p.id ? undefined : 'none' }}
               >
                 {p.kind === 'containers' && (
-                  <ContainersPanel ref={containersRef} refreshTick={refreshTick} />
+                  <ContainersPanel
+                    ref={containersRef}
+                    refreshTick={refreshTick}
+                    onCopyConfig={handleCopyConfig}
+                  />
                 )}
                 {p.kind === 'images' && <ImagesPanel />}
                 {p.kind === 'engine-info' && <EngineInfoPanel />}
@@ -274,6 +302,8 @@ function MasterViewInner() {
                 {p.kind === 'new-container' && (
                   <ContainerCreateForm
                     initialTemplate={p.initialTemplate}
+                    initialConfig={p.initialConfig}
+                    sourceName={p.sourceName}
                     onCreated={() => handleNewContainerCreated(p.id)}
                   />
                 )}

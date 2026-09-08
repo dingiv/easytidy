@@ -324,6 +324,20 @@ pub async fn env_list(podman: tauri::State<'_, PodmanState>) -> Result<Vec<EnvVi
     Ok(views)
 }
 
+/// 复制容器配置（容器卡片「复制」入口）：读注册表配置原样返回，前端用它
+/// 预填「新建容器」表单（名字改为 `<原名>_copy`）。
+///
+/// 仅已接管容器可用（未接管无注册配置）；missing（容器丢失）配置仍在，同样可复制。
+#[tauri::command]
+pub fn env_copy_config(name: String) -> Result<ContainerConfig, String> {
+    let config_file =
+        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
+    config_file
+        .get_container(&name)
+        .map_err(|e| format!("读取容器配置失败：{e}"))?
+        .ok_or_else(|| format!("容器配置不存在：{name}（未接管容器无注册配置，不可复制）"))
+}
+
 /// 模板展开已迁移到 conf YAML（`commands::config::conf_template_get`）：
 /// conf 模板 = 完整 ContainerConfig flatten + 可选 setup；创建表单预填直接
 /// 读 conf/<name>.yaml 并解析为 ContainerConfig。flutter 已退役。

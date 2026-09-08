@@ -101,6 +101,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::images_used_by,
             // 环境（env）语义
             commands::containers::env_list,
+            commands::containers::env_copy_config,
             commands::containers::env_new,
             commands::containers::env_rebuild,
             commands::containers::env_rm,

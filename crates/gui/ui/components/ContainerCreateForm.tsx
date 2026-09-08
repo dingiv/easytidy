@@ -18,17 +18,32 @@ interface ContainerCreateFormProps {
   onCreated(): void;
   /** 预选模板（conf 模板卡片「使用」进入）：名称就绪后自动展开预填 */
   initialTemplate?: string;
+  /** 由容器卡片「复制」进入：预填完整配置（名字已被表单改为 <原名>_copy） */
+  initialConfig?: ContainerConfig;
+  /** 复制来源容器名（提示文案用） */
+  sourceName?: string;
 }
 
-function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreateFormProps) {
+function ContainerCreateFormInner({
+  onCreated,
+  initialTemplate,
+  initialConfig,
+  sourceName,
+}: ContainerCreateFormProps) {
   const { message, modal } = AntApp.useApp();
 
   const [templates, setTemplates] = useState<ConfTemplate[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState<string | undefined>(initialTemplate);
-  const [config, setConfig] = useState<ContainerConfig>(BLANK_CONTAINER_CONFIG);
+  // 复制入口：初始配置预填（名字 <原名>_copy，可改）；否则空白表单
+  const [config, setConfig] = useState<ContainerConfig>(() =>
+    initialConfig
+      ? { ...initialConfig, name: `${initialConfig.name}_copy` }
+      : BLANK_CONTAINER_CONFIG,
+  );
   const [creating, setCreating] = useState(false);
-  // 预选模板的自动展开只做一次（名称就绪后）；此后切换/手选均为手动
-  const [autoExpanded, setAutoExpanded] = useState(false);
+  // 预选模板的自动展开只做一次（名称就绪后）；此后切换/手选均为手动。
+  // 复制入口（initialConfig）不走模板自动展开，避免覆盖预填。
+  const [autoExpanded, setAutoExpanded] = useState(Boolean(initialConfig));
 
   // 可用 conf 模板（挂载即取；空数组表示"无模板,直接走镜像方式"）
   useEffect(() => {
@@ -111,15 +126,15 @@ function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreat
   const hasTemplates = templates.length > 0;
 
   // 模板「使用」直达：挂载即有 initialTemplate 时立即展开预填（容器名预填
-  // 模板名，可改），不再等用户先输名称。
+  // 模板名，可改），不再等用户先输名称。复制入口（initialConfig）已预填，跳过。
   useEffect(() => {
-    if (!initialTemplate || autoExpanded) return;
+    if (initialConfig || !initialTemplate || autoExpanded) return;
     setAutoExpanded(true);
     // 先乐观填入容器名（展开返回前避免空名闪现，也让模板 Select 立即可用）
     setConfig((prev) => (prev.name.trim() ? prev : { ...prev, name: initialTemplate }));
     void handleTemplateSelect(initialTemplate, initialTemplate);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialTemplate, autoExpanded]);
+  }, [initialTemplate, autoExpanded, initialConfig]);
 
   return (
     <div className="container-create-page">
@@ -151,13 +166,19 @@ function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreat
           )
         }
         notices={
-          hasTemplates && !nameReady && (
+          sourceName ? (
+            <Alert
+              type="info"
+              showIcon
+              message={`由容器「${sourceName}」的配置预填，名字已改为「${sourceName}_copy」（可改）；创建后与源容器完全独立。`}
+            />
+          ) : hasTemplates && !nameReady ? (
             <Alert
               type="info"
               showIcon
               message="模板按容器名称展开（挂载/环境变量与其绑定），请先在下方「容器」section 输入名称"
             />
-          )
+          ) : undefined
         }
       />
 
@@ -166,9 +187,11 @@ function ContainerCreateFormInner({ onCreated, initialTemplate }: ContainerCreat
         编辑器自身的状态（如容器配置的 saved/apply），不混入跨生命周期的页面动作。 */}
       <div className="container-create-foot">
         <Typography.Text type="secondary" className="container-create-hint">
-          {selectedTemplate
-            ? `由模板「${selectedTemplate}」预填，镜像需已拉取。修改字段后再次保存将以当前表单内容为准。`
-            : '镜像需已在「镜像」面板拉取；创建后自动注册配置并生成桌面图标。'}
+          {sourceName
+            ? `由「${sourceName}」复制预填，镜像需已拉取；创建后新容器与源容器互不影响。`
+            : selectedTemplate
+              ? `由模板「${selectedTemplate}」预填，镜像需已拉取。修改字段后再次保存将以当前表单内容为准。`
+              : '镜像需已在「镜像」面板拉取；创建后自动注册配置并生成桌面图标。'}
         </Typography.Text>
         <Button
           type="primary"
