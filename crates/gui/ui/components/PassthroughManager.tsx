@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { App as AntApp, Radio, Switch, Tooltip } from 'antd';
+import { App as AntApp, Input, Modal, Radio, Switch, Tooltip } from 'antd';
 import {
   DownloadOutlined,
   EditOutlined,
@@ -19,6 +19,8 @@ import { AppIcon } from './AppIcon';
 import { IconPickerModal } from './IconPickerModal';
 import { IconPreselectGrid } from './IconPreselectGrid';
 import { PinnedAppIcon } from './PinnedAppIcon';
+import { mimeForPath } from './mime';
+import { useAppMode } from '../hooks/useAppMode';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import type {
   AppInfo,
@@ -26,8 +28,65 @@ import type {
   PassthroughState,
 } from '../types';
 
+/** 图标路径预览（双源：先试宿主文件，失败回退容器内拉取；用于接受
+ *  拖拽的图标输入框——路径既可能是宿主路径也可能是容器内路径） */
+function IconPathPreview({ path, size = 40 }: { path: string; size?: number }) {
+  const [src, setSrc] = useState<string | null>(null);
+  useEffect(() => {
+    if (!path) {
+      setSrc(null);
+      return;
+    }
+    let cancelled = false;
+    const done = (uri: string) => {
+      if (!cancelled) setSrc(uri);
+    };
+    const fail = () => {
+      if (!cancelled) setSrc(null);
+    };
+    invoke<string>('host_file_b64', { path })
+      .then((b64) => done(`data:${mimeForPath(path)};base64,${b64}`))
+      .catch(() =>
+        invoke<string>('fetch_file_b64', { path })
+          .then((b64) => done(`data:${mimeForPath(path)};base64,${b64}`))
+          .catch(fail),
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
+  if (!src) {
+    return <span className="app-icon-fallback">🖼️</span>;
+  }
+  return (
+    <img
+      className="app-icon-img"
+      src={src}
+      alt=""
+      style={{ width: size, height: size, objectFit: 'contain' }}
+    />
+  );
+}
+
+/** 读取拖入的图标路径：自定义 MIME 优先，text/plain 兜底；只接受路径形态
+ *  （/ 或 ~ 开头、无空格）——拒绝 data:image/…、file:// 等原生拖拽残留 */
+function readDroppedIconPath(e: React.DragEvent): string | null {
+  const raw =
+    e.dataTransfer.getData('application/x-easytidy-icon') ||
+    e.dataTransfer.getData('text/plain');
+  const p = raw.trim();
+  if (p && (p.startsWith('/') || p.startsWith('~')) && !p.includes(' ')) {
+    return p;
+  }
+  return null;
+}
+
 export function PassthroughManager() {
   const { message } = AntApp.useApp();
+  const { mode } = useAppMode();
+  // 单容器模式下容器名（入口导出显示名占位用）
+  const containerName =
+    mode && 'Worker' in mode ? (mode.Worker?.name ?? '') : '';
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [state, setState] = useState<PassthroughState | null>(null);
   const [loading, setLoading] = useState(true);
@@ -44,6 +103,13 @@ export function PassthroughManager() {
   const [editingId, setEditingId] = useState<string | null>(null);
   // 导出本容器 GUI 管理界面的桌面快捷方式
   const [exportingGui, setExportingGui] = useState(false);
+  // 容器导出：显示名（空 = 默认 easytidy <容器名>）
+  const [entryName, setEntryName] = useState('');
+  // 容器导出：当前入口图标路径（输入框为空时的预览；container_entry_icon）
+  const [entryIcon, setEntryIcon] = useState<string | null>(null);
+  // 容器导出：图标路径输入框（宿主路径或容器内路径；空 = 用容器配置/默认）
+  const [entryIconInput, setEntryIconInput] = useState('');
+  const [entryIconPicking, setEntryIconPicking] = useState(false);
   // 正在选择图标的自定义应用 id（null = 弹窗关闭）
   const [iconPickerFor, setIconPickerFor] = useState<string | null>(null);
   // 新增应用表单：图标 = **容器内路径**（null = 未选）
@@ -67,13 +133,68 @@ export function PassthroughManager() {
     }
   };
 
-  /** 导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面，双击打开此管理界面） */
-  const handleExportGuiShortcut = async () => {
+  // 导出显示名对话框（null = 关闭；确认后 onConfirm 执行实际导出）
+  const [exportNameModal, setExportNameModal] = useState<{
+    title: string;
+    placeholder: string;
+    onConfirm: (name: string) => void;
+  } | null>(null);
+  const [exportName, setExportName] = useState('');
+
+  const openExportNameModal = (
+    title: string,
+    initial: string,
+    placeholder: string,
+    onConfirm: (name: string) => void,
+  ) => {
+    setExportName(initial);
+    setExportNameModal({ title, placeholder, onConfirm });
+  };
+
+  /** 容器导出：加载当前入口图标（预览） */
+  const loadEntryIcon = async () => {
+    try {
+      setEntryIcon(await invoke<string>('container_entry_icon'));
+    } catch (err: any) {
+      console.error('container_entry_icon failed:', err);
+    }
+  };
+
+  /** 容器导出：选择宿主图片作为图标源（原生对话框 → 拷入 icons 目录，路径回填输入框） */
+  const pickEntryIcon = async () => {
+    setEntryIconPicking(true);
+    setError(null);
+    try {
+      const p = await invoke<string>('desktop_icons_pick');
+      setEntryIconInput(p);
+    } catch (err: any) {
+      const msg = errMsg(err, '选择图标失败');
+      if (!msg.includes('已取消')) setError(msg);
+    } finally {
+      setEntryIconPicking(false);
+    }
+  };
+
+  /** 容器导出：清除图标输入框（恢复容器配置/默认） */
+  const clearEntryIcon = () => {
+    setEntryIconInput('');
+    void loadEntryIcon();
+  };
+
+  /** 容器导出：导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面） */
+  const handleExportContainer = async () => {
     setExportingGui(true);
     setError(null);
     try {
-      await invoke('export_gui_shortcut');
-      setError(null);
+      await invoke('export_gui_shortcut', {
+        displayName: entryName.trim() || null,
+        iconSource: entryIconInput.trim() || null,
+      });
+      message.success('容器桌面图标已导出（应用菜单 + 桌面）');
+      if (entryIconInput.trim()) {
+        setEntryIconInput('');
+        await loadEntryIcon(); // 刷新为加工后的标准图标
+      }
     } catch (err: any) {
       setError(errMsg(err, 'Failed to export GUI shortcut'));
       console.error('export_gui_shortcut failed:', err);
@@ -84,7 +205,15 @@ export function PassthroughManager() {
 
   useEffect(() => {
     loadData();
+    void loadEntryIcon();
   }, []);
+
+  // 容器名已知后预填默认显示名（仅在用户未输入时）
+  useEffect(() => {
+    if (containerName) {
+      setEntryName((cur) => (cur.trim() ? cur : `easytidy ${containerName}`));
+    }
+  }, [containerName]);
 
   const loadData = async () => {
     setLoading(true);
@@ -167,16 +296,23 @@ export function PassthroughManager() {
     }
   };
 
-  /** 导出单个扫描应用（逐行导出，取代多选批量导出） */
-  const handleExportOne = async (app: AppInfo) => {
-    setError(null);
-    try {
-      await invoke('passthrough_export', { app });
-      await loadData();
-    } catch (err: any) {
-      setError(errMsg(err, 'Failed to export app'));
-      console.error('passthrough_export failed:', err);
-    }
+  /** 导出单个扫描应用（逐行导出，取代多选批量导出；导出时可指定桌面显示名） */
+  const handleExportOne = (app: AppInfo) => {
+    openExportNameModal(
+      `导出「${app.name}」`,
+      app.name,
+      `留空 = ${app.name}`,
+      async (name: string) => {
+        setError(null);
+        try {
+          await invoke('passthrough_export', { app, displayName: name.trim() || null });
+          await loadData();
+        } catch (err: any) {
+          setError(errMsg(err, 'Failed to export app'));
+          console.error('passthrough_export failed:', err);
+        }
+      },
+    );
   };
 
   const handleRevoke = async (appId: string) => {
@@ -208,24 +344,31 @@ export function PassthroughManager() {
   };
 
   /** 导出自定义应用（构造 AppInfoFrontend 走现有导出流；
-   *  icon = 宿主 ~/.easytidy/icons 路径，export 时 Icon= 直接用） */
-  const handleExportCustom = async (custom: PassthroughApp) => {
-    setError(null);
-    try {
-      const app: AppInfo = {
-        id: custom.id,
-        name: custom.name,
-        icon_path: custom.icon ?? '',
-        exec: custom.cmd,
-        desktop_file: custom.id,
-        startup_notify: false,
-      };
-      await invoke('passthrough_export', { app });
-      await loadData();
-    } catch (err: any) {
-      setError(errMsg(err, 'Failed to export custom app'));
-      console.error('passthrough_export (custom) failed:', err);
-    }
+   *  icon = 宿主 ~/.easytidy/icons 路径，export 时 Icon= 直接用；可指定桌面显示名） */
+  const handleExportCustom = (custom: PassthroughApp) => {
+    openExportNameModal(
+      `导出自定义应用「${custom.name}」`,
+      custom.name,
+      `留空 = ${custom.name}`,
+      async (name: string) => {
+        setError(null);
+        try {
+          const app: AppInfo = {
+            id: custom.id,
+            name: custom.name,
+            icon_path: custom.icon ?? '',
+            exec: custom.cmd,
+            desktop_file: custom.id,
+            startup_notify: false,
+          };
+          await invoke('passthrough_export', { app, displayName: name.trim() || null });
+          await loadData();
+        } catch (err: any) {
+          setError(errMsg(err, 'Failed to export custom app'));
+          console.error('passthrough_export (custom) failed:', err);
+        }
+      },
+    );
   };
 
   const handleSaveCustom = async () => {
@@ -309,16 +452,6 @@ export function PassthroughManager() {
     <div className="passthrough-manager">
       <div className="passthrough-header">
         <h3>Desktop Applications Passthrough</h3>
-        <div className="passthrough-header-actions">
-          <button
-            className="secondary-button"
-            onClick={handleExportGuiShortcut}
-            disabled={exportingGui}
-            title="导出本容器管理界面的桌面快捷方式"
-          >
-            {exportingGui ? '导出中…' : '导出桌面图标'}
-          </button>
-        </div>
       </div>
 
       {error && (
@@ -327,10 +460,73 @@ export function PassthroughManager() {
         </div>
       )}
 
-      {/* 容器自启动（登录时）：静默 = 仅后台启动容器；非静默 = 再拉起管理窗口。
-       *  应用自启动在下方各应用行的「容器启动时自动拉起」开关（容器启动时
-       *  经 server apps.launch 拉起） */}
-      <div className="boot-section">
+      {/* ===== Section 1：容器导出（本容器管理界面的桌面快捷方式） ===== */}
+      <section className="pt-section">
+        <h4 className="pt-section-title">容器导出</h4>
+        <div className="container-export">
+          <div className="container-export-row">
+            <span className="container-export-label">图标</span>
+            <div className="container-export-icon">
+              <IconPathPreview path={entryIconInput.trim() || entryIcon || ''} size={40} />
+              <input
+                className="container-export-input container-export-icon-input"
+                value={entryIconInput}
+                onChange={(e) => setEntryIconInput(e.target.value)}
+                placeholder="图标路径（宿主路径，或拖下方预选图标到这里）"
+                title="宿主路径或容器内路径（可拖入下方预选的容器应用图标）"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const p = readDroppedIconPath(e);
+                  if (p) setEntryIconInput(p);
+                }}
+              />
+              <button
+                className="secondary-button"
+                onClick={pickEntryIcon}
+                disabled={entryIconPicking}
+                title="选择宿主图片（品牌边框 + 水印加工）"
+              >
+                {entryIconPicking ? '选择中…' : '选择图标'}
+              </button>
+              {entryIconInput && (
+                <button
+                  className="secondary-button"
+                  onClick={clearEntryIcon}
+                  title="清除（用容器配置中设置的图标）"
+                >
+                  清除
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="container-export-row">
+            <span className="container-export-label">名称</span>
+            <input
+              className="container-export-input"
+              value={entryName}
+              onChange={(e) => setEntryName(e.target.value)}
+              placeholder={containerName ? `easytidy ${containerName}` : 'easytidy <容器名>'}
+              maxLength={64}
+            />
+          </div>
+          <div className="container-export-row">
+            <span className="container-export-label" />
+            <button
+              className="primary-button"
+              onClick={handleExportContainer}
+              disabled={exportingGui}
+              title="导出本容器管理界面的桌面快捷方式（应用菜单 + 桌面，双击打开管理界面）"
+            >
+              {exportingGui ? '导出中…' : '导出桌面图标'}
+            </button>
+          </div>
+        </div>
+
+        {/* 容器自启动（登录时）：静默 = 仅后台启动容器；非静默 = 再拉起管理窗口。
+         *  应用自启动在下方各应用行的「容器启动时自动拉起」开关（容器启动时
+         *  经 server apps.launch 拉起） */}
+        <div className="boot-section">
         <h4>容器自启动（登录时）</h4>
         <Radio.Group
           value={state?.boot_mode ?? 'off'}
@@ -351,6 +547,12 @@ export function PassthroughManager() {
               : '未启用：用户登录后不自动启动容器'}
         </div>
       </div>
+
+      </section>
+
+      {/* ===== Section 2：应用导出（容器内 GUI 应用 → 宿主启动器） ===== */}
+      <section className="pt-section">
+        <h4 className="pt-section-title">应用导出</h4>
 
       <div className="custom-section">
         <h4>自定义应用（容器固定目录之外）</h4>
@@ -383,7 +585,13 @@ export function PassthroughManager() {
                 placeholder="容器内路径，如 ~/.easytidy/icons/app.png（可留空）"
                 value={customIcon ?? ''}
                 onChange={(e) => setCustomIcon(e.target.value || null)}
-                title="图标容器内路径（可直接键入，或「从宿主机选用」）"
+                title="图标容器内路径（可直接键入、从宿主机选用，或拖下方/上方预选图标到这里）"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  const p = readDroppedIconPath(e);
+                  if (p) setCustomIcon(p);
+                }}
               />
               <button
                 className="secondary-button"
@@ -591,6 +799,7 @@ export function PassthroughManager() {
           </div>
         )}
       </div>
+      </section>
 
       {expandedContent && (
         <div className="desktop-content-section">
@@ -611,6 +820,31 @@ export function PassthroughManager() {
           onChanged={loadData}
         />
       )}
+
+      {/* 导出显示名（.desktop Name=；留空 = 默认名） */}
+      <Modal
+        open={exportNameModal !== null}
+        title={exportNameModal?.title}
+        okText="导出"
+        cancelText="取消"
+        onOk={() => {
+          const fn = exportNameModal?.onConfirm;
+          setExportNameModal(null);
+          void fn?.(exportName);
+        }}
+        onCancel={() => setExportNameModal(null)}
+      >
+        <p style={{ marginBottom: 8, fontSize: 13, color: 'rgba(0,0,0,0.65)' }}>
+          桌面/应用菜单中显示的名字（.desktop 的 Name=），留空使用默认名。
+        </p>
+        <Input
+          value={exportName}
+          onChange={(e) => setExportName(e.target.value)}
+          placeholder={exportNameModal?.placeholder}
+          allowClear
+          maxLength={64}
+        />
+      </Modal>
     </div>
   );
 }

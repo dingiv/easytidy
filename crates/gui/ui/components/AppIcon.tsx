@@ -12,6 +12,9 @@ interface AppIconProps {
    *  freedesktop 主题名（org.gnome.Screenshot / printer 等，无对应文件） */
   path?: string | null;
   size?: number;
+  /** 是否允许 img 原生拖拽（默认 false——原生图片拖拽会把 data:image 写进
+   *  transfer，干扰自定义拖拽逻辑，如预选图标拖到输入框） */
+  draggable?: boolean;
 }
 
 /** 路径→data: URI 缓存（列表刷新 / tab 切换重挂载不重复拉取） */
@@ -20,7 +23,7 @@ const iconCache = new Map<string, string>();
 /** 容器内应用图标（经 server fs.read 分块拉取；加载失败回退占位符）。
  *  仅绝对路径会拉取；主题图标名无对应文件（server fs.read 必 ENOENT），
  *  不发请求直接占位（避免 op_failed 告警风暴）。 */
-export function AppIcon({ path, size = 28 }: AppIconProps) {
+export function AppIcon({ path, size = 28, draggable = false }: AppIconProps) {
   const [src, setSrc] = useState<string | null>(() =>
     path && path.startsWith('/') ? iconCache.get(path) ?? null : null,
   );
@@ -66,6 +69,7 @@ export function AppIcon({ path, size = 28 }: AppIconProps) {
       className="app-icon-img"
       src={src}
       alt=""
+      draggable={draggable}
       style={{ width: size, height: size, objectFit: 'contain' }}
     />
   );

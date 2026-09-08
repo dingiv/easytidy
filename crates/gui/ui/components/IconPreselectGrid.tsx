@@ -1,9 +1,11 @@
 // 预选图标：从扫描到的容器应用（.desktop 快捷方式）里挑一个图标，回填到
-// 自定义应用表单。数据源 = apps_list（容器固定目录的 .desktop 应用），
+// 图标输入框。数据源 = apps_list（容器固定目录的 .desktop 应用），
 // 每个 .desktop 的 Icon= 即容器内图标路径；图标经 server 拉取显示。
 //
-// 用途：自定义应用（容器固定目录之外）的图标，除了「键入路径」「从宿主机
-// 选用」外，可从这里直接点选一个容器内已有图标，免去手敲路径。
+// 两种用法：
+// - 点选：回填到当前绑定的输入框（自定义应用表单）
+// - 拖拽：拖到任意图标输入框（自定义应用 / 容器导出），drop 时把容器内
+//   路径写入该输入框（dataTransfer text/plain）
 
 import { useMemo } from 'react';
 import { AppIcon } from './AppIcon';
@@ -37,15 +39,23 @@ export function IconPreselectGrid({ apps, selected, onSelect }: IconPreselectGri
 
   return (
     <div className="icon-preselect">
-      <div className="icon-preselect-title">从容器应用预选用（{icons.length}）</div>
+      <div className="icon-preselect-title">从容器应用预选用（{icons.length}，可拖到图标输入框）</div>
       <div className="icon-preselect-grid">
         {icons.map(({ path, name }) => (
           <button
             key={path}
             type="button"
+            draggable
             className={`icon-preselect-item ${selected === path ? 'selected' : ''}`}
-            title={`${name}\n${path}`}
+            title={`${name}\n${path}（点选或拖到图标输入框）`}
             onClick={() => onSelect(path, name)}
+            onDragStart={(e) => {
+              // 自定义 MIME 优先（drop 端先读它），text/plain 兜底；
+              // img 已禁原生拖拽，drag 只会从本按钮发起，不会被图片 data URI 覆盖
+              e.dataTransfer.setData('application/x-easytidy-icon', path);
+              e.dataTransfer.setData('text/plain', path);
+              e.dataTransfer.effectAllowed = 'copy';
+            }}
           >
             <AppIcon path={path} size={32} />
             <span className="icon-preselect-name">{name}</span>

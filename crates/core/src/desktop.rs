@@ -283,6 +283,8 @@ pub fn mark_desktop_trusted(path: &Path) {
 pub struct PassthroughSpec {
     pub container: String,
     pub app_name: String,
+    /// 桌面显示名（.desktop `Name=`）；空/None = 用 app_name
+    pub display_name: Option<String>,
     pub comment: Option<String>,
     pub categories: Option<String>,
     /// 稳定应用 id（server 登记表：`pt-<hash>` / 自定义 `custom:<name>`）——
@@ -311,6 +313,13 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
     // container（podman 字符集限制 [a-zA-Z0-9][a-zA-Z0-9_.-]*）与 cli_path /
     // app_id（哈希 / `custom:<name>`，无空格）安全，不处理。
     let app_name = sanitize_ini_value(&spec.app_name);
+    // 桌面显示名：用户指定优先（空串视同未指定），否则回退 app_name
+    let display = spec
+        .display_name
+        .as_deref()
+        .map(sanitize_ini_value)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| app_name.clone());
     let comment = sanitize_ini_value(spec.comment.as_deref().unwrap_or("easytidy passthrough"));
     let categories = sanitize_ini_value(spec.categories.as_deref().unwrap_or("Application;Utility;"));
     let icon = spec.icon.as_ref().map(|i| sanitize_ini_value(i));
@@ -319,11 +328,11 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
 
     let mut content = format!(
         "[Desktop Entry]\n\
-         Name={}\n\
-         GenericName=easytidy {} - {}\n\
+         Name={display}\n\
+         GenericName=easytidy {} - {display}\n\
          Comment={comment}\n\
          Categories={categories}\n",
-        app_name, spec.container, app_name,
+        spec.container,
     );
     // launch = 按引用启动：server 查登记表解析 exec 并自行 spawn（点火即走，
     // 点图标秒回；应用生命周期归 server，可经 apps.ps/logs 跟踪）。
@@ -349,11 +358,10 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
          Actions=Remove;\n\
          \n\
          [Desktop Action Remove]\n\
-         Name=Remove {} from system\n\
+         Name=Remove {display} from system\n\
          Exec={} unexport --container {} --app-id {}\n",
         spec.container,
         spec.cli_path,
-        app_name,
         spec.cli_path,
         spec.container,
         spec.app_id,
@@ -419,10 +427,20 @@ pub fn process_container_icon(container: &str, icon_src: Option<&str>) -> Option
 /// （直接冷启动 380MB GUI 是点击慢的根源，垫片先行秒级保活）。
 /// `icon`：加工后的容器图标路径（[`process_container_icon`]）；
 /// 未设置回退内置品牌图标。
-pub fn generate_gui_entry_content(container: &str, cli_path: &str, icon: Option<&str>) -> String {
+pub fn generate_gui_entry_content(
+    container: &str,
+    cli_path: &str,
+    icon: Option<&str>,
+    display_name: Option<&str>,
+) -> String {
+    // 桌面显示名：用户指定优先（空视同未指定），否则 `easytidy <容器名>`
+    let display = display_name
+        .map(sanitize_ini_value)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("easytidy {container}"));
     let mut content = format!(
         "[Desktop Entry]\n\
-         Name=easytidy {container}\n\
+         Name={display}\n\
          GenericName=Container GUI for {container}\n\
          Comment=Open {container} management interface\n\
          Categories=System;Utility;ContainerManagement;\n\
@@ -462,12 +480,13 @@ pub fn write_gui_entry(
     cli_path: &str,
     desktop_icon: bool,
     icon: Option<&str>,
+    display_name: Option<&str>,
 ) -> Result<PathBuf> {
     let dir = passthrough_dir()?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::Config(format!("创建 applications 目录失败：{e}")))?;
 
-    let content = generate_gui_entry_content(container, cli_path, icon);
+    let content = generate_gui_entry_content(container, cli_path, icon, display_name);
 
     let file_name = format!("easytidy-gui-{container}.desktop");
     let menu_path = dir.join(&file_name);
@@ -969,6 +988,7 @@ mod tests {
         let spec = PassthroughSpec {
             container: "chrome".to_string(),
             app_name: "My\nApp".to_string(),
+            display_name: None,
             comment: Some("line1\nline2".to_string()),
             categories: None,
             app_id: "pt-1234567890ab".to_string(),
@@ -987,16 +1007,47 @@ mod tests {
 
     #[test]
     fn test_generate_gui_entry_content_open_format() {
-        let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy", None);
+        let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy", None, None);
 
         assert!(content.contains("Exec=/usr/bin/easytidy open --container chrome"));
         assert!(content.contains("TryExec=/usr/bin/easytidy"));
-        // 迁移识别标记
-        assert!(content.contains("X-easytidy-gui=1"));
+        assert!(content.lines().any(|l| l.trim() == "X-easytidy-gui=1"));
         assert!(content.contains("X-easytidy-container=chrome"));
         // Exec 不再直连 GUI 二进制（X-easytidy-gui 标记含该子串，须按行判定）
         let exec_line = content.lines().find(|l| l.starts_with("Exec=")).unwrap();
         assert!(!exec_line.contains("easytidy-gui"));
+    }
+
+    #[test]
+    fn test_display_name_override_and_fallback() {
+        // 容器入口：指定显示名 → Name= 用指定值；未指定 → easytidy <容器名>
+        let content =
+            generate_gui_entry_content("chrome", "/usr/bin/easytidy", None, Some("我的 Chrome 容器"));
+        assert!(content.lines().any(|l| l == "Name=我的 Chrome 容器"));
+        let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy", None, None);
+        assert!(content.lines().any(|l| l == "Name=easytidy chrome"));
+        // 空白显示名视同未指定
+        let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy", None, Some("   "));
+        assert!(content.lines().any(|l| l == "Name=easytidy chrome"));
+
+        // passthrough：指定显示名 → Name=/GenericName/Remove 动作名均用指定值
+        let spec = PassthroughSpec {
+            container: "chrome".to_string(),
+            app_name: "Google Chrome".to_string(),
+            display_name: Some("我的浏览器".to_string()),
+            comment: None,
+            categories: None,
+            app_id: "pt-abcdef123456".to_string(),
+            icon: None,
+            desktop_file: "/usr/share/applications/google-chrome.desktop".to_string(),
+            cli_path: "/usr/bin/easytidy".to_string(),
+            startup_notify: false,
+            startup_wm_class: None,
+        };
+        let content = generate_passthrough_content(&spec);
+        assert!(content.lines().any(|l| l == "Name=我的浏览器"));
+        assert!(!content.lines().any(|l| l == "Name=Google Chrome"));
+        assert!(content.lines().any(|l| l == "Name=Remove 我的浏览器 from system"));
     }
 
     #[test]
@@ -1037,6 +1088,7 @@ mod tests {
         let spec = PassthroughSpec {
             container: "chrome".to_string(),
             app_name: "Google Chrome".to_string(),
+            display_name: None,
             comment: None,
             categories: None,
             app_id: "pt-abcdef123456".to_string(),

@@ -116,7 +116,7 @@ pub async fn apply_container_config(
             let cli = crate::commands::passthrough::cli_path();
             let gui_entry = dir.join(format!("easytidy-gui-{name}.desktop"));
             if gui_entry.exists() {
-                if let Err(e) = easytidy_core::desktop::write_gui_entry(&name, &cli, true, processed.as_deref()) {
+                if let Err(e) = easytidy_core::desktop::write_gui_entry(&name, &cli, true, processed.as_deref(), None) {
                     warn!("更新容器入口快捷方式失败（图标变更，{name}）：{e}");
                 }
             }

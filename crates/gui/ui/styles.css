@@ -342,6 +342,66 @@ button:disabled {
   font-size: 1rem;
 }
 
+/* Passthrough 管理器两大 section：容器导出 / 应用导出 */
+.pt-section {
+  margin-bottom: 1rem;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  padding: 0.6rem 0.8rem;
+}
+
+.pt-section-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: #cdd6f4;
+}
+
+.container-export {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-bottom: 0.6rem;
+}
+
+.container-export-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.container-export-label {
+  width: 3.2rem;
+  flex: none;
+  font-size: 0.75rem;
+  color: #6c7086;
+}
+
+.container-export-icon {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.container-export-input {
+  flex: 1;
+  max-width: 320px;
+  padding: 0.25rem 0.5rem;
+  background: #11111b;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 0.8rem;
+}
+
+.container-export-input::placeholder {
+  color: #6c7086;
+}
+
+.container-export-icon-input {
+  max-width: none;
+  min-width: 240px;
+}
+
 .auto-start-status {
   padding: 0.8rem 1rem;
   background: #181825;

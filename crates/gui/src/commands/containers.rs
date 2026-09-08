@@ -414,6 +414,7 @@ pub async fn env_new(
         &crate::commands::passthrough::cli_path(),
         true,
         entry_icon.as_deref(),
+        None,
     ) {
         warn!("生成桌面图标失败（忽略）：{e}");
     }

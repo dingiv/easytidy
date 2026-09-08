@@ -869,6 +869,8 @@ pub async fn passthrough_export(
     app: AppInfoFrontend,
     // 同时创建桌面图标（GNOME 桌面默认不显示应用菜单，入口在桌面路径）
     desktop_icon: Option<bool>,
+    // 桌面显示名（.desktop Name=）；空/None = 应用名
+    display_name: Option<String>,
 ) -> Result<String, String> {
     let sess = session
         .inner()
@@ -961,6 +963,7 @@ pub async fn passthrough_export(
     let spec = easytidy_core::desktop::PassthroughSpec {
         container: container.clone(),
         app_name: app.name,
+        display_name,
         comment: app.comment,
         categories: app.categories,
         app_id: app.id.clone(),
@@ -977,8 +980,7 @@ pub async fn passthrough_export(
     Ok(menu_path.to_string_lossy().into_owned())
 }
 
-/// 撤销 passthrough 导出（按应用 id 删除宿主 .desktop；兼容旧格式按
-/// X-easytidy-app 匹配）
+/// 撤销 passthrough 导出（按应用 id 删除宿主 .desktop）
 #[tauri::command]
 pub async fn passthrough_revoke(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -1003,30 +1005,92 @@ pub async fn passthrough_revoke(
 pub async fn export_gui_shortcut(
     session: tauri::State<'_, Option<GuiSession>>,
     desktop_icon: Option<bool>,
+    // 桌面显示名（.desktop Name=）；空/None = `easytidy <容器名>`
+    display_name: Option<String>,
+    // 导出时指定的图标源（宿主路径，经品牌加工）；空/None = 用容器配置的图标源
+    icon_source: Option<String>,
 ) -> Result<String, String> {
     let sess = session
         .inner()
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    // 容器入口图标：配置里用户设置的图标源经品牌工具加工（未设置/失败回退品牌图标）
-    let icon = easytidy_core::configfile::ConfigFile::default_instance()
-        .ok()
-        .and_then(|cf| cf.get_container(&sess.container_name).ok())
-        .flatten()
-        .and_then(|c| {
-            easytidy_core::desktop::process_container_icon(&sess.container_name, c.icon.as_deref())
-        });
+    // 容器入口图标：优先导出时指定的图标源（宿主路径直接读；容器内路径
+    // 经 server 拷出到宿主缓存）；否则用配置里用户设置的图标源。
+    // 均经品牌工具加工（未设置/失败回退品牌图标）
+    let icon = match icon_source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(src) if src.starts_with("data:") || src.starts_with("file://") => {
+            return Err(format!(
+                "无效的图标路径：{src}（请拖入预选图标或手动填写路径，不要拖拽图片文件本身）"
+            ));
+        }
+        Some(src) => {
+            let host_path = if std::path::Path::new(src).is_file() {
+                std::path::PathBuf::from(src)
+            } else {
+                // 容器内路径（如从预选图标拖入）：经 server 拷出
+                let data = fetch_container_file(sess, src)
+                    .await
+                    .map_err(|e| format!("图标文件不存在（宿主与容器内均未找到 {src}）：{e}"))?;
+                let dir = easytidy_core::desktop::passthrough_icon_dir().map_err(|e| e.to_string())?;
+                std::fs::create_dir_all(&dir).map_err(|e| format!("创建图标缓存目录失败：{e}"))?;
+                let ext = std::path::Path::new(src)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or("png");
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let dest = dir.join(format!("easytidy-gui-{}-src-{}.{ext}", sess.container_name, ts));
+                std::fs::write(&dest, &data).map_err(|e| format!("写入图标缓存失败：{e}"))?;
+                dest
+            };
+            easytidy_core::desktop::process_container_icon(&sess.container_name, Some(&host_path.to_string_lossy()))
+        }
+        None => easytidy_core::configfile::ConfigFile::default_instance()
+            .ok()
+            .and_then(|cf| cf.get_container(&sess.container_name).ok())
+            .flatten()
+            .and_then(|c| {
+                easytidy_core::desktop::process_container_icon(&sess.container_name, c.icon.as_deref())
+            }),
+    };
 
     let menu_path = easytidy_core::desktop::write_gui_entry(
         &sess.container_name,
         &cli_path(),
         desktop_icon.unwrap_or(true),
         icon.as_deref(),
+        display_name.as_deref(),
     )
     .map_err(|e| e.to_string())?;
     info!("GUI 入口导出：{} → {:?}", sess.container_name, menu_path);
     Ok(menu_path.to_string_lossy().into_owned())
+}
+
+/// 容器入口当前图标路径（UI 预览用）：容器配置图标源经品牌加工的
+/// 标准文件；未设置/失败 = 内置品牌图标。
+#[tauri::command]
+pub async fn container_entry_icon(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<String, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let icon_src = easytidy_core::configfile::ConfigFile::default_instance()
+        .ok()
+        .and_then(|cf| cf.get_container(&sess.container_name).ok())
+        .flatten()
+        .and_then(|c| c.icon);
+    Ok(easytidy_core::desktop::process_container_icon(
+        &sess.container_name,
+        icon_src.as_deref(),
+    )
+    .or_else(easytidy_core::desktop::ensure_gui_icon)
+    .unwrap_or_default())
 }
 
 // ============================================================================
