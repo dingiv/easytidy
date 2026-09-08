@@ -1,0 +1,28 @@
+// 桌面图标管理面板（Master GUI pane）
+
+.desktop-icons-panel {
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+
+.desktop-icons-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.desktop-icons-title {
+  margin: 0 !important;
+  font-size: 18px !important;
+}
+
+.desktop-icons-sub {
+  flex: 1;
+  font-size: 12px;
+}
+
+.desktop-icons-loading {
+  padding: 80px 0;
+  text-align: center;
+}

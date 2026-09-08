@@ -864,6 +864,294 @@ pub fn remove_passthrough(container: &str, app_id: &str) -> Result<PathBuf> {
     Err(Error::Config(format!("未找到已导出的应用：{app_id}")))
 }
 
+// ============================================================================
+// 桌面快捷方式管理（**纯宿主侧**：扫描 / 移除 / 图标重编，不涉及容器）
+// ============================================================================
+
+/// 宿主侧 easytidy 桌面快捷方式（.desktop）扫描结果。
+///
+/// 同一 identity 的菜单项（applications 目录）与桌面副本合并为一行；
+/// identity：entry = 容器名，app = `容器名/app_id`。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DesktopIconEntry {
+    /// 稳定 identity（entry = 容器名；app = `容器名/app_id`）
+    pub identity: String,
+    /// "entry"（容器入口）| "app"（passthrough 应用）
+    pub kind: String,
+    pub container: String,
+    /// .desktop `Name=` 字段
+    pub title: String,
+    /// .desktop `Icon=` 字段（宿主路径或主题名）
+    pub icon: String,
+    /// app 的 `X-easytidy-app-id`（旧格式回退 `X-easytidy-app`）
+    pub app_id: Option<String>,
+    /// app 的容器内 .desktop 路径（`X-easytidy-app`，仅展示）
+    pub app_file: Option<String>,
+    /// 菜单项（~/.local/share/applications）文件路径
+    pub menu_path: Option<String>,
+    /// 桌面副本文件路径
+    pub desktop_path: Option<String>,
+}
+
+/// .desktop 字段取值（`Key=value` 单行）
+fn desktop_field(content: &str, key: &str) -> Option<String> {
+    content
+        .lines()
+        .find_map(|l| l.strip_prefix(key))
+        .map(|s| s.trim().to_string())
+}
+
+/// 扫描宿主侧全部 easytidy 生成的 .desktop（applications 菜单目录 + 桌面
+/// 目录），按 identity 合并菜单/桌面副本。
+///
+/// 分类以 X- 标记为准（文件名回退）：
+/// - app：`X-easytidy-pt=1`（或 `easytidy-pt-*` 文件名）
+/// - entry：其余（`X-easytidy-gui=1` 新格式 / 无标记旧格式）
+pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
+    let mut entries: std::collections::BTreeMap<String, DesktopIconEntry> =
+        std::collections::BTreeMap::new();
+
+    let mut dirs: Vec<(PathBuf, bool)> = Vec::new(); // (目录, 是否桌面副本)
+    if let Ok(d) = passthrough_dir() {
+        dirs.push((d, false));
+    }
+    if let Some(d) = desktop_dir() {
+        dirs.push((d, true));
+    }
+
+    for (dir, is_desktop) in dirs {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for f in rd.flatten() {
+            let file_name = f.file_name();
+            let name = match file_name.to_str() { Some(s) => s, None => continue };
+            if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(f.path()) else { continue };
+
+            let is_pt = content
+                .lines()
+                .any(|l| l.trim() == "X-easytidy-pt=1")
+                || name.starts_with("easytidy-pt-");
+
+            // 容器名：X- 标记优先；文件名回退（easytidy[-gui]-<c> / easytidy-pt-<c>-<id>）
+            let stem = name
+                .trim_start_matches("easytidy-")
+                .trim_end_matches(".desktop");
+            let container = desktop_field(&content, "X-easytidy-container=").or_else(|| {
+                if let Some(c) = stem.strip_prefix("gui-") {
+                    Some(c.to_string())
+                } else if let Some(rest) = stem.strip_prefix("pt-") {
+                    Some(rest.split('-').next().unwrap_or("").to_string())
+                } else {
+                    Some(stem.to_string())
+                }
+            }).unwrap_or_default();
+
+            let app_id = desktop_field(&content, "X-easytidy-app-id=")
+                .or_else(|| desktop_field(&content, "X-easytidy-app="));
+
+            let (kind, identity, entry_app_id) = if is_pt {
+                let aid = app_id.clone().unwrap_or_default();
+                ("app", format!("{container}/{aid}"), Some(aid))
+            } else {
+                ("entry", container.clone(), None)
+            };
+
+            let entry = entries.entry(identity.clone()).or_insert_with(|| DesktopIconEntry {
+                identity,
+                kind: kind.to_string(),
+                container: container.clone(),
+                title: desktop_field(&content, "Name=")
+                    .unwrap_or_else(|| name.to_string()),
+                icon: desktop_field(&content, "Icon=").unwrap_or_default(),
+                app_id: entry_app_id,
+                app_file: desktop_field(&content, "X-easytidy-app="),
+                menu_path: None,
+                desktop_path: None,
+            });
+            if is_desktop {
+                entry.desktop_path = Some(f.path().to_string_lossy().into_owned());
+            } else {
+                entry.menu_path = Some(f.path().to_string_lossy().into_owned());
+            }
+        }
+    }
+
+    tracing::info!("桌面快捷方式扫描：{} 项", entries.len());
+    Ok(entries.into_values().collect())
+}
+
+/// 移除容器入口快捷方式（全部文件：新旧格式 × 菜单/桌面副本）。
+/// 返回实际删除的路径。
+pub fn remove_entry_desktops(container: &str) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let mut dirs = Vec::new();
+    if let Ok(d) = passthrough_dir() {
+        dirs.push(d);
+    }
+    if let Some(d) = desktop_dir() {
+        dirs.push(d);
+    }
+    for dir in dirs {
+        for file in [
+            format!("easytidy-{container}.desktop"),
+            format!("easytidy-gui-{container}.desktop"),
+        ] {
+            let p = dir.join(&file);
+            if p.exists() && fs::remove_file(&p).is_ok() {
+                tracing::info!("移除容器入口快捷方式：{}", p.display());
+                removed.push(p);
+            }
+        }
+    }
+    removed
+}
+
+/// .desktop 内容替换 `Icon=` 行（无则插到首行后）
+fn replace_icon_line(content: &str, icon: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut done = false;
+    for line in content.lines() {
+        if !done && line.starts_with("Icon=") {
+            out.push(format!("Icon={icon}"));
+            done = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !done {
+        let mut new = out;
+        new.insert(1, format!("Icon={icon}"));
+        return new.join("\n") + "\n";
+    }
+    out.join("\n") + "\n"
+}
+
+/// 图标重编（**纯宿主侧**，不涉及容器）：所选宿主图片经内置品牌工具
+/// [`crate::icon::compose_app_icon`] 加工（渐变边框 + 圆角内容 + 水印，
+/// 256×256 PNG）写入标准图标文件，并更新该 identity 全部 .desktop 的 `Icon=`。
+///
+/// - `kind = "entry"`：容器入口（新旧格式 × 菜单/桌面副本），图标文件
+///   `icons_dir/easytidy-gui-<container>.png`（与创建/导出加工同名同位置）
+/// - `kind = "app"`：passthrough 应用（按 app_id），图标文件
+///   `icons_dir/easytidy-pt-<container>-<sanitized id>.png`（与导出加工同名覆盖）
+///
+/// 返回加工后的图标文件路径。
+pub fn reedit_desktop_icon(
+    kind: &str,
+    container: &str,
+    app_id: Option<&str>,
+    source: &str,
+) -> Result<String> {
+    let data = fs::read(source)
+        .map_err(|e| Error::Config(format!("读取图片失败（{source}）：{e}")))?;
+    let composed = crate::icon::compose_app_icon(&data, EASYTIDY_ICON_PNG)
+        .map_err(|e| Error::Config(format!("图标加工失败：{e}")))?;
+    let dir = crate::appdata::icons_dir()?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| Error::Config(format!("创建 icons 目录失败：{e}")))?;
+
+    let icon_file = match kind {
+        "entry" => dir.join(format!("easytidy-gui-{container}.png")),
+        _ => {
+            let id = app_id.ok_or_else(|| Error::Config("应用 id 缺失".to_string()))?;
+            let safe: String = id
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .collect();
+            dir.join(format!("easytidy-pt-{container}-{safe}.png"))
+        }
+    };
+    fs::write(&icon_file, &composed)
+        .map_err(|e| Error::Config(format!("写入图标失败（{}）：{e}", icon_file.display())))?;
+    let icon = icon_file.to_string_lossy().into_owned();
+
+    match kind {
+        "entry" => update_entry_icons(container, &icon)?,
+        _ => update_pt_icons(container, app_id, &icon)?,
+    }
+    tracing::info!("桌面快捷方式图标重编：{kind} {container} {:?} → {icon}", app_id);
+    Ok(icon)
+}
+
+/// 更新容器入口 .desktop（新旧格式 × 菜单/桌面副本）的 Icon= 行
+fn update_entry_icons(container: &str, icon: &str) -> Result<()> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = passthrough_dir() {
+        dirs.push(d);
+    }
+    if let Some(d) = desktop_dir() {
+        dirs.push(d);
+    }
+    let mut touched = 0;
+    for dir in dirs {
+        for file in [
+            format!("easytidy-{container}.desktop"),
+            format!("easytidy-gui-{container}.desktop"),
+        ] {
+            let p = dir.join(&file);
+            if let Ok(content) = fs::read_to_string(&p) {
+                fs::write(&p, replace_icon_line(&content, icon))
+                    .map_err(|e| Error::Config(format!("更新 .desktop 失败（{}）：{e}", p.display())))?;
+                touched += 1;
+            }
+        }
+    }
+    if touched == 0 {
+        return Err(Error::Config(format!("未找到容器入口 .desktop：{container}")));
+    }
+    Ok(())
+}
+
+/// 更新 passthrough .desktop（菜单/桌面副本，按 X- 标记匹配）的 Icon= 行
+fn update_pt_icons(container: &str, app_id: Option<&str>, icon: &str) -> Result<()> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = passthrough_dir() {
+        dirs.push(d);
+    }
+    if let Some(d) = desktop_dir() {
+        dirs.push(d);
+    }
+    let mut touched = 0;
+    for dir in dirs {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for f in rd.flatten() {
+            let file_name = f.file_name();
+            let Some(name) = file_name.to_str() else { continue };
+            if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
+                continue;
+            }
+            let Ok(content) = fs::read_to_string(f.path()) else { continue };
+            if !content.lines().any(|l| l.trim() == "X-easytidy-pt=1") {
+                continue;
+            }
+            if parse_pt_value(&content, container, "X-easytidy-container=").is_none() {
+                continue;
+            }
+            let matched = match app_id {
+                Some(id) => parse_pt_value(&content, container, "X-easytidy-app-id=")
+                    .or_else(|| parse_pt_value(&content, container, "X-easytidy-app="))
+                    .as_deref()
+                    == Some(id),
+                None => false,
+            };
+            if matched {
+                fs::write(f.path(), replace_icon_line(&content, icon))
+                    .map_err(|e| Error::Config(format!("更新 .desktop 失败（{}）：{e}", f.path().display())))?;
+                touched += 1;
+            }
+        }
+    }
+    if touched == 0 {
+        return Err(Error::Config(format!(
+            "未找到已导出的应用快捷方式：{container} {:?}",
+            app_id
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

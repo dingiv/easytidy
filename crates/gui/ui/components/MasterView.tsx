@@ -18,6 +18,7 @@ import { App as AntApp, Tooltip } from 'antd';
 import {
   AppstoreOutlined,
   CloseOutlined,
+  DesktopOutlined,
   DatabaseOutlined,
   InfoCircleOutlined,
   PictureOutlined,
@@ -26,6 +27,7 @@ import {
 import { useUiStore } from '../stores/uiStore';
 import { ContainerCreateForm } from './ContainerCreateForm';
 import { ContainersPanel, ContainerRef } from './ContainersPanel';
+import { DesktopIconsPanel } from './DesktopIconsPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { EngineInfoPanel } from './EngineInfoPanel';
 import { ImagesPanel } from './ImagesPanel';
@@ -33,7 +35,7 @@ import { TemplateEditorPane } from './TemplateEditorPane';
 import type { ConfTemplate, ContainerConfig } from '../types';
 import logo from '../assets/logo.png';
 
-type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info';
+type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info' | 'desktop-icons';
 
 interface Pane {
   id: string;
@@ -56,6 +58,7 @@ const PANE_TITLE: Record<PaneKind, string> = {
   images: '镜像',
   'template-editor': '模板配置',
   'engine-info': '环境信息',
+  'desktop-icons': '桌面图标',
 };
 
 /** 长 flavor 名截断(避免 tab 标题撑开) */
@@ -235,6 +238,12 @@ function MasterViewInner() {
               active={isActive('engine-info')}
               onClick={() => openPane('engine-info')}
             />
+            <SidebarIcon
+              label="桌面图标"
+              icon={<DesktopOutlined />}
+              active={isActive('desktop-icons')}
+              onClick={() => openPane('desktop-icons')}
+            />
             <hr className="master-sidebar-divider" />
             <SidebarIcon
               label="模板管理"
@@ -292,6 +301,7 @@ function MasterViewInner() {
                 )}
                 {p.kind === 'images' && <ImagesPanel />}
                 {p.kind === 'engine-info' && <EngineInfoPanel />}
+                {p.kind === 'desktop-icons' && <DesktopIconsPanel />}
                 {p.kind === 'flavors' && (
                   <FlavorsPanel
                     onLaunch={handleLaunchFlavor}

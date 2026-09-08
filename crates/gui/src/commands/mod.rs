@@ -9,11 +9,13 @@
 //! - fs:文件系统 + 宿主↔容器传输
 //! - apps:桌面应用枚举
 //! - passthrough:宿主 .desktop 导出/auto-start
+//! - desktop_icons:桌面快捷方式管理（纯宿主侧扫描/移除/图标重编）
 
 pub mod apps;
 pub mod common;
 pub mod config;
 pub mod containers;
+pub mod desktop_icons;
 pub mod fs;
 pub mod passthrough;
 pub mod pty;

@@ -110,6 +110,12 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::env_stop,
             // 容器入口图标选择（宿主文件选择 → icons 目录）
             commands::passthrough::container_pick_icon,
+            // 桌面快捷方式管理（纯宿主侧：扫描/移除/图标重编/预览）
+            commands::desktop_icons::desktop_icons_scan,
+            commands::desktop_icons::desktop_icons_remove,
+            commands::desktop_icons::desktop_icons_pick,
+            commands::desktop_icons::desktop_icons_set_icon,
+            commands::desktop_icons::host_file_b64,
             // 配置管理器（单实例 GUI：get/apply）
             commands::config::get_container_config,
             commands::config::apply_container_config,
