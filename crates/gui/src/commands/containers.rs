@@ -100,8 +100,8 @@ pub async fn remove_container(
         .unregister_container(&name)
         .map_err(|e| ferr("注销容器配置", e))?;
 
-    // 卸载桌面图标
-    let _ = desktop::uninstall_desktop_entry(&name); // 忽略错误
+    // 卸载桌面图标（新格式：菜单 + 桌面副本）
+    let _ = desktop::remove_entry_desktops(&name);
 
     podman.return_podman(p).await;
     Ok(())
@@ -444,7 +444,7 @@ pub async fn env_rm(podman: tauri::State<'_, PodmanState>, name: String) -> Resu
     if let Err(e) = config_file.unregister_container(&name) {
         warn!("注销环境 {} 配置失败（忽略）：{}", name, e);
     }
-    // 清理桌面图标（新旧格式 × 菜单/桌面副本，全清）
+    // 清理桌面图标（菜单 + 桌面副本）
     let _ = desktop::remove_entry_desktops(&name);
     // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>-<hash>，全代；尽力而为）
     let _ = easytidy_core::remove_socket_dirs(&name);

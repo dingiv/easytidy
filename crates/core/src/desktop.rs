@@ -1,26 +1,15 @@
-//! .desktop 文件生成（宿主导出应用图标）。
+//! .desktop 快捷方式生成与管理（宿主侧）。
 //!
 //! 功能：
-//! - 生成容器专用的 .desktop 文件（Exec = `<cli> open --container <name>`，
-//!   经 CLI 垫片确保容器运行/等待 server 后再拉起 GUI——桌面快捷方式统一入口）
-//! - 安装到 $XDG_DATA_HOME/applications/
-//! - 支持自定义图标（使用发行版 logo 或默认）
+//! - 容器入口 .desktop（`easytidy-gui-<name>.desktop`，Exec = `<cli> open
+//!   --container <name>`，经 CLI 垫片确保容器运行/等待 server 后再拉起 GUI）
+//!   ——应用菜单 + 桌面副本
+//! - passthrough 应用 .desktop 导出（容器内 GUI 应用 → 宿主启动器）
+//! - 桌面快捷方式扫描/移除/图标重编（纯宿主侧）
 
 use std::path::{Path, PathBuf};
 use std::fs;
 use crate::error::{Error, Result};
-
-/// .desktop 文件模板。
-const DESKTOP_ENTRY_TEMPLATE: &str = r#"[Desktop Entry]
-Version=1.0
-Type=Application
-Name={title}
-Exec={exec}
-Icon={icon}
-Terminal=false
-Categories=System;ContainerManagement;
-X-easytidy-container={name}
-"#;
 
 /// 清理 .desktop INI 值（`Key=value` 单行结构专用）：换行 / 控制字符会让
 /// 一行断裂成多行 → 破坏 INI 解析。换行替换为空格、控制字符丢弃、连续空白
@@ -36,88 +25,6 @@ fn sanitize_ini_value(s: &str) -> String {
         })
         .collect();
     cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// 生成 .desktop 文件内容。
-///
-/// 参数：
-/// - name: 容器名
-/// - title: 显示标题（默认 "easytidy <name>"）
-/// - icon: 图标路径（默认使用发行版 logo 或 easytidy 图标）
-/// - cli_path: 宿主 easytidy CLI 绝对路径（Exec/TryExec）
-///
-/// 返回 .desktop 文件内容字符串。
-pub fn generate_desktop_entry(
-    name: &str,
-    title: Option<&str>,
-    icon: Option<&str>,
-    cli_path: &str,
-) -> String {
-    let default_title = format!("easytidy {}", name);
-    let title = sanitize_ini_value(title.unwrap_or(&default_title));
-    let icon = sanitize_ini_value(icon.unwrap_or("easytidy-container"));
-    let exec = format!("{} open --container {}", cli_path, name);
-
-    DESKTOP_ENTRY_TEMPLATE
-        .replace("{title}", &title)
-        .replace("{exec}", &exec)
-        .replace("{icon}", &icon)
-        .replace("{name}", name)
-}
-
-/// 安装 .desktop 文件到用户应用目录。
-///
-/// 参数：
-/// - name: 容器名
-/// - title: 显示标题
-/// - icon: 图标路径
-/// - cli_path: 宿主 easytidy CLI 绝对路径
-///
-/// 返回安装后的 .desktop 文件路径。
-pub fn install_desktop_entry(
-    name: &str,
-    title: Option<&str>,
-    icon: Option<&str>,
-    cli_path: &str,
-) -> Result<PathBuf> {
-    let content = generate_desktop_entry(name, title, icon, cli_path);
-
-    // 确定目标路径
-    let data_home = dirs::data_local_dir()
-        .ok_or_else(|| Error::Config("无法确定 XDG_DATA_HOME".to_string()))?;
-
-    let applications_dir = data_home.join("applications");
-    fs::create_dir_all(&applications_dir)
-        .map_err(|e| Error::Config(format!("创建 applications 目录失败：{e}")))?;
-
-    let desktop_path = applications_dir.join(format!("easytidy-{}.desktop", name));
-
-    // 写入文件
-    fs::write(&desktop_path, content)
-        .map_err(|e| Error::Config(format!("写入 .desktop 文件失败：{e}")))?;
-
-    tracing::info!("安装 .desktop 文件：{:?}", desktop_path);
-
-    Ok(desktop_path)
-}
-
-/// 卸载 .desktop 文件。
-pub fn uninstall_desktop_entry(name: &str) -> Result<()> {
-    let data_home = dirs::data_local_dir()
-        .ok_or_else(|| Error::Config("无法确定 XDG_DATA_HOME".to_string()))?;
-
-    let desktop_path = data_home
-        .join("applications")
-        .join(format!("easytidy-{}.desktop", name));
-
-    if desktop_path.exists() {
-        fs::remove_file(&desktop_path)
-            .map_err(|e| Error::Config(format!("删除 .desktop 文件失败：{e}")))?;
-
-        tracing::info!("卸载 .desktop 文件：{:?}", desktop_path);
-    }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -582,222 +489,6 @@ pub fn write_gui_entry(
     Ok(menu_path)
 }
 
-/// 升级迁移：把旧格式 Exec 的 easytidy .desktop 重写为 CLI 垫片格式。
-///
-/// 背景：旧容器入口 `Exec=<gui> --container <n>`（冷启动重型 GUI）、
-/// 旧 passthrough `Exec=<cli> run --container <n> -- <cmd>` 均不享受垫片
-/// 收益（保活 + 等 socket 就绪 + 容器缺失友好报错）。旧格式升级后仍可
-/// 工作（run 与 GUI 直连都没删），迁移是补齐而非防坏——在 GUI 启动时
-/// 调用（存量文件只在显式导出时生成，不会自己更新）。
-///
-/// 幂等：Exec 已含 ` open --container ` 的跳过。按标记/文件名识别三类：
-/// - `X-easytidy-gui=1`（容器入口）→ `Exec=<cli> open --container <n>`
-/// - `X-easytidy-pt=1`（passthrough，容器名取 `X-easytidy-container=`，
-///   应用命令 = 旧 Exec 中 ` -- ` 之后的全部）→ 仅 run→open 替换
-/// - 遗留 `easytidy-<n>.desktop`（无标记）→ `Exec=<cli> open --container <n>`
-///
-/// 扫 applications 目录 + 桌面副本两处（委托 [`migrate_dir`]）。
-pub fn migrate_shortcuts(cli_path: &str) -> usize {
-    let mut total = 0;
-    if let Ok(d) = passthrough_dir() {
-        total += migrate_dir(&d, cli_path);
-    }
-    if let Some(d) = desktop_dir() {
-        total += migrate_dir(&d, cli_path);
-    }
-    total
-}
-
-/// 迁移单个目录中的 easytidy .desktop（逐文件尽力而为，失败 warn 不中断）。
-/// 返回重写的文件数。
-pub fn migrate_dir(dir: &Path, cli_path: &str) -> usize {
-    let mut rewritten = 0;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
-            continue;
-        }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        // None = 无需迁移（已是新格式 / 无容器标记 / 无 Exec 行）
-        let Some(new_content) = migrate_one_content(&content, cli_path) else {
-            continue;
-        };
-        if let Err(e) = write_desktop_file(&path, &new_content) {
-            tracing::warn!("迁移 .desktop 失败（{name}）：{e}");
-        } else {
-            tracing::info!("迁移 .desktop 到新垫片格式：{name}");
-            rewritten += 1;
-        }
-    }
-    rewritten
-}
-
-/// 存量容器入口统一（幂等，GUI 启动时跑）：遗留 `easytidy-<c>.desktop`
-/// （无标记）收敛到新格式 `easytidy-gui-<c>.desktop`（X-easytidy-gui=1）：
-/// - 新格式已存在 → 删遗留副本（去重，菜单 + 桌面）
-/// - 新格式不存在且容器配置仍在 → 重生成（菜单 + 桌面，图标取容器配置）→ 删遗留
-/// - 容器配置已不在（已删容器的残留守口）→ 仅删遗留副本
-///
-/// 返回删除的遗留文件数。
-pub fn unify_entry_shortcuts(cli_path: &str) -> usize {
-    use std::collections::HashMap;
-
-    // 容器名 → 图标源（重生成用；不在 map 中的容器视为“配置已不在”）
-    let mut icons: HashMap<String, Option<String>> = HashMap::new();
-    if let Ok(cf) = crate::configfile::ConfigFile::default_instance() {
-        if let Ok(list) = cf.list_containers() {
-            for c in list {
-                icons.insert(c.name.clone(), c.icon);
-            }
-        }
-    }
-
-    unify_entry_shortcuts_in(
-        passthrough_dir().ok().as_deref(),
-        desktop_dir().as_deref(),
-        &icons,
-        cli_path,
-    )
-}
-
-/// 入口统一核心逻辑（可单测：目录与容器配置由调用方注入）。
-pub fn unify_entry_shortcuts_in(
-    menu: Option<&Path>,
-    desktop: Option<&Path>,
-    icons: &std::collections::HashMap<String, Option<String>>,
-    cli_path: &str,
-) -> usize {
-    let mut dirs: Vec<&Path> = Vec::new();
-    if let Some(d) = menu {
-        dirs.push(d);
-    }
-    if let Some(d) = desktop {
-        dirs.push(d);
-    }
-    if dirs.is_empty() {
-        return 0;
-    }
-
-    // 收集有遗留格式入口的容器（文件名约定 + 内容标记双重判定）
-    let mut legacy: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for dir in &dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
-                continue;
-            }
-            let stem = name.trim_start_matches("easytidy-").trim_end_matches(".desktop");
-            if stem.starts_with("gui-") || stem.starts_with("pt-") {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if content
-                    .lines()
-                    .any(|l| l.trim() == "X-easytidy-gui=1" || l.trim() == "X-easytidy-pt=1")
-                {
-                    continue; // 有标记 → 非遗留格式（文件名异常，不动）
-                }
-            }
-            legacy.insert(stem.to_string());
-        }
-    }
-
-    let mut removed = 0usize;
-    for container in &legacy {
-        let new_name = format!("easytidy-gui-{container}.desktop");
-        let new_exists = dirs.iter().any(|d| d.join(&new_name).exists());
-
-        // 重生成：仅新格式不存在且容器配置仍在时
-        if !new_exists {
-            if let Some(icon) = icons.get(container) {
-                let content = generate_gui_entry_content(container, cli_path, icon.as_deref());
-                if let Some(m) = menu {
-                    let mp = m.join(&new_name);
-                    let _ = write_desktop_file(&mp, &content);
-                }
-                if let Some(d) = desktop {
-                    let p = d.join(&new_name);
-                    if write_desktop_file(&p, &content).is_ok() {
-                        mark_desktop_trusted(&p);
-                    }
-                }
-            }
-        }
-
-        // 清遗留副本（菜单 + 桌面）
-        for dir in &dirs {
-            let p = dir.join(format!("easytidy-{container}.desktop"));
-            if p.exists() && std::fs::remove_file(&p).is_ok() {
-                tracing::info!("入口统一：移除遗留快捷方式 {}", p.display());
-                removed += 1;
-            }
-        }
-    }
-    removed
-}
-
-/// 单文件迁移（纯函数）：返回新内容；`None` = 无需迁移。
-///
-/// 只重写**首个**（主）Exec 行与 TryExec 行（`open --container` 为幂等信号），
-/// 其余行原样保留——passthrough 的 `[Desktop Action Remove]` 里也有一行
-/// `Exec=... unexport ...`（CLI 命令，语义不变），不能被误替换。
-fn migrate_one_content(content: &str, cli_path: &str) -> Option<String> {
-    // 幂等：Exec 已是垫片格式
-    if content.lines().any(|l| l.starts_with("Exec=") && l.contains(" open --container ")) {
-        return None;
-    }
-    let container = content
-        .lines()
-        .find_map(|l| l.strip_prefix("X-easytidy-container="))
-        .unwrap_or_default();
-    // 容器名缺失（不应发生）时不迁移
-    if container.is_empty() {
-        return None;
-    }
-    let exec_line = content.lines().find(|l| l.starts_with("Exec="))?;
-    let new_exec_line = if content.contains("X-easytidy-pt=1") {
-        // passthrough：保留应用命令尾巴（旧 Exec 中首个 ` -- ` 之后的全部）
-        let rest = exec_line.trim_end().split_once(" -- ").map(|(_, r)| r).unwrap_or_default();
-        if rest.is_empty() {
-            format!("Exec={cli_path} open --container {container}")
-        } else {
-            format!("Exec={cli_path} open --container {container} -- {rest}")
-        }
-    } else {
-        // 容器入口（X-easytidy-gui=1）与遗留（easytidy-<n>.desktop）：
-        // 无应用命令，整行替换
-        format!("Exec={cli_path} open --container {container}")
-    };
-
-    let mut out = Vec::with_capacity(content.lines().count());
-    let mut replaced_exec = false;
-    for line in content.lines() {
-        if !replaced_exec && line.starts_with("Exec=") {
-            out.push(new_exec_line.clone());
-            replaced_exec = true;
-        } else if line.starts_with("TryExec=") {
-            // TryExec 指向可执行文件本身：旧容器入口指 GUI 二进制（已失效语义），
-            // 统一指向 CLI
-            out.push(format!("TryExec={cli_path}"));
-        } else {
-            out.push(line.to_string());
-        }
-    }
-    Some(out.join("\n") + "\n")
-}
-
 /// 容器内 .desktop basename → 宿主文件名（sanitize，防路径穿越）
 /// 容器内应用 id → 宿主文件名（sanitize，防路径穿越；`custom:chrome` →
 /// `custom-chrome`，`pt-<hash>` 天然安全）
@@ -948,9 +639,8 @@ pub fn remove_passthrough(container: &str, app_id: &str) -> Result<PathBuf> {
         if parse_pt_value(&content, container, "X-easytidy-container=").is_none() {
             continue;
         }
-        // 新格式按 id 匹配；旧格式（无 app-id）按 X-easytidy-app 兼容
+        // 按 app_id（X-easytidy-app-id）匹配
         let matched = parse_pt_value(&content, container, "X-easytidy-app-id=")
-            .or_else(|| parse_pt_value(&content, container, "X-easytidy-app="))
             .as_deref()
             == Some(app_id);
         if matched {
@@ -1014,7 +704,7 @@ fn desktop_field(content: &str, key: &str) -> Option<String> {
 ///
 /// 分类以 X- 标记为准（文件名回退）：
 /// - app：`X-easytidy-pt=1`（或 `easytidy-pt-*` 文件名）
-/// - entry：其余（`X-easytidy-gui=1` 新格式 / 无标记旧格式）
+/// - entry：其余（`X-easytidy-gui=1`）
 pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
     let mut entries: std::collections::BTreeMap<String, DesktopIconEntry> =
         std::collections::BTreeMap::new();
@@ -1042,7 +732,7 @@ pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
                 .any(|l| l.trim() == "X-easytidy-pt=1")
                 || name.starts_with("easytidy-pt-");
 
-            // 容器名：X- 标记优先；文件名回退（easytidy[-gui]-<c> / easytidy-pt-<c>-<id>）
+            // 容器名：X- 标记优先；文件名回退（仅新格式 easytidy-gui-<c> / easytidy-pt-<c>-<id>）
             let stem = name
                 .trim_start_matches("easytidy-")
                 .trim_end_matches(".desktop");
@@ -1050,14 +740,16 @@ pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
                 if let Some(c) = stem.strip_prefix("gui-") {
                     Some(c.to_string())
                 } else if let Some(rest) = stem.strip_prefix("pt-") {
-                    Some(rest.split('-').next().unwrap_or("").to_string())
+                    rest.split('-').next().map(String::from)
                 } else {
-                    Some(stem.to_string())
+                    None
                 }
             }).unwrap_or_default();
+            if container.is_empty() {
+                continue; // 无标记且非已知命名 → 非 easytidy 生成的入口
+            }
 
-            let app_id = desktop_field(&content, "X-easytidy-app-id=")
-                .or_else(|| desktop_field(&content, "X-easytidy-app="));
+            let app_id = desktop_field(&content, "X-easytidy-app-id=");
 
             let (kind, identity, entry_app_id) = if is_pt {
                 let aid = app_id.clone().unwrap_or_default();
@@ -1090,7 +782,7 @@ pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
     Ok(entries.into_values().collect())
 }
 
-/// 移除容器入口快捷方式（全部文件：新旧格式 × 菜单/桌面副本）。
+/// 移除容器入口快捷方式（菜单/桌面副本）。
 /// 返回实际删除的路径。
 pub fn remove_entry_desktops(container: &str) -> Vec<PathBuf> {
     let mut removed = Vec::new();
@@ -1102,15 +794,10 @@ pub fn remove_entry_desktops(container: &str) -> Vec<PathBuf> {
         dirs.push(d);
     }
     for dir in dirs {
-        for file in [
-            format!("easytidy-{container}.desktop"),
-            format!("easytidy-gui-{container}.desktop"),
-        ] {
-            let p = dir.join(&file);
-            if p.exists() && fs::remove_file(&p).is_ok() {
-                tracing::info!("移除容器入口快捷方式：{}", p.display());
-                removed.push(p);
-            }
+        let p = dir.join(format!("easytidy-gui-{container}.desktop"));
+        if p.exists() && fs::remove_file(&p).is_ok() {
+            tracing::info!("移除容器入口快捷方式：{}", p.display());
+            removed.push(p);
         }
     }
     removed
@@ -1140,7 +827,7 @@ fn replace_icon_line(content: &str, icon: &str) -> String {
 /// [`crate::icon::compose_app_icon`] 加工（渐变边框 + 圆角内容 + 水印，
 /// 256×256 PNG）写入标准图标文件，并更新该 identity 全部 .desktop 的 `Icon=`。
 ///
-/// - `kind = "entry"`：容器入口（新旧格式 × 菜单/桌面副本），图标文件
+/// - `kind = "entry"`：容器入口（菜单/桌面副本），图标文件
 ///   `icons_dir/easytidy-gui-<container>.png`（与创建/导出加工同名同位置）
 /// - `kind = "app"`：passthrough 应用（按 app_id），图标文件
 ///   `icons_dir/easytidy-pt-<container>-<sanitized id>.png`（与导出加工同名覆盖）
@@ -1183,7 +870,7 @@ pub fn reedit_desktop_icon(
     Ok(icon)
 }
 
-/// 更新容器入口 .desktop（新旧格式 × 菜单/桌面副本）的 Icon= 行
+/// 更新容器入口 .desktop（菜单/桌面副本）的 Icon= 行
 fn update_entry_icons(container: &str, icon: &str) -> Result<()> {
     let mut dirs = Vec::new();
     if let Ok(d) = passthrough_dir() {
@@ -1194,16 +881,11 @@ fn update_entry_icons(container: &str, icon: &str) -> Result<()> {
     }
     let mut touched = 0;
     for dir in dirs {
-        for file in [
-            format!("easytidy-{container}.desktop"),
-            format!("easytidy-gui-{container}.desktop"),
-        ] {
-            let p = dir.join(&file);
-            if let Ok(content) = fs::read_to_string(&p) {
-                fs::write(&p, replace_icon_line(&content, icon))
-                    .map_err(|e| Error::Config(format!("更新 .desktop 失败（{}）：{e}", p.display())))?;
-                touched += 1;
-            }
+        let p = dir.join(format!("easytidy-gui-{container}.desktop"));
+        if let Ok(content) = fs::read_to_string(&p) {
+            fs::write(&p, replace_icon_line(&content, icon))
+                .map_err(|e| Error::Config(format!("更新 .desktop 失败（{}）：{e}", p.display())))?;
+            touched += 1;
         }
     }
     if touched == 0 {
@@ -1283,19 +965,6 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_desktop_entry_sanitizes_title() {
-        let content = generate_desktop_entry(
-            "test-container",
-            Some("Bad\nTitle"),
-            None,
-            "/usr/bin/easytidy",
-        );
-        // 换行被清理，Name 保持单行
-        assert!(content.contains("Name=Bad Title"));
-        assert!(!content.lines().any(|l| l.starts_with("Title=")));
-    }
-
-    #[test]
     fn test_generate_passthrough_content_sanitizes_app_name() {
         let spec = PassthroughSpec {
             container: "chrome".to_string(),
@@ -1314,47 +983,6 @@ mod tests {
         assert!(content.contains("Comment=line1 line2"));
         // 无断裂行（line2 不成为新行开头）
         assert!(!content.lines().any(|l| l.starts_with("line2")));
-    }
-
-    #[test]
-    fn test_generate_desktop_entry() {
-        let content = generate_desktop_entry(
-            "test-container",
-            Some("Test Container"),
-            Some("test-icon"),
-            "/usr/bin/easytidy",
-        );
-
-        assert!(content.contains("Name=Test Container"));
-        // 垫片格式：CLI 子命令级 --container（放顶层会 clap 报错，存量 bug 已修）
-        assert!(content.contains("Exec=/usr/bin/easytidy open --container test-container"));
-        assert!(content.contains("Icon=test-icon"));
-        assert!(content.contains("X-easytidy-container=test-container"));
-    }
-
-    #[test]
-    fn test_generate_desktop_entry_defaults() {
-        let content = generate_desktop_entry("test", None, None, "/usr/bin/easytidy");
-
-        assert!(content.contains("Name=easytidy test"));
-        assert!(content.contains("Icon=easytidy-container"));
-    }
-
-    #[test]
-    fn test_install_desktop_entry() {
-        let temp_dir = TempDir::new().unwrap();
-
-        // 模拟 XDG_DATA_HOME
-        let target = temp_dir.path().join("applications/easytidy-test.desktop");
-
-        // 手动创建目录并写入
-        let content = generate_desktop_entry("test", None, None, "/usr/bin/easytidy");
-        fs::create_dir_all(temp_dir.path().join("applications")).unwrap();
-        fs::write(&target, content).unwrap();
-
-        assert!(target.exists());
-        let loaded = fs::read_to_string(&target).unwrap();
-        assert!(loaded.contains("open --container test"));
     }
 
     #[test]
@@ -1431,127 +1059,4 @@ mod tests {
         assert!(content.contains("X-easytidy-app=/usr/share/applications/google-chrome.desktop"));
     }
 
-    #[test]
-    fn test_migrate_one_content_gui_entry() {
-        let old = "[Desktop Entry]\nName=easytidy chrome\nExec=/path/gui --container chrome\nTryExec=/path/gui\nX-easytidy-gui=1\nX-easytidy-container=chrome\n";
-        let new = migrate_one_content(old, "/usr/bin/easytidy").unwrap();
-        assert!(new.contains("Exec=/usr/bin/easytidy open --container chrome"));
-        assert!(new.contains("TryExec=/usr/bin/easytidy"));
-        // 幂等：新内容不再迁移
-        assert!(migrate_one_content(&new, "/usr/bin/easytidy").is_none());
-    }
-
-    #[test]
-    fn test_migrate_one_content_passthrough_keeps_remove_action() {
-        let old = "[Desktop Entry]\nName=App\nExec=/usr/bin/easytidy run --container c -- google-chrome\nTryExec=/usr/bin/easytidy\nX-easytidy-pt=1\nX-easytidy-container=c\nX-easytidy-app=app.desktop\n[Desktop Action Remove]\nName=Remove\nExec=/usr/bin/easytidy unexport --container c --desktop-file app.desktop\n";
-        let new = migrate_one_content(old, "/usr/bin/easytidy").unwrap();
-        // 主 Exec 改 open + 命令尾巴保留
-        assert!(new.contains("Exec=/usr/bin/easytidy open --container c -- google-chrome"));
-        // Remove action 的 unexport 行不被误替换
-        assert!(new.contains("Exec=/usr/bin/easytidy unexport --container c --desktop-file app.desktop"));
-        // 恰好一行 open Exec
-        assert_eq!(new.lines().filter(|l| l.contains("open --container")).count(), 1);
-    }
-
-    #[test]
-    fn test_migrate_one_content_missing_container_noop() {
-        // 无 X-easytidy-container 标记 → 不迁移
-        assert!(migrate_one_content(
-            "[Desktop Entry]\nExec=whatever\n",
-            "/usr/bin/easytidy"
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn test_migrate_dir_idempotent() {
-        let tmp = TempDir::new().unwrap();
-        let apps = tmp.path().join("applications");
-        fs::create_dir_all(&apps).unwrap();
-
-        // 旧格式容器入口
-        let gui_file = apps.join("easytidy-gui-chrome.desktop");
-        fs::write(
-            &gui_file,
-            "[Desktop Entry]\nExec=/path/gui --container chrome\nTryExec=/path/gui\nX-easytidy-gui=1\nX-easytidy-container=chrome\n",
-        )
-        .unwrap();
-        // 旧格式 passthrough
-        let pt_file = apps.join("easytidy-pt-chrome-google-chrome.desktop");
-        fs::write(
-            &pt_file,
-            "[Desktop Entry]\nExec=/usr/bin/easytidy run --container chrome -- google-chrome\nX-easytidy-pt=1\nX-easytidy-container=chrome\n",
-        )
-        .unwrap();
-        // 无关文件应被跳过
-        let other = apps.join("nautilus.desktop");
-        fs::write(&other, "[Desktop Entry]\nExec=nautilus\n").unwrap();
-
-        let n1 = migrate_dir(&apps, "/usr/bin/easytidy");
-        assert_eq!(n1, 2, "首次应重写 2 个 easytidy 文件");
-        let gui = fs::read_to_string(&gui_file).unwrap();
-        assert!(gui.contains("Exec=/usr/bin/easytidy open --container chrome"));
-        let pt = fs::read_to_string(&pt_file).unwrap();
-        assert!(pt.contains("open --container chrome -- google-chrome"));
-        // 无关文件未被改动
-        assert_eq!(fs::read_to_string(&other).unwrap(), "[Desktop Entry]\nExec=nautilus\n");
-
-        // 幂等：二次调用零重写
-        let n2 = migrate_dir(&apps, "/usr/bin/easytidy");
-        assert_eq!(n2, 0, "已是新格式时不应再重写");
-    }
-
-    #[test]
-    fn test_unify_entry_shortcuts_dedup_regenerate_and_stale() {
-        let temp = TempDir::new().unwrap();
-        let menu = temp.path().join("menu");
-        let desk = temp.path().join("desktop");
-        fs::create_dir_all(&menu).unwrap();
-        fs::create_dir_all(&desk).unwrap();
-
-        // a：新格式已在（菜单）+ 遗留残留（菜单+桌面）→ 仅去重
-        fs::write(menu.join("easytidy-gui-a.desktop"), "X-easytidy-gui=1\n").unwrap();
-        fs::write(menu.join("easytidy-a.desktop"), "Name=easytidy a\n").unwrap();
-        fs::write(desk.join("easytidy-a.desktop"), "Name=easytidy a\n").unwrap();
-
-        // b：只有遗留（菜单+桌面），配置仍在（带图标源）→ 重生成 + 清旧
-        fs::write(menu.join("easytidy-b.desktop"), "Name=easytidy b\n").unwrap();
-        fs::write(desk.join("easytidy-b.desktop"), "Name=easytidy b\n").unwrap();
-
-        // c：只有遗留，配置已不在 → 仅删
-        fs::write(menu.join("easytidy-c.desktop"), "Name=easytidy c\n").unwrap();
-
-        // d：passthrough 应用 → 不动
-        fs::write(menu.join("easytidy-pt-b-app1.desktop"), "X-easytidy-pt=1\n").unwrap();
-
-        let mut icons = std::collections::HashMap::new();
-        icons.insert("b".to_string(), Some("/x/icon.png".to_string()));
-
-        let removed =
-            super::unify_entry_shortcuts_in(Some(&menu), Some(&desk), &icons, "/usr/bin/easytidy");
-
-        // a × 2 + b × 2 + c × 1 = 5 个遗留文件被删
-        assert_eq!(removed, 5);
-        assert!(!menu.join("easytidy-a.desktop").exists());
-        assert!(!desk.join("easytidy-a.desktop").exists());
-        assert!(menu.join("easytidy-gui-a.desktop").exists());
-        // b：菜单 + 桌面均重生成，内容正确
-        assert!(menu.join("easytidy-gui-b.desktop").exists());
-        assert!(desk.join("easytidy-gui-b.desktop").exists());
-        let content = fs::read_to_string(menu.join("easytidy-gui-b.desktop")).unwrap();
-        assert!(content.contains("X-easytidy-gui=1"));
-        assert!(content.contains("Icon=/x/icon.png"));
-        assert!(content.contains("open --container b"));
-        // c：删了，未重生成
-        assert!(!menu.join("easytidy-c.desktop").exists());
-        assert!(!menu.join("easytidy-gui-c.desktop").exists());
-        // d：passthrough 未动
-        assert!(menu.join("easytidy-pt-b-app1.desktop").exists());
-
-        // 幂等：二次运行零变更
-        assert_eq!(
-            super::unify_entry_shortcuts_in(Some(&menu), Some(&desk), &icons, "/usr/bin/easytidy"),
-            0
-        );
-    }
 }

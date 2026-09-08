@@ -115,14 +115,9 @@ pub async fn apply_container_config(
         if let Ok(dir) = easytidy_core::desktop::passthrough_dir() {
             let cli = crate::commands::passthrough::cli_path();
             let gui_entry = dir.join(format!("easytidy-gui-{name}.desktop"));
-            let legacy_entry = dir.join(format!("easytidy-{name}.desktop"));
-            if gui_entry.exists() || legacy_entry.exists() {
-                // 统一重写为新格式（菜单 + 桌面副本）；遗留旧格式文件顺手清掉
+            if gui_entry.exists() {
                 if let Err(e) = easytidy_core::desktop::write_gui_entry(&name, &cli, true, processed.as_deref()) {
                     warn!("更新容器入口快捷方式失败（图标变更，{name}）：{e}");
-                }
-                if legacy_entry.exists() {
-                    let _ = std::fs::remove_file(&legacy_entry);
                 }
             }
         }
