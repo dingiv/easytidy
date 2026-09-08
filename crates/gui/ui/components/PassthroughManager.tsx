@@ -19,7 +19,6 @@ import { AppIcon } from './AppIcon';
 import { IconPickerModal } from './IconPickerModal';
 import { IconPreselectGrid } from './IconPreselectGrid';
 import { PinnedAppIcon } from './PinnedAppIcon';
-import { mimeForPath } from './mime';
 import { useAppMode } from '../hooks/useAppMode';
 import { useFavoritesStore } from '../stores/favoritesStore';
 import type {
@@ -28,53 +27,31 @@ import type {
   PassthroughState,
 } from '../types';
 
-/** 图标路径预览（双源：先试宿主文件，失败回退容器内拉取；用于接受
- *  拖拽的图标输入框——路径既可能是宿主路径也可能是容器内路径） */
+/** 图标路径预览（路径统一为**容器内路径**：<img src="icon://<path>"> 经 Tauri
+ *  后端 icon:// 协议中转,后端先拉容器内文件、容器内不存在回退宿主,并把浏览器
+ *  渲染不了的格式（XPM/TIFF/BMP/ICO）在后端转成 PNG。用于接受拖拽/选用的图标输入框） */
 function IconPathPreview({ path, size = 40 }: { path: string; size?: number }) {
-  const [src, setSrc] = useState<string | null>(null);
-  useEffect(() => {
-    if (!path) {
-      setSrc(null);
-      return;
-    }
-    let cancelled = false;
-    const done = (uri: string) => {
-      if (!cancelled) setSrc(uri);
-    };
-    const fail = () => {
-      if (!cancelled) setSrc(null);
-    };
-    invoke<string>('host_file_b64', { path })
-      .then((b64) => done(`data:${mimeForPath(path)};base64,${b64}`))
-      .catch(() =>
-        invoke<string>('fetch_file_b64', { path })
-          .then((b64) => done(`data:${mimeForPath(path)};base64,${b64}`))
-          .catch(fail),
-      );
-    return () => {
-      cancelled = true;
-    };
-  }, [path]);
-  if (!src) {
+  const [failedFor, setFailedFor] = useState<string | null>(null);
+  const failed = !!path && failedFor === path;
+  if (!path || failed) {
     return <span className="app-icon-fallback">🖼️</span>;
   }
   return (
     <img
+      key={path}
       className="app-icon-img"
-      src={src}
+      src={`icon://localhost${path}`}
       alt=""
+      onError={() => setFailedFor(path)}
       style={{ width: size, height: size, objectFit: 'contain' }}
     />
   );
 }
 
-/** 读取拖入的图标路径：自定义 MIME 优先，text/plain 兜底；只接受路径形态
+/** 读取拖入的图标路径：只认自定义 MIME（拖拽源仅写它）。只接受路径形态
  *  （/ 或 ~ 开头、无空格）——拒绝 data:image/…、file:// 等原生拖拽残留 */
 function readDroppedIconPath(e: React.DragEvent): string | null {
-  const raw =
-    e.dataTransfer.getData('application/x-easytidy-icon') ||
-    e.dataTransfer.getData('text/plain');
-  const p = raw.trim();
+  const p = e.dataTransfer.getData('application/x-easytidy-icon').trim();
   if (p && (p.startsWith('/') || p.startsWith('~')) && !p.includes(' ')) {
     return p;
   }
@@ -160,12 +137,14 @@ export function PassthroughManager() {
     }
   };
 
-  /** 容器导出：选择宿主图片作为图标源（原生对话框 → 拷入 icons 目录，路径回填输入框） */
+  /** 容器导出：选择宿主图片作为图标源（原生文件浏览器选宿主图片 →
+   *  经 server 拷入容器 {home}/.easytidy/icons/ → 返回**容器内路径**，
+   *  导出时再从容器拷出品牌加工） */
   const pickEntryIcon = async () => {
     setEntryIconPicking(true);
     setError(null);
     try {
-      const p = await invoke<string>('desktop_icons_pick');
+      const p = await invoke<string>('passthrough_pick_host_icon');
       setEntryIconInput(p);
     } catch (err: any) {
       const msg = errMsg(err, '选择图标失败');
@@ -175,10 +154,11 @@ export function PassthroughManager() {
     }
   };
 
-  /** 容器导出：清除图标输入框（恢复容器配置/默认） */
+  /** 容器导出：清除图标输入框（同时清除容器内登记的 entry_icon，恢复默认） */
   const clearEntryIcon = () => {
     setEntryIconInput('');
     void loadEntryIcon();
+    void invoke('container_set_entry_icon', { path: null }).catch(() => {});
   };
 
   /** 容器导出：导出本容器管理 GUI 的桌面快捷方式（菜单 + 桌面） */
@@ -191,9 +171,11 @@ export function PassthroughManager() {
         iconSource: entryIconInput.trim() || null,
       });
       message.success('容器桌面图标已导出（应用菜单 + 桌面）');
+      // 跨会话持久化：把图标源登记进容器内 config.json（entry_icon），下次挂载预填输入框。
+      // 图标源是持久设置，导出后保留便于查看与重复导出（不清空输入框/预览）。
       if (entryIconInput.trim()) {
-        setEntryIconInput('');
-        await loadEntryIcon(); // 刷新为加工后的标准图标
+        await invoke('container_set_entry_icon', { path: entryIconInput.trim() })
+          .catch(() => {});
       }
     } catch (err: any) {
       setError(errMsg(err, 'Failed to export GUI shortcut'));
@@ -206,6 +188,12 @@ export function PassthroughManager() {
   useEffect(() => {
     loadData();
     void loadEntryIcon();
+    // 跨会话持久化：预填上次登记的入口图标源（容器内 config.json 的 entry_icon）
+    void invoke<string | null>('container_entry_icon_source')
+      .then((p) => {
+        if (p) setEntryIconInput(p);
+      })
+      .catch(() => {});
   }, []);
 
   // 容器名已知后预填默认显示名（仅在用户未输入时）
@@ -477,13 +465,12 @@ export function PassthroughManager() {
           <div className="container-export-row">
             <span className="container-export-label">图标</span>
             <div className="container-export-icon">
-              <IconPathPreview path={entryIconInput.trim() || entryIcon || ''} size={40} />
               <input
                 className="container-export-input container-export-icon-input"
                 value={entryIconInput}
                 onChange={(e) => setEntryIconInput(e.target.value)}
-                placeholder="图标路径（宿主路径，或拖下方预选图标到这里）"
-                title="宿主路径或容器内路径（可拖入下方预选的容器应用图标）"
+                placeholder="容器内图标路径（拖下方预选图标，或点「选择图标」从宿主选用并拷入容器）"
+                title="容器内路径（可拖入预选图标，或从宿主机选用后自动拷入容器）"
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={(e) => {
                   e.preventDefault();
@@ -495,7 +482,7 @@ export function PassthroughManager() {
                 className="secondary-button"
                 onClick={pickEntryIcon}
                 disabled={entryIconPicking}
-                title="选择宿主图片（品牌边框 + 水印加工）"
+                title="从宿主机文件浏览器选图片，经 server 拷入容器（品牌边框 + 水印加工）"
               >
                 {entryIconPicking ? '选择中…' : '选择图标'}
               </button>
@@ -513,6 +500,9 @@ export function PassthroughManager() {
           </div>
           <div className="container-export-row">
             <span className="container-export-label" />
+            <div>
+              <IconPathPreview path={entryIconInput.trim() || entryIcon || ''} size={40} />
+            </div>
             <button
               className="primary-button"
               onClick={handleExportContainer}

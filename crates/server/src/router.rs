@@ -12,7 +12,6 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
-use crate::http::HTTP_PORT;
 use crate::setup::injected_env;
 use crate::state::ServerState;
 use crate::services::apps::{handle_apps_get_icon, handle_apps_kill, handle_apps_launch, handle_apps_launch_app, handle_apps_list, handle_apps_logs, handle_apps_ps};
@@ -254,14 +253,13 @@ pub(crate) async fn handle_ping(msg: Message) -> Result<Frame> {
     }))
 }
 
-/// Handle server.info（HTTP 静态托管端口等）
+/// Handle server.info（容器默认用户 home 等）
 pub(crate) async fn handle_server_info(msg: Message) -> Result<Frame> {
     Ok(Frame::Json(Message {
         id: msg.id,
         kind: MsgKind::Resp,
         op: "server.info".to_string(),
         payload: serde_json::to_value(ServerInfoResp {
-            http_port: HTTP_PORT.load(std::sync::atomic::Ordering::SeqCst),
             // 容器默认用户 home（server 自身身份；setup 后恒有值，防御性 unwrap_or_default）
             home_dir: crate::setup::user_map().map(|u| u.home.clone()).unwrap_or_default(),
         })?,

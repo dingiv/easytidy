@@ -7,13 +7,11 @@
 //! - 持久层 `storage`：/home/easytidy 数据目录与配置读写
 //! - `state`：共享状态（PTY 会话/托管进程/ID 发号）
 //! - `setup`：用户环境（euid 分派建号/XDG/fontconfig）
-//! - `http`：静态文件服务（图片预览）
 //!
 //! 部署形态：静态 musl 二进制，bind-mount 进容器，
 //! 作为容器 entrypoint 主进程（PID 1 = catatonit，经 podman `--init` 注入）。
 
 mod connection;
-mod http;
 mod router;
 mod services;
 mod setup;
@@ -83,7 +81,6 @@ where
 }
 
 use connection::handle_connection;
-use http::start_http_server;
 use services::apps::child_prune_task;
 use services::lifecycle::perform_graceful_shutdown;
 use setup::{ensure_xauthority, finalize_injected_env, fixup_xdg_data_dirs, setup_user_identity};
@@ -286,9 +283,6 @@ async fn run_server(
         .with_context(|| format!("Failed to set socket permissions: {}", socket_path.display()))?;
 
     info!("Listening on {}", socket_path.display());
-
-    // HTTP 静态文件服务（图片预览/大文件下载;动态端口经 server.info 查询）
-    start_http_server().await;
 
     // 容器内 auto-start 应用：server 自读配置并拉起（容器自包含，不依赖宿主推送）。
     // entry/entry_args（旧 --entry）已弃用：启动应用改由 passthrough auto-start 驱动。

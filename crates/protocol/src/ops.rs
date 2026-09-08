@@ -218,8 +218,6 @@ pub struct FsWrite {
 /// 客户端发 `Null` 即可）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerInfoResp {
-    /// HTTP 静态文件服务端口（0 = 未启用）
-    pub http_port: u16,
     /// 容器默认用户 home（server 即容器默认用户；宿主侧据此定位容器内
     /// 用户可写资源，如 ~/.easytidy/icons 自定义应用图标目录）。
     /// `#[serde(default)]`：旧 server 无此字段 → 空串，前后端版本兼容。

@@ -10,7 +10,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
 import { Modal, Button, Input, Spin, AutoComplete, Space } from 'antd';
 import { FolderOpenOutlined, DownloadOutlined } from '@ant-design/icons';
-import { mimeForPath } from './mime';
 import { ContainerPathPicker, parentDir } from './ContainerPathPicker';
 
 interface IconPickerModalProps {
@@ -29,7 +28,19 @@ interface FsEntry {
   is_dir: boolean;
 }
 
-const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'svg', 'ico', 'webp', 'gif', 'bmp']);
+const IMAGE_EXT = new Set([
+  'png',
+  'jpg',
+  'jpeg',
+  'svg',
+  'ico',
+  'webp',
+  'gif',
+  'bmp',
+  'xpm',
+  'tif',
+  'tiff',
+]);
 
 function isImagePath(path: string): boolean {
   return IMAGE_EXT.has(path.split('.').pop()?.toLowerCase() ?? '');
@@ -100,25 +111,23 @@ export function IconPickerModal({ open, appId, currentIcon, onClose, onChanged }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [containerPath]);
 
-  /** 容器内图片预览（debounce：键入停顿 500ms 后拉取，仅图片路径） */
+  /** 容器内图片预览（debounce：键入停顿 500ms 后设 icon:// src，仅图片路径；
+   *  <img> 由浏览器经 Tauri 后端 icon:// 协议中转拉取，无需 async invoke） */
   useEffect(() => {
     if (!containerPath || !isImagePath(containerPath)) {
       setPreview(null);
+      setPreviewing(false);
       return;
     }
-    const t = setTimeout(async () => {
-      setPreviewing(true);
-      setPreview(null);
-      try {
-        const b64 = await invoke<string>('fetch_file_b64', { path: containerPath });
-        setPreview(`data:${mimeForPath(containerPath)};base64,${b64}`);
-      } catch {
-        setPreview(null); // 非图片/不可读：不阻塞
-      } finally {
-        setPreviewing(false);
-      }
+    setPreviewing(true);
+    const t = setTimeout(() => {
+      setPreview(`icon://localhost${containerPath}`);
+      setPreviewing(false);
     }, 500);
-    return () => clearTimeout(t);
+    return () => {
+      clearTimeout(t);
+      setPreviewing(false);
+    };
   }, [containerPath]);
 
   /** AutoComplete 选中：目录 → 保持下拉钻进下一级 */
@@ -238,7 +247,7 @@ export function IconPickerModal({ open, appId, currentIcon, onClose, onChanged }
             {previewing ? (
               <Spin />
             ) : preview ? (
-              <img src={preview} alt="" />
+              <img key={containerPath} src={preview} alt="" onError={() => setPreview(null)} />
             ) : (
               <span className="icon-picker-preview-hint">
                 {containerPath && !isImagePath(containerPath)

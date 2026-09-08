@@ -134,7 +134,7 @@ body {
   background: #89b4fa;
   color: #1e1e2e;
   border: none;
-  padding: 0.6rem 1.2rem;
+  /* padding: 0.6rem 1.2rem; */
   border-radius: 6px;
   cursor: pointer;
   font-weight: bold;
@@ -372,6 +372,7 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 0.8rem;
+  margin: 0.5ch 0;
 }
 
 .container-export-label {

@@ -66,6 +66,34 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
         .manage(mode)
         .manage(state::PodmanState::new())
         .manage(gui_session)
+        // 图标中转协议：<img src="icon://<绝对路径>">。原本 Tauri 应用经 file:// 直读
+        // 宿主机图片；现在图标统一存容器内（宿主路径不存在）→ 后端中转：先读宿主文件，
+        // 宿主不存在再走容器 server socket 拉取；XPM/BMP/ICO/TIFF 后端转 PNG
+        // （to_browser_renderable）。替代早期 file://（宿主）/ server HTTP 静态托管
+        // （rootless 下端口宿主不可达）/ base64 方案。
+        .register_asynchronous_uri_scheme_protocol("icon", |ctx, request, responder| {
+            let app = ctx.app_handle().clone();
+            let path = request.uri().path().to_string();
+            tauri::async_runtime::spawn(async move {
+                let response = match commands::fs::read_icon_bytes(&app, &path).await {
+                    Ok(raw) => {
+                        let (bytes, mime) = easytidy_core::icon::to_browser_renderable(&raw, &path);
+                        tauri::http::Response::builder()
+                            .header(tauri::http::header::CONTENT_TYPE, mime)
+                            .body(bytes)
+                            .unwrap()
+                    }
+                    Err(e) => {
+                        tracing::debug!("icon:// 未找到或读取失败 {path}: {e}");
+                        tauri::http::Response::builder()
+                            .status(tauri::http::StatusCode::NOT_FOUND)
+                            .body(Vec::new())
+                            .unwrap()
+                    }
+                };
+                responder.respond(response);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             // 通用
             commands::common::toggle_devtools,
@@ -99,6 +127,9 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             // 容器入口图标选择（宿主文件选择 → icons 目录）
             commands::passthrough::container_pick_icon,
             commands::passthrough::container_entry_icon,
+            // 容器入口图标源持久化（跨会话：导出时写 config.icon，挂载时预填输入框）
+            commands::passthrough::container_entry_icon_source,
+            commands::passthrough::container_set_entry_icon,
             // 桌面快捷方式管理（纯宿主侧：扫描/移除/图标重编/预览）
             commands::desktop_icons::desktop_icons_scan,
             commands::desktop_icons::desktop_icons_remove,

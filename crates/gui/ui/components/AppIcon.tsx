@@ -1,11 +1,9 @@
-// 容器内应用图标：经 server（socket fetch_file_b64）拉取 → data: URI 显示。
-// 数据源是容器内 server，而非宿主文件系统——container 路径在宿主上不存在，
-// 旧实现 `<img src="file://<container path>">` 必挂（实测）。
-// rootless + pasta 网络下容器 HTTP 端口宿主不可达，故不走 HTTP 静态托管。
+// 容器内应用图标：<img src="icon://<路径>"> 经 Tauri 后端 icon:// 自定义协议中转。
+// 后端先读宿主文件,宿主不存在再走容器 server socket 拉取;XPM/BMP/ICO/TIFF
+// 后端转 PNG(to_browser_renderable)。替代早期 file://(宿主,容器路径宿主不存在
+// 必挂)/ server HTTP 静态托管(rootless 下端口宿主不可达)/ base64 方案。
 
-import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { mimeForPath } from './mime';
+import { useState } from 'react';
 
 interface AppIconProps {
   /** 容器内图标路径（apps_list.icon_path）；.desktop 的 Icon= 也可能是
@@ -17,59 +15,31 @@ interface AppIconProps {
   draggable?: boolean;
 }
 
-/** 路径→data: URI 缓存（列表刷新 / tab 切换重挂载不重复拉取） */
-const iconCache = new Map<string, string>();
+/** icon:// URL（Tauri 自定义协议;浏览器按 scheme 请求 → 后端 icon:// 处理器中转）。
+ *  Linux/WebKitGTK 要求 URL 带 host，否则 wry 构建请求失败（could not create request）；
+ *  用 `localhost` 作 host（同 tauri://localhost 约定），后端 uri().path() 仍取到绝对路径。 */
+const iconSrc = (p: string) => `icon://localhost${p}`;
 
-/** 容器内应用图标（经 server fs.read 分块拉取；加载失败回退占位符）。
- *  仅绝对路径会拉取；主题图标名无对应文件（server fs.read 必 ENOENT），
- *  不发请求直接占位（避免 op_failed 告警风暴）。 */
+/** 容器内应用图标（<img src="icon://<path>"> 经 Tauri 后端中转；加载失败回退占位符）。
+ *  仅绝对路径会请求;主题图标名无对应文件（无 / 前缀）,不发请求直接占位
+ *  （避免 404 / op_failed 告警风暴）。
+ *  `failedFor` 记录失败的具体路径:换 path 后 `failedFor !== path` 自动重试。 */
 export function AppIcon({ path, size = 28, draggable = false }: AppIconProps) {
-  const [src, setSrc] = useState<string | null>(() =>
-    path && path.startsWith('/') ? iconCache.get(path) ?? null : null,
-  );
-  const [failed, setFailed] = useState(!path || !path.startsWith('/'));
+  const isPath = !!path && path.startsWith('/');
+  const [failedFor, setFailedFor] = useState<string | null>(null);
+  const failed = isPath && failedFor === path;
 
-  useEffect(() => {
-    if (!path || !path.startsWith('/')) {
-      // 主题图标名 / 空：无文件可拉，占位
-      setSrc(null);
-      setFailed(true);
-      return;
-    }
-    let cancelled = false;
-    const cached = iconCache.get(path);
-    if (cached) {
-      setSrc(cached);
-      setFailed(false);
-      return;
-    }
-    setSrc(null);
-    setFailed(false);
-    invoke<string>('fetch_file_b64', { path })
-      .then((b64) => {
-        if (cancelled) return;
-        const uri = `data:${mimeForPath(path)};base64,${b64}`;
-        iconCache.set(path, uri);
-        setSrc(uri);
-      })
-      .catch(() => {
-        // 图标缺失是常见情况（server 侧已记 op_failed 日志），不再重复 error
-        if (!cancelled) setFailed(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [path]);
-
-  if (!src) {
-    return <span className="app-icon-fallback">{failed ? '📦' : '…'}</span>;
+  if (!isPath || failed) {
+    return <span className="app-icon-fallback">📦</span>;
   }
   return (
     <img
+      key={path}
       className="app-icon-img"
-      src={src}
+      src={iconSrc(path!)}
       alt=""
       draggable={draggable}
+      onError={() => setFailedFor(path!)}
       style={{ width: size, height: size, objectFit: 'contain' }}
     />
   );

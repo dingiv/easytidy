@@ -47,13 +47,25 @@ fn rounded_rect_sdf(px: f32, py: f32, cx: f32, cy: f32, hw: f32, hh: f32, radius
 /// - `watermark`:easytidy 品牌图标(PNG 字节,右下角水印)
 ///
 /// 返回合成后的 256×256 PNG 字节。
+/// 把图标字节加载为 `image::DynamicImage`（image crate 支持的格式直接加载；
+/// XPM 等 image 不支持的格式用自写解码器转 PNG 再加载）。
+fn load_icon_to_image(bytes: &[u8]) -> Result<image::DynamicImage> {
+    if let Ok(img) = image::load_from_memory(bytes) {
+        return Ok(img);
+    }
+    // XPM：image crate 未启用 xpm 支持 → 自写解码器转 PNG 再加载
+    if let Ok(png) = decode_xpm_to_png(bytes) {
+        return image::load_from_memory(&png)
+            .map_err(|e| Error::Config(format!("XPM 转 PNG 后解析失败：{e}")));
+    }
+    Err(Error::Config("无法解析图标（支持 PNG/JPEG/BMP/ICO/TIFF/XPM）".to_string()))
+}
+
 pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
     use image::{ImageFormat, Rgba, RgbaImage};
 
     // 基础图标 → 居中裁剪正方形 → 缩放 CONTENT×CONTENT
-    let base_img = image::load_from_memory(base)
-        .map_err(|e| Error::Config(format!("解析基础图标失败：{e}")))?
-        .to_rgba8();
+    let base_img = load_icon_to_image(base)?.to_rgba8();
     let (w, h) = base_img.dimensions();
     let side = w.min(h);
     let cropped = image::imageops::crop_imm(&base_img, (w - side) / 2, (h - side) / 2, side, side);
@@ -148,6 +160,200 @@ pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// ============================================================================
+// 浏览器可渲染格式转换（GUI 图标预览用）
+// ============================================================================
+
+/// 把图标字节转成**浏览器可直接渲染**的格式（GUI 预览用）。
+///
+/// WebKitGTK 无法在 `<img>` 里解码 XPM/TIFF/BMP/ICO，但能渲染 PNG/JPEG/
+/// GIF/WebP/SVG。策略：
+/// - 浏览器原生可渲染（png/jpg/jpeg/gif/webp/svg）：原样返回 + 正确 MIME。
+/// - XPM：自写轻量解码器转 PNG。
+/// - BMP/ICO/TIFF：经 image crate 转 PNG。
+/// - 其它/解码失败：原样返回 + MIME（前端显示占位符，不黑不卡）。
+pub fn to_browser_renderable(bytes: &[u8], path: &str) -> (Vec<u8>, String) {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "png" => (bytes.to_vec(), "image/png".to_string()),
+        "jpg" | "jpeg" => (bytes.to_vec(), "image/jpeg".to_string()),
+        "gif" => (bytes.to_vec(), "image/gif".to_string()),
+        "webp" => (bytes.to_vec(), "image/webp".to_string()),
+        "svg" => (bytes.to_vec(), "image/svg+xml".to_string()),
+        "bmp" | "ico" | "tif" | "tiff" => {
+            if let Ok(img) = image::load_from_memory(bytes) {
+                let mut out = Vec::new();
+                if img
+                    .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                    .is_ok()
+                {
+                    return (out, "image/png".to_string());
+                }
+            }
+            (bytes.to_vec(), mime_for_ext(&ext))
+        }
+        "xpm" => match decode_xpm_to_png(bytes) {
+            Ok(png) => (png, "image/png".to_string()),
+            Err(e) => {
+                tracing::warn!("XPM 解码失败，回退原图（前端可能显示占位）：{e}");
+                (bytes.to_vec(), "image/x-xpixmap".to_string())
+            }
+        },
+        _ => (bytes.to_vec(), mime_for_ext(&ext)),
+    }
+}
+
+fn mime_for_ext(ext: &str) -> String {
+    match ext {
+        "png" => "image/png".to_string(),
+        "jpg" | "jpeg" => "image/jpeg".to_string(),
+        "gif" => "image/gif".to_string(),
+        "webp" => "image/webp".to_string(),
+        "svg" => "image/svg+xml".to_string(),
+        "bmp" => "image/bmp".to_string(),
+        "ico" => "image/x-icon".to_string(),
+        "xpm" => "image/x-xpixmap".to_string(),
+        "tif" | "tiff" => "image/tiff".to_string(),
+        _ => "application/octet-stream".to_string(),
+    }
+}
+
+/// 轻量 XPM（X Pixel Map）解码器 → PNG 字节。
+///
+/// XPM 是文本格式：一个 C 字符串数组，首行 `width height colors cpp`，
+/// 随后 colors 行颜色表（`name spec rgb`），再 height 行像素（每行
+/// width*cpp 个字符）。仅支持常见子集（#RRGGBB/#RGB/#AARRGGBB/None/少量
+/// 具名色；cpp=1 或 2）。
+fn decode_xpm_to_png(data: &[u8]) -> Result<Vec<u8>> {
+    use image::{ImageFormat, Rgba, RgbaImage};
+
+    let text =
+        std::str::from_utf8(data).map_err(|e| Error::Config(format!("XPM 非合法 UTF-8：{e}")))?;
+
+    // 提取数组里每个引号字符串（= 每行）
+    let mut lines: Vec<String> = Vec::new();
+    let mut in_string = false;
+    let mut current = String::new();
+    for c in text.chars() {
+        if c == '"' {
+            if in_string {
+                lines.push(std::mem::take(&mut current));
+            }
+            in_string = !in_string;
+        } else if in_string {
+            current.push(c);
+        }
+    }
+    if lines.len() < 2 {
+        return Err(Error::Config("XPM 格式无效（缺少行数据）".to_string()));
+    }
+
+    // 首行 header：width height colors cpp
+    let h: Vec<&str> = lines[0].split_whitespace().collect();
+    if h.len() < 4 {
+        return Err(Error::Config("XPM header 无效".to_string()));
+    }
+    let width: u32 = h[0].parse().map_err(|_| Error::Config("XPM width 无效".to_string()))?;
+    let height: u32 = h[1]
+        .parse()
+        .map_err(|_| Error::Config("XPM height 无效".to_string()))?;
+    let colors: usize = h[2]
+        .parse()
+        .map_err(|_| Error::Config("XPM colors 无效".to_string()))?;
+    let cpp: usize = h[3]
+        .parse()
+        .map_err(|_| Error::Config("XPM cpp 无效".to_string()))?;
+    if cpp == 0 || cpp > 2 {
+        return Err(Error::Config(format!("XPM cpp 不支持：{cpp}")));
+    }
+
+    // 颜色表：lines[1..=colors]。标准 XPM 行格式：
+    //   `<key(cpp 字符)><空白>[<colortype: c/m/s/d/g>]<空白><colorvalue>`
+    // key 取行首 cpp 个字符（可能是空格/点等，如透明色常为空白）；colorvalue
+    // 取最后一个空白分隔 token（兼容可选的 colortype 前缀，如 `c #8DB0CE` / `None`）。
+    let mut color_map: std::collections::HashMap<String, [u8; 4]> =
+        std::collections::HashMap::new();
+    let color_end = (1 + colors).min(lines.len());
+    for line in &lines[1..color_end] {
+        let key: String = line.chars().take(cpp).collect();
+        if let Some(value) = line.split_whitespace().last() {
+            color_map.insert(key, parse_xpm_color(value));
+        }
+    }
+
+    // 像素行：从 (1+colors) 起 height 行
+    let row_start = 1 + colors;
+    if lines.len() < row_start + height as usize {
+        return Err(Error::Config("XPM 像素行不足".to_string()));
+    }
+
+    let mut img = RgbaImage::new(width, height);
+    for y in 0..height {
+        let row = &lines[row_start + y as usize];
+        for x in 0..width {
+            let spec: String = row.chars().skip((x as usize) * cpp).take(cpp).collect();
+            let rgba = color_map.get(&spec).copied().unwrap_or([0, 0, 0, 0]);
+            img.put_pixel(x, y, Rgba(rgba));
+        }
+    }
+
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Png)
+        .map_err(|e| Error::Config(format!("XPM 编码 PNG 失败：{e}")))?;
+    Ok(out)
+}
+
+/// 解析 XPM 颜色值：`#RRGGBB`/`#RGB`/`#AARRGGBB`/`None`/少量具名色。
+fn parse_xpm_color(s: &str) -> [u8; 4] {
+    let s = s.trim();
+    if s.eq_ignore_ascii_case("none") {
+        return [0, 0, 0, 0];
+    }
+    if let Some(hex) = s.strip_prefix('#') {
+        let h = hex.trim();
+        match h.len() {
+            6 => [
+                u8::from_str_radix(&h[0..2], 16).unwrap_or(0),
+                u8::from_str_radix(&h[2..4], 16).unwrap_or(0),
+                u8::from_str_radix(&h[4..6], 16).unwrap_or(0),
+                255,
+            ],
+            3 => [
+                u8::from_str_radix(&h[0..1], 16).unwrap_or(0) * 17,
+                u8::from_str_radix(&h[1..2], 16).unwrap_or(0) * 17,
+                u8::from_str_radix(&h[2..3], 16).unwrap_or(0) * 17,
+                255,
+            ],
+            8 => [
+                u8::from_str_radix(&h[2..4], 16).unwrap_or(0),
+                u8::from_str_radix(&h[4..6], 16).unwrap_or(0),
+                u8::from_str_radix(&h[6..8], 16).unwrap_or(0),
+                u8::from_str_radix(&h[0..2], 16).unwrap_or(255),
+            ],
+            _ => [0, 0, 0, 0],
+        }
+    } else {
+        match s.to_lowercase().as_str() {
+            "black" => [0, 0, 0, 255],
+            "white" => [255, 255, 255, 255],
+            "red" => [255, 0, 0, 255],
+            "green" => [0, 128, 0, 255],
+            "blue" => [0, 0, 255, 255],
+            "gray" | "grey" => [128, 128, 128, 255],
+            "yellow" => [255, 255, 0, 255],
+            "cyan" => [0, 255, 255, 255],
+            "magenta" => [255, 0, 255, 255],
+            "orange" => [255, 165, 0, 255],
+            "purple" => [128, 0, 128, 255],
+            _ => [0, 0, 0, 0],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +383,118 @@ mod tests {
         img.write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Png)
             .unwrap();
         out
+    }
+
+    #[test]
+    fn test_compose_app_icon_real_xpm() {
+        // 真实系统 XPM（cpp=2，316 色）——image crate 不支持 xpm，走自写解码器。
+        // 文件不存在（非本机 / CI）时跳过。
+        let path = "/usr/share/pixmaps/python3.13.xpm";
+        let Ok(data) = std::fs::read(path) else {
+            eprintln!("skip: {path} 不存在");
+            return;
+        };
+        let wm = make_png(2, [0, 0, 0, 255]);
+        let out = compose_app_icon(&data, &wm).expect("真实 XPM 应能经自写解码器加工");
+        let img = image::load_from_memory(&out).expect("输出应为有效 PNG");
+        assert_eq!((img.width(), img.height()), (256, 256));
+    }
+
+    #[test]
+    fn test_decode_xpm_to_png() {
+        // 2×2 XPM：cpp=1，三键（.→黑，x→红，o→透明）。标准格式 `<key><空白><value>`
+        let xpm = "/* XPM */\nstatic char * t[] = {\n\"2 2 3 1\",\n\".  #000000\",\n\"x  #ff0000\",\n\"o  None\",\n\".x\",\n\"xo\"\n};\n";
+        let png = decode_xpm_to_png(xpm.as_bytes()).expect("xpm decode failed");
+        use image::{GenericImageView, Rgba};
+        let img = image::load_from_memory(&png).expect("not a valid png");
+        assert_eq!((img.width(), img.height()), (2, 2));
+        // (0,0)=. → black；(1,0)=x → red；(0,1)=x → red；(1,1)=o → None(透明)
+        assert_eq!(img.get_pixel(0, 0), Rgba([0, 0, 0, 255]));
+        assert_eq!(img.get_pixel(1, 0), Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(0, 1), Rgba([255, 0, 0, 255]));
+        assert_eq!(img.get_pixel(1, 1), Rgba([0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn test_decode_xpm_cpp2_with_colortype() {
+        // 2×2 XPM：cpp=2，带 colortype 前缀（`c #RRGGBB` / `c None`）——真实 XPM 常见格式。
+        // 键为 2 字符：`  `(两空格,透明)、`. `(点+空格,蓝)。旧解析器按空白分列取
+        // parts[1]/parts[2]，会把带 `c` 前缀的行当两 token 而丢弃 → 整图全透明。
+        let xpm = "/* XPM */\nstatic char * t[] = {\n\"2 2 2 2\",\n\"  c None\",\n\". c #4985B7\",\n\"  . \",\n\". . \"\n};\n";
+        let png = decode_xpm_to_png(xpm.as_bytes()).expect("xpm decode failed");
+        use image::{GenericImageView, Rgba};
+        let img = image::load_from_memory(&png).expect("not a valid png");
+        assert_eq!((img.width(), img.height()), (2, 2));
+        assert_eq!(img.get_pixel(0, 0), Rgba([0, 0, 0, 0]));           // "  " 透明
+        assert_eq!(img.get_pixel(1, 0), Rgba([0x49, 0x85, 0xB7, 255])); // ". " 蓝
+        assert_eq!(img.get_pixel(0, 1), Rgba([0x49, 0x85, 0xB7, 255]));
+        assert_eq!(img.get_pixel(1, 1), Rgba([0x49, 0x85, 0xB7, 255]));
+    }
+
+    #[test]
+    fn test_to_browser_renderable_passthrough_and_xpm() {
+        // png 原样返回
+        let png = make_png(2, [1, 2, 3, 255]);
+        let (b, mime) = to_browser_renderable(&png, "/a/icon.png");
+        assert_eq!(mime, "image/png");
+        assert_eq!(b, png);
+        // xpm 转成 png
+        let xpm = "static char * t[] = {\"1 1 1 1\",\"c #00000 c #ff0000\",\"c\"};\n";
+        let (b, mime) = to_browser_renderable(xpm.as_bytes(), "/a/icon.xpm");
+        assert_eq!(mime, "image/png");
+        let img = image::load_from_memory(&b).expect("xpm→png invalid");
+        assert_eq!((img.width(), img.height()), (1, 1));
+    }
+
+    #[test]
+    fn test_real_xpm_conversion() {
+        // 环境依赖：找一个真实 XPM 文件（找不到就跳过，不阻断 CI）
+        let xpm_path = find_a_xpm();
+        let Some(path) = xpm_path else { return };
+        let bytes = std::fs::read(&path).expect("read xpm");
+        let (png, mime) = to_browser_renderable(&bytes, path.to_str().unwrap_or_default());
+        assert_eq!(mime, "image/png", "XPM 应转成 PNG");
+        let img = image::load_from_memory(&png).expect("xpm→png 不是有效 PNG");
+        assert!(img.width() > 0 && img.height() > 0);
+        // 关键回归：转换后必须有非透明像素。颜色表解析失败（如漏掉 colortype
+        // 前缀 `c`）会使整图全透明——浏览器显示空白，而尺寸检查却过不了关。
+        use image::GenericImageView;
+        let mut opaque = 0u32;
+        for y in 0..img.height() {
+            for x in 0..img.width() {
+                if img.get_pixel(x, y).0[3] > 0 {
+                    opaque += 1;
+                }
+            }
+        }
+        assert!(opaque > 0, "转换后全透明——颜色表未解析（colortype 前缀 bug）");
+        eprintln!("real xpm ok: {} → {}x{} ({} 非透明像素)", path.display(), img.width(), img.height(), opaque);
+    }
+
+    fn find_a_xpm() -> Option<std::path::PathBuf> {
+        fn search(dir: &std::path::Path, depth: u32) -> Option<std::path::PathBuf> {
+            if depth == 0 {
+                return None;
+            }
+            let entries = std::fs::read_dir(dir).ok()?;
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if let Some(f) = search(&p, depth - 1) {
+                        return Some(f);
+                    }
+                } else if p.extension().map(|x| x == "xpm").unwrap_or(false) {
+                    return Some(p);
+                }
+            }
+            None
+        }
+        // 只查几个已知可能有 XPM 的目录，限深 4，找到即停（快、可预测）
+        for root in ["/usr/share/pixmaps", "/usr/share/ghostscript", "/usr/share/icons"] {
+            if let Some(f) = search(std::path::Path::new(root), 4) {
+                return Some(f);
+            }
+        }
+        None
     }
 }

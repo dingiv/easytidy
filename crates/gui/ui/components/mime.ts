@@ -10,6 +10,9 @@ export function mimeForPath(path: string): string {
     case 'svg': return 'image/svg+xml';
     case 'bmp': return 'image/bmp';
     case 'ico': return 'image/x-icon';
+    case 'xpm': return 'image/x-xpixmap';
+    case 'tif':
+    case 'tiff': return 'image/tiff';
     default: return 'application/octet-stream';
   }
 }

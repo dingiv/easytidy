@@ -519,9 +519,9 @@ pub struct ContainerConfig {
     pub silent_boot: bool,
     /// 是否常驻（catatonit + server 生命周期）
     pub persistent: bool,
-    /// 容器入口图标（宿主图片路径，可选）：入口 .desktop 导出时经
-    /// [`crate::desktop::process_container_icon`]（内置品牌加工）写入宿主 icons 目录。
-    /// 未设置 = 内置品牌图标。
+    /// 容器入口图标源（**宿主**图片路径，主来源）：用户设置的图标路径（宿主或容器路径，
+    /// 导出时经 server/宿主读取）。容器内 config.json 的 `entry_icon` 是它的镜像（供 worker
+    /// GUI 经 server 查询）。
     #[serde(default)]
     pub icon: Option<String>,
 }

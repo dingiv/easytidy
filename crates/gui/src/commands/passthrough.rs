@@ -671,7 +671,7 @@ pub async fn app_ps(
     Ok(ps.processes)
 }
 
-/// 容器 server 信息（http_port + 容器默认用户 home）。
+/// 容器 server 信息（容器默认用户 home）。
 /// 宿主侧用 home_dir 定位容器内用户可写资源
 /// （如自定义应用图标目录 ~/.easytidy/icons）。
 #[tauri::command]
@@ -995,6 +995,69 @@ pub async fn passthrough_revoke(
     Ok(removed.to_string_lossy().into_owned())
 }
 
+/// 读取宿主 ConfigFile 的入口图标源（**主来源**，宿主或容器路径）。
+fn host_entry_icon(container: &str) -> Option<String> {
+    easytidy_core::configfile::ConfigFile::default_instance()
+        .ok()
+        .and_then(|cf| cf.get_container(container).ok())
+        .flatten()
+        .and_then(|c| c.icon)
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+}
+
+/// 写入宿主 ConfigFile 的入口图标源（**主来源**；None = 清除）。
+fn set_host_entry_icon(container: &str, path: Option<&str>) -> Result<(), String> {
+    let config_file = easytidy_core::configfile::ConfigFile::default_instance()
+        .map_err(|e| e.to_string())?;
+    let mut cfg = config_file
+        .get_container(container)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "容器配置不存在（请先创建容器）".to_string())?;
+    cfg.icon = path
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.to_string());
+    config_file.register_container(cfg).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// 从容器（server）或宿主读取图标字节（容器优先，宿主回退）。
+async fn fetch_or_host_read(sess: &GuiSession, path: &str) -> Result<Vec<u8>, String> {
+    match fetch_container_file(sess, path).await {
+        Ok(d) => Ok(d),
+        Err(_) => std::fs::read(path)
+            .map_err(|_| format!("图标文件不存在（容器内与宿主均未找到 {path}）")),
+    }
+}
+
+/// 登记容器内入口图标路径到 `config.json` 的 `entry_icon`（None = 清除）。
+async fn register_entry_icon_in_container(
+    sess: &GuiSession,
+    path: Option<&str>,
+) -> Result<(), String> {
+    let value = path
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|s| serde_json::Value::String(s.to_string()))
+        .unwrap_or(serde_json::Value::Null);
+    let set_req = CfgSet {
+        key: "entry_icon".to_string(),
+        value,
+    };
+    let resp = send_json_request(
+        sess,
+        "config.set".to_string(),
+        serde_json::to_value(set_req).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    Ok(())
+}
+
 /// 导出本容器的 GUI 管理界面桌面快捷方式（菜单 + 桌面图标）。
 ///
 /// Exec = 宿主 CLI 垫片 `easytidy open --container <name>`（点击时由 CLI
@@ -1007,7 +1070,7 @@ pub async fn export_gui_shortcut(
     desktop_icon: Option<bool>,
     // 桌面显示名（.desktop Name=）；空/None = `easytidy <容器名>`
     display_name: Option<String>,
-    // 导出时指定的图标源（宿主路径，经品牌加工）；空/None = 用容器配置的图标源
+    // 导出时指定的图标源（宿主或容器路径，经品牌加工）；空/None = 用主来源（宿主 ConfigFile.icon）
     icon_source: Option<String>,
 ) -> Result<String, String> {
     let sess = session
@@ -1015,9 +1078,10 @@ pub async fn export_gui_shortcut(
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
-    // 容器入口图标：优先导出时指定的图标源（宿主路径直接读；容器内路径
-    // 经 server 拷出到宿主缓存）；否则用配置里用户设置的图标源。
-    // 均经品牌工具加工（未设置/失败回退品牌图标）
+    // 容器入口图标（源 = 用户设置的图标路径，宿主或容器路径）：优先导出时指定的图标源，
+    // 否则用主来源（宿主 ConfigFile.icon）。均经 server/宿主读取后品牌加工（未设置回退
+    // 品牌图标），并把图标源写入主来源 + 镜像到容器 config.json（entry_icon，供 worker GUI）。
+    // 每次导出都强制重写宿主图标 + .desktop（process_container_icon_bytes / write_gui_entry 均覆盖写）。
     let icon = match icon_source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(src) if src.starts_with("data:") || src.starts_with("file://") => {
             return Err(format!(
@@ -1025,37 +1089,24 @@ pub async fn export_gui_shortcut(
             ));
         }
         Some(src) => {
-            let host_path = if std::path::Path::new(src).is_file() {
-                std::path::PathBuf::from(src)
-            } else {
-                // 容器内路径（如从预选图标拖入）：经 server 拷出
-                let data = fetch_container_file(sess, src)
-                    .await
-                    .map_err(|e| format!("图标文件不存在（宿主与容器内均未找到 {src}）：{e}"))?;
-                let dir = easytidy_core::desktop::passthrough_icon_dir().map_err(|e| e.to_string())?;
-                std::fs::create_dir_all(&dir).map_err(|e| format!("创建图标缓存目录失败：{e}"))?;
-                let ext = std::path::Path::new(src)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .filter(|e| !e.is_empty())
-                    .unwrap_or("png");
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0);
-                let dest = dir.join(format!("easytidy-gui-{}-src-{}.{ext}", sess.container_name, ts));
-                std::fs::write(&dest, &data).map_err(|e| format!("写入图标缓存失败：{e}"))?;
-                dest
-            };
-            easytidy_core::desktop::process_container_icon(&sess.container_name, Some(&host_path.to_string_lossy()))
+            let data = fetch_or_host_read(sess, src).await?;
+            // 持久化：主来源（宿主 ConfigFile.icon）+ 镜像（容器 config.json entry_icon）
+            set_host_entry_icon(&sess.container_name, Some(src)).map_err(|e| e.to_string())?;
+            register_entry_icon_in_container(sess, Some(src)).await?;
+            easytidy_core::desktop::process_container_icon_bytes(&sess.container_name, &data)
         }
-        None => easytidy_core::configfile::ConfigFile::default_instance()
-            .ok()
-            .and_then(|cf| cf.get_container(&sess.container_name).ok())
-            .flatten()
-            .and_then(|c| {
-                easytidy_core::desktop::process_container_icon(&sess.container_name, c.icon.as_deref())
-            }),
+        None => {
+            // 无显式图标源：用主来源（宿主 ConfigFile.icon）；未设置 = 内置品牌图标
+            match host_entry_icon(&sess.container_name) {
+                Some(src) => {
+                    let data = fetch_or_host_read(sess, &src).await?;
+                    // 镜像到容器 config.json（entry_icon，供 worker GUI 经 server 查询）
+                    register_entry_icon_in_container(sess, Some(&src)).await?;
+                    easytidy_core::desktop::process_container_icon_bytes(&sess.container_name, &data)
+                }
+                None => easytidy_core::desktop::ensure_container_entry_icon(&sess.container_name),
+            }
+        }
     };
 
     let menu_path = easytidy_core::desktop::write_gui_entry(
@@ -1070,8 +1121,9 @@ pub async fn export_gui_shortcut(
     Ok(menu_path.to_string_lossy().into_owned())
 }
 
-/// 容器入口当前图标路径（UI 预览用）：容器配置图标源经品牌加工的
-/// 标准文件；未设置/失败 = 内置品牌图标。
+/// 容器入口当前图标源路径（UI 预览用）：主来源（宿主 ConfigFile.icon，宿主或容器
+/// 路径）；未设置 = 内置品牌图标。前端用 `icon://<路径>` 显示（server 容器优先、
+/// 宿主回退取字节；XPM 等后端转 PNG）。
 #[tauri::command]
 pub async fn container_entry_icon(
     session: tauri::State<'_, Option<GuiSession>>,
@@ -1080,17 +1132,51 @@ pub async fn container_entry_icon(
         .inner()
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-    let icon_src = easytidy_core::configfile::ConfigFile::default_instance()
-        .ok()
-        .and_then(|cf| cf.get_container(&sess.container_name).ok())
-        .flatten()
-        .and_then(|c| c.icon);
-    Ok(easytidy_core::desktop::process_container_icon(
-        &sess.container_name,
-        icon_src.as_deref(),
-    )
-    .or_else(easytidy_core::desktop::ensure_gui_icon)
-    .unwrap_or_default())
+    match host_entry_icon(&sess.container_name) {
+        Some(p) => Ok(p),
+        None => easytidy_core::desktop::ensure_container_entry_icon(&sess.container_name)
+            .ok_or_else(|| "生成品牌图标失败".to_string()),
+    }
+}
+
+/// 读取容器入口图标源（主来源：宿主 ConfigFile.icon；None = 未设置）。供 GUI 预填
+/// 图标输入框（跨会话持久化）。
+#[tauri::command]
+pub async fn container_entry_icon_source(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<Option<String>, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    Ok(host_entry_icon(&sess.container_name))
+}
+
+/// 设置容器入口图标源：把图标源路径（宿主或容器路径）写入**主来源**（宿主
+/// `ConfigFile.icon`）+ **镜像**到容器 `config.json` 的 `entry_icon`（None = 清除）。
+/// 导出/设置成功后由 GUI 调用，使入口图标跨会话保留。
+#[tauri::command]
+pub async fn container_set_entry_icon(
+    session: tauri::State<'_, Option<GuiSession>>,
+    path: Option<String>,
+) -> Result<Option<String>, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let path = path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty() && !p.starts_with("data:") && !p.starts_with("file://"));
+    // 主来源：宿主 ConfigFile.icon
+    set_host_entry_icon(&sess.container_name, path.as_deref()).map_err(|e| e.to_string())?;
+    // 镜像：容器 config.json entry_icon（供 worker GUI 经 server 查询）
+    register_entry_icon_in_container(sess, path.as_deref()).await?;
+    tracing::info!(
+        "容器入口图标源已设置：{} ← {}",
+        sess.container_name,
+        path.as_deref().unwrap_or("(清除)")
+    );
+    Ok(path)
 }
 
 // ============================================================================

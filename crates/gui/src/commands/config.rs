@@ -96,32 +96,13 @@ pub async fn apply_container_config(
         tracing::error!("容器内准备失败（{name}）：{e}");
     }
 
-    // 更新 configfile（与重建后的容器保持一致）
-    let config_file =
-        ConfigFile::default_instance().map_err(|e| format!("解析容器配置目录失败：{e}"))?;
-    // 容器入口图标：图标源变更时重写入口快捷方式（辅助动作，失败不阻断；
-    // 菜单项 + 桌面副本统一重写为新格式）
-    let old_icon = config_file
-        .get_container(&name)
-        .map_err(|e| format!("读取旧容器配置失败：{e}"))?
-        .and_then(|c| c.icon);
-    let new_icon = container_config.icon.clone();
-    config_file
+    // 更新 configfile（与重建后的容器保持一致）。
+    // 容器入口图标不再存宿主 ConfigFile（已迁入容器内 config.json，见 passthrough 命令）
+    // ——重建后入口 .desktop 由「导出」重新生成，此处不再处理图标。
+    ConfigFile::default_instance()
+        .map_err(|e| format!("解析容器配置目录失败：{e}"))?
         .register_container(container_config)
         .map_err(|e| format!("更新容器配置失败：{e}"))?;
-
-    if old_icon != new_icon {
-        let processed = easytidy_core::desktop::process_container_icon(&name, new_icon.as_deref());
-        if let Ok(dir) = easytidy_core::desktop::passthrough_dir() {
-            let cli = crate::commands::passthrough::cli_path();
-            let gui_entry = dir.join(format!("easytidy-gui-{name}.desktop"));
-            if gui_entry.exists() {
-                if let Err(e) = easytidy_core::desktop::write_gui_entry(&name, &cli, true, processed.as_deref(), None) {
-                    warn!("更新容器入口快捷方式失败（图标变更，{name}）：{e}");
-                }
-            }
-        }
-    }
 
     Ok(new_id)
 }

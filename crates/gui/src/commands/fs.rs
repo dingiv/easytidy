@@ -9,6 +9,7 @@ use easytidy_protocol::ops::{
 
 use crate::commands::socket::send_json_request;
 use crate::state::GuiSession;
+use tauri::Manager;
 
 // ============================================================================
 // 文件系统命令
@@ -143,6 +144,26 @@ pub(crate) async fn fetch_container_file(sess: &GuiSession, path: &str) -> Resul
     base64::engine::general_purpose::STANDARD
         .decode(read_resp.data_b64)
         .map_err(|e| format!("图标 base64 解码失败：{e}"))
+}
+
+/// 图标字节中转（供 `icon://` 协议处理器调用，浏览器 `<img src="icon://<绝对路径>">`）。
+///
+/// 图标源统一为**容器内路径**（`apps_list` 从容器扫描，入口 `entry_icon` 亦存容器内）。
+/// 中转策略：先走容器 server socket 拉取（容器内单一来源，避免容器路径恰在宿主同
+/// 路径存在时误读宿主文件），容器内不存在再回退宿主文件（手动填宿主路径等）。
+/// 读到的原始字节交由 core `to_browser_renderable` 决定是否后端转 PNG（XPM 等）。
+pub async fn read_icon_bytes(app: &tauri::AppHandle, path: &str) -> Result<Vec<u8>, String> {
+    // 1. 容器内（图标源统一为容器内路径，单一来源）→ server socket 分块拉取
+    let state = app.state::<Option<GuiSession>>();
+    let sess = state
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    if let Ok(bytes) = fetch_container_file(sess, path).await {
+        return Ok(bytes);
+    }
+    // 2. 宿主机（回退：手动填宿主路径 / 历史宿主图标）
+    std::fs::read(path).map_err(|_| format!("图标文件不存在（容器内与宿主均未找到 {path}）"))
 }
 
 /// 拖入进度（Channel 事件：每块上传后推送，前端进度条）

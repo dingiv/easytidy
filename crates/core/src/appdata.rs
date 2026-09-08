@@ -45,6 +45,18 @@ pub fn icons_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// 容器入口图标目录（`containers_dir()/<container>/`，不存在则创建）。
+///
+/// 桌面入口 `Icon=` 指向这里（每容器独立子目录，用户可查看/删除对应目录；
+/// 与 `containers_dir()` 里的 `<container>.toml` 注册文件并存不冲突——list_containers
+/// 仅认 `*.toml` 文件）。
+pub fn container_icon_dir(container: &str) -> Result<PathBuf> {
+    let dir = containers_dir()?.join(container);
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| Error::Config(format!("创建容器图标目录失败：{e}")))?;
+    Ok(dir)
+}
+
 /// 运行时数据目录（`~/.easytidy/data`，不存在则创建）。
 ///
 /// 与 conf（容器关键参数/意图）平行：data 存**运行时数据**——与宿主机/

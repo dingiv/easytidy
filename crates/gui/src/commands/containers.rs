@@ -100,8 +100,9 @@ pub async fn remove_container(
         .unregister_container(&name)
         .map_err(|e| ferr("注销容器配置", e))?;
 
-    // 卸载桌面图标（新格式：菜单 + 桌面副本）
+    // 卸载桌面图标（新格式：菜单 + 桌面副本）+ 清理宿主图标文件（避免容器删除后残留）
     let _ = desktop::remove_entry_desktops(&name);
+    let _ = desktop::remove_entry_icons(&name);
 
     podman.return_podman(p).await;
     Ok(())
@@ -401,8 +402,9 @@ pub async fn env_new(
     }
 
     let config_file = try_log!(ConfigFile::default_instance(), "解析容器配置目录");
-    // 容器入口图标：用户设置的图标源经内置品牌工具加工（未设置/失败回退品牌图标）
-    let entry_icon = desktop::process_container_icon(&name, config.icon.as_deref());
+    // 容器入口图标：创建时尚未登记入口图标（图标源存容器内 config.json，见 passthrough
+    // 命令；由「导出」设置并登记），此处用内置品牌图标生成 .desktop（导出时重写为新图标）。
+    let entry_icon = desktop::ensure_container_entry_icon(&name);
     try_log!(config_file.register_container(config), "注册环境配置");
 
     // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可）。新格式

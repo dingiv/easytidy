@@ -380,6 +380,36 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
 /// crates/gui/icons/easytidy256x256.png 的拷贝，core 无法跨 crate 引用）。
 const EASYTIDY_ICON_PNG: &[u8] = include_bytes!("../assets/easytidy.png");
 
+/// 容器入口图标文件名（`container_icon_dir(container)/easytidy-gui.png`）。
+const CONTAINER_ENTRY_ICON_FILE: &str = "easytidy-gui.png";
+
+/// 容器入口图标文件路径（`container_icon_dir(container)/easytidy-gui.png`）。
+fn container_entry_icon_path(container: &str) -> Option<PathBuf> {
+    Some(
+        crate::appdata::container_icon_dir(container)
+            .ok()?
+            .join(CONTAINER_ENTRY_ICON_FILE),
+    )
+}
+
+/// 把加工后的入口图标写入 `container_icon_dir(container)/easytidy-gui.png`，返回路径。
+fn write_container_entry_icon(container: &str, bytes: &[u8]) -> Option<String> {
+    let path = container_entry_icon_path(container)?;
+    std::fs::write(&path, bytes).ok()?;
+    tracing::info!("容器入口图标写入：{container} → {}", path.display());
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// 确保容器入口品牌图标存在（`container_icon_dir(container)/easytidy-gui.png`）——
+/// 未设自定义图标时的入口 .desktop 兜底。返回图标绝对路径；写失败返回 None。
+pub fn ensure_container_entry_icon(container: &str) -> Option<String> {
+    let path = container_entry_icon_path(container)?;
+    if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_PNG).is_err() {
+        return None;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 /// 确保 easytidy 品牌图标存在（~/.easytidy/icons/easytidy-gui.png）
 /// 返回图标绝对路径；写入失败返回 None（不影响快捷方式导出）。
 ///
@@ -401,7 +431,7 @@ pub fn ensure_gui_icon() -> Option<String> {
 
 /// 容器入口图标加工：用户配置的图标源（宿主路径）经内置品牌工具
 /// [`crate::icon::compose_app_icon`]（渐变圆角边框 + 圆角内容 + 品牌水印）
-/// 加工后写入 `icons_dir()/easytidy-gui-<container>.png`。
+/// 加工后写入 `container_icon_dir(container)/easytidy-gui.png`。
 ///
 /// 返回加工后图标路径；未设置 / 源图读取失败 / 加工失败均返回 `None`
 ///（调用方回退内置品牌图标）。
@@ -412,12 +442,15 @@ pub fn process_container_icon(container: &str, icon_src: Option<&str>) -> Option
     }
     let data = std::fs::read(src).ok()?;
     let composed = crate::icon::compose_app_icon(&data, EASYTIDY_ICON_PNG).ok()?;
-    let dir = crate::appdata::icons_dir().ok()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("easytidy-gui-{container}.png"));
-    std::fs::write(&path, &composed).ok()?;
-    tracing::info!("容器入口图标加工：{container} ← {src} → {}", path.display());
-    Some(path.to_string_lossy().into_owned())
+    write_container_entry_icon(container, &composed)
+}
+
+/// 从字节加工容器入口图标（不经宿主临时文件）：容器内图标源经 server 拉取到
+/// 内存后直接加工，写入 `container_icon_dir(container)/easytidy-gui.png`（图标源留在
+/// 容器内，宿主仅在导出时生成桌面图标副本）。
+pub fn process_container_icon_bytes(container: &str, data: &[u8]) -> Option<String> {
+    let composed = crate::icon::compose_app_icon(data, EASYTIDY_ICON_PNG).ok()?;
+    write_container_entry_icon(container, &composed)
 }
 
 /// GUI 入口 .desktop 内容（纯函数，可单测）。
@@ -449,7 +482,7 @@ pub fn generate_gui_entry_content(
     let icon = icon
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .or_else(ensure_gui_icon);
+        .or_else(|| ensure_container_entry_icon(container));
     if let Some(icon) = icon {
         content.push_str(&format!("Icon={icon}\n"));
     }
@@ -822,6 +855,39 @@ pub fn remove_entry_desktops(container: &str) -> Vec<PathBuf> {
     removed
 }
 
+/// 移除容器入口图标（新布局 `container_icon_dir(container)/` + 旧布局
+/// `icons_dir/easytidy-gui-<container>*` 遗留）。容器删除时调用，避免图标数据残留。
+pub fn remove_entry_icons(container: &str) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    // 新布局：容器入口图标目录（container_icon_dir(container)/）
+    if let Ok(base) = crate::appdata::containers_dir() {
+        let dir = base.join(container);
+        if dir.is_dir() && fs::remove_dir_all(&dir).is_ok() {
+            tracing::info!("移除容器入口图标目录：{}", dir.display());
+            removed.push(dir);
+        }
+    }
+    // 旧布局遗留：icons_dir/easytidy-gui-<container>.png + -src-* 临时源
+    if let Ok(dir) = crate::appdata::icons_dir() {
+        if let Ok(entries) = fs::read_dir(&dir) {
+            let icon_file = format!("easytidy-gui-{container}.png");
+            let src_prefix = format!("easytidy-gui-{container}-");
+            for e in entries.flatten() {
+                let path = e.path();
+                let name = e.file_name().to_string_lossy().to_string();
+                if (name == icon_file || name.starts_with(&src_prefix))
+                    && path.is_file()
+                    && fs::remove_file(&path).is_ok()
+                {
+                    tracing::info!("移除容器入口图标文件（旧布局）：{}", path.display());
+                    removed.push(path);
+                }
+            }
+        }
+    }
+    removed
+}
+
 /// .desktop 内容替换 `Icon=` 行（无则插到首行后）
 fn replace_icon_line(content: &str, icon: &str) -> String {
     let mut out: Vec<String> = Vec::new();
@@ -847,7 +913,7 @@ fn replace_icon_line(content: &str, icon: &str) -> String {
 /// 256×256 PNG）写入标准图标文件，并更新该 identity 全部 .desktop 的 `Icon=`。
 ///
 /// - `kind = "entry"`：容器入口（菜单/桌面副本），图标文件
-///   `icons_dir/easytidy-gui-<container>.png`（与创建/导出加工同名同位置）
+///   `container_icon_dir(container)/easytidy-gui.png`（与创建/导出加工同名同位置）
 /// - `kind = "app"`：passthrough 应用（按 app_id），图标文件
 ///   `icons_dir/easytidy-pt-<container>-<sanitized id>.png`（与导出加工同名覆盖）
 ///
@@ -862,13 +928,15 @@ pub fn reedit_desktop_icon(
         .map_err(|e| Error::Config(format!("读取图片失败（{source}）：{e}")))?;
     let composed = crate::icon::compose_app_icon(&data, EASYTIDY_ICON_PNG)
         .map_err(|e| Error::Config(format!("图标加工失败：{e}")))?;
-    let dir = crate::appdata::icons_dir()?;
-    fs::create_dir_all(&dir)
-        .map_err(|e| Error::Config(format!("创建 icons 目录失败：{e}")))?;
 
     let icon_file = match kind {
-        "entry" => dir.join(format!("easytidy-gui-{container}.png")),
+        "entry" => crate::appdata::container_icon_dir(container)
+            .map_err(|e| Error::Config(format!("创建容器图标目录失败：{e}")))?
+            .join(CONTAINER_ENTRY_ICON_FILE),
         _ => {
+            let dir = crate::appdata::icons_dir()?;
+            fs::create_dir_all(&dir)
+                .map_err(|e| Error::Config(format!("创建 icons 目录失败：{e}")))?;
             let id = app_id.ok_or_else(|| Error::Config("应用 id 缺失".to_string()))?;
             let safe: String = id
                 .chars()
@@ -1067,7 +1135,7 @@ mod tests {
             .expect("源图存在且可加工，应返回输出路径");
         let out_path = std::path::PathBuf::from(&out);
         assert!(out_path.exists());
-        assert!(out.ends_with("easytidy-gui-e2e-icon-test.png"));
+        assert!(out.ends_with("e2e-icon-test/easytidy-gui.png"));
         // 加工输出 = 256×256 有效 PNG（PNG 头：16-19 宽 / 20-23 高，big-endian）
         let data = fs::read(&out_path).unwrap();
         assert_eq!(&data[12..16], b"IHDR", "应为 PNG（IHDR 块）");
