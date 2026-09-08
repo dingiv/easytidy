@@ -87,3 +87,16 @@ pub fn get_app_mode(mode: tauri::State<'_, AppMode>) -> Result<AppModeResponse, 
         },
     })
 }
+
+/// 下层引擎信息（podman `/info` 只读快照；GUI「环境信息」界面）。
+///
+/// 只读、无副作用，打开界面时调用即可（不缓存；每次重开 pane 重新拉取）。
+#[tauri::command]
+pub async fn engine_info(
+    podman: tauri::State<'_, crate::state::PodmanState>,
+) -> Result<easytidy_core::models::EngineInfo, String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let result = p.engine_info().await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+    Ok(result)
+}

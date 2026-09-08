@@ -82,6 +82,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             // 通用
             commands::common::toggle_devtools,
             commands::common::get_app_mode,
+            // 环境信息（下层引擎 / 存储驱动 只读快照）
+            commands::common::engine_info,
             // Master GUI（容器管理 + 模板 + 镜像 + 配置）
             commands::containers::list_containers,
             commands::containers::start_container,

@@ -1473,7 +1473,8 @@ button:disabled {
 }
 
 .images-panel,
-.flavors-panel {
+.flavors-panel,
+.engine-info-panel {
   padding: 0.6rem 0.8rem;
 }
 

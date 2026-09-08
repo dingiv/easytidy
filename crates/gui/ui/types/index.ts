@@ -235,6 +235,37 @@ export interface ImageSummary {
   created: number;
 }
 
+/// 下层引擎信息（engine_info；podman /info 只读快照）
+/// 字段均可缺（不同 podman 版本填充程度不一，缺时显示「-」）
+export interface EngineInfo {
+  /// 引擎版本（如 "5.4.2"）
+  version?: string | null;
+  /// 存储驱动（overlay / vfs / ...）
+  storage_driver?: string | null;
+  /// 存储驱动细节（[key, value] 对：Backing Filesystem / Native Overlay Diff 等）
+  storage_driver_status: [string, string][];
+  /// 存储根目录
+  storage_root?: string | null;
+  /// 是否 rootless（SecurityOptions 含 name=rootless）
+  rootless: boolean;
+  /// 默认 OCI 运行时（crun / runc）
+  default_runtime?: string | null;
+  /// cgroup 驱动（systemd / cgroupfs）
+  cgroup_driver?: string | null;
+  /// cgroup 版本（"1" / "2"）
+  cgroup_version?: string | null;
+  /// 宿主操作系统（如 "ubuntu"）
+  os?: string | null;
+  /// 内核版本
+  kernel_version?: string | null;
+  /// 架构（amd64 / arm64）
+  arch?: string | null;
+  /// CPU 数
+  ncpu?: number | null;
+  /// 总内存（字节）
+  mem_total?: number | null;
+}
+
 /// GUI + GPU 透传预览（passthrough_preview）：`gui`/`gpu` 开启时引擎会隐式注入的
 /// 增量 env / mounts（模板里已声明的同 destination / 同 key 项不重复）。
 /// 模板编辑器开启对应开关时以只读行展示，让用户看见引擎将注入什么。

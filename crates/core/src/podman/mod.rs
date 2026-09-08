@@ -152,6 +152,15 @@ impl Podman {
         })
     }
 
+    /// 查询下层引擎信息（Docker-compat `/info` 只读端点）。
+    ///
+    /// GUI「环境信息」界面与后续存储健康检测（doctor）共用。只读、无副作用，
+    /// 可随时调用。
+    pub async fn engine_info(&self) -> Result<crate::models::EngineInfo> {
+        let info = self.docker.info().await?;
+        Ok(map_system_info(info))
+    }
+
     /// 创建容器（默认配置，保持既有语义）。
     ///
     /// 既有语义：podman 默认 bridge 网络、无端口映射（即 `NetworkMode::Mapped`
@@ -1660,6 +1669,39 @@ fn is_valid_image_name_component(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
+/// 映射 bollard `SystemInfo`（`/info` 响应）→ [`EngineInfo`]（纯函数，单测入口）。
+///
+/// rootless 判定：`SecurityOptions` 含 `name=rootless`（podman 5.x 实测：
+/// rootless 模式含此项，root 模式不含）。`DriverStatus` 是 `[key, value]` 对，
+/// 非两元组项忽略（不 panic）。
+fn map_system_info(info: bollard::models::SystemInfo) -> crate::models::EngineInfo {
+    use crate::models::EngineInfo;
+    let security_options = info.security_options.clone().unwrap_or_default();
+    EngineInfo {
+        version: info.server_version,
+        storage_driver: info.driver,
+        storage_driver_status: info
+            .driver_status
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|pair| match pair.as_slice() {
+                [k, v] => Some((k.clone(), v.clone())),
+                _ => None,
+            })
+            .collect(),
+        storage_root: info.docker_root_dir,
+        rootless: security_options.iter().any(|s| s.contains("rootless")),
+        default_runtime: info.default_runtime,
+        cgroup_driver: info.cgroup_driver.map(|d| d.to_string()),
+        cgroup_version: info.cgroup_version.map(|v| v.to_string()),
+        os: info.operating_system,
+        kernel_version: info.kernel_version,
+        arch: info.architecture,
+        ncpu: info.ncpu.map(|n| n as u64),
+        mem_total: info.mem_total.map(|m| m as u64),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2172,5 +2214,56 @@ mod tests {
 
         // 空字符串：原样返回（让 podman 报错）
         assert_eq!(super::parse_snapshot_ref(""), ("".into(), None));
+    }
+
+    #[test]
+    fn test_map_system_info_rootless_and_driver_status() {
+        // 根less 判定：SecurityOptions 含 "name=rootless"；DriverStatus 非两元组项忽略
+        use bollard::models::{SystemInfo, SystemInfoCgroupDriverEnum, SystemInfoCgroupVersionEnum};
+        let si = SystemInfo {
+            server_version: Some("5.4.2".into()),
+            driver: Some("overlay".into()),
+            driver_status: Some(vec![
+                vec!["Backing Filesystem".into(), "extfs".into()],
+                vec!["Native Overlay Diff".into(), "false".into()],
+                vec!["BadSingle".into()], // 非两元组 → 忽略
+            ]),
+            docker_root_dir: Some("/home/u/.local/share/containers/storage".into()),
+            security_options: Some(vec![
+                "name=apparmor".into(),
+                "name=rootless".into(),
+            ]),
+            default_runtime: Some("crun".into()),
+            cgroup_driver: Some(SystemInfoCgroupDriverEnum::SYSTEMD),
+            cgroup_version: Some(SystemInfoCgroupVersionEnum::_2),
+            operating_system: Some("ubuntu".into()),
+            kernel_version: Some("6.17.0-41-generic".into()),
+            architecture: Some("amd64".into()),
+            ncpu: Some(16),
+            mem_total: Some(63593201664),
+            ..Default::default()
+        };
+        let e = map_system_info(si);
+        assert_eq!(e.version.as_deref(), Some("5.4.2"));
+        assert_eq!(e.storage_driver.as_deref(), Some("overlay"));
+        assert_eq!(
+            e.storage_driver_status,
+            vec![
+                ("Backing Filesystem".into(), "extfs".into()),
+                ("Native Overlay Diff".into(), "false".into()),
+            ]
+        );
+        assert!(e.rootless);
+        assert_eq!(e.cgroup_driver.as_deref(), Some("systemd"));
+        assert_eq!(e.cgroup_version.as_deref(), Some("2"));
+        assert_eq!(e.ncpu, Some(16));
+        assert_eq!(e.mem_total, Some(63593201664));
+
+        // root 模式（无 name=rootless）→ rootless=false
+        let root_si = SystemInfo {
+            security_options: Some(vec!["name=apparmor".into()]),
+            ..Default::default()
+        };
+        assert!(!map_system_info(root_si).rootless);
     }
 }

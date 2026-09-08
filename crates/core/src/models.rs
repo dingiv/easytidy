@@ -33,6 +33,40 @@ pub struct ImageSummary {
     pub created: i64,
 }
 
+/// 下层引擎信息（podman `/info` 只读快照；GUI「环境信息」界面 / 存储健康检测共用）。
+///
+/// 字段均可为空——podman 不同版本对 `/info` 的填充程度不一，缺字段时前端显示「-」。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EngineInfo {
+    /// 引擎版本（ServerVersion，如 "5.4.2"）
+    pub version: Option<String>,
+    /// 存储驱动（"overlay" / "vfs" / ...）
+    pub storage_driver: Option<String>,
+    /// 存储驱动细节（[key, value] 对：Backing Filesystem / Native Overlay Diff /
+    /// Supports shifting 等；podman 5.x 实测 6 项）
+    pub storage_driver_status: Vec<(String, String)>,
+    /// 存储根目录（rootless：~/.local/share/containers/storage）
+    pub storage_root: Option<String>,
+    /// 是否 rootless（SecurityOptions 含 "name=rootless"）
+    pub rootless: bool,
+    /// 默认 OCI 运行时（crun / runc / ...）
+    pub default_runtime: Option<String>,
+    /// cgroup 驱动（systemd / cgroupfs）
+    pub cgroup_driver: Option<String>,
+    /// cgroup 版本（"1" / "2"）
+    pub cgroup_version: Option<String>,
+    /// 宿主操作系统（如 "ubuntu"）
+    pub os: Option<String>,
+    /// 内核版本
+    pub kernel_version: Option<String>,
+    /// 架构（amd64 / arm64 / ...）
+    pub arch: Option<String>,
+    /// CPU 数
+    pub ncpu: Option<u64>,
+    /// 总内存（字节）
+    pub mem_total: Option<u64>,
+}
+
 /// 路径映射（bind mount）。
 ///
 /// 宿主路径必须已存在（`create_with_config` / `rebuild` 时校验）。

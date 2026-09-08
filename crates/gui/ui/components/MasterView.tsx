@@ -19,6 +19,7 @@ import {
   AppstoreOutlined,
   CloseOutlined,
   DatabaseOutlined,
+  InfoCircleOutlined,
   PictureOutlined,
   PlusOutlined,
 } from '@ant-design/icons';
@@ -26,12 +27,13 @@ import { useUiStore } from '../stores/uiStore';
 import { ContainerCreateForm } from './ContainerCreateForm';
 import { ContainersPanel, ContainerRef } from './ContainersPanel';
 import { FlavorsPanel } from './FlavorsPanel';
+import { EngineInfoPanel } from './EngineInfoPanel';
 import { ImagesPanel } from './ImagesPanel';
 import { TemplateEditorPane } from './TemplateEditorPane';
 import type { ConfTemplate } from '../types';
 import logo from '../assets/logo.png';
 
-type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor';
+type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info';
 
 interface Pane {
   id: string;
@@ -49,6 +51,7 @@ const PANE_TITLE: Record<PaneKind, string> = {
   flavors: '模板',
   images: '镜像',
   'template-editor': '模板配置',
+  'engine-info': '环境信息',
 };
 
 /** 长 flavor 名截断(避免 tab 标题撑开) */
@@ -202,6 +205,12 @@ function MasterViewInner() {
               active={isActive('images')}
               onClick={() => openPane('images')}
             />
+            <SidebarIcon
+              label="环境信息"
+              icon={<InfoCircleOutlined />}
+              active={isActive('engine-info')}
+              onClick={() => openPane('engine-info')}
+            />
             <hr className="master-sidebar-divider" />
             <SidebarIcon
               label="模板管理"
@@ -254,6 +263,7 @@ function MasterViewInner() {
                   <ContainersPanel ref={containersRef} refreshTick={refreshTick} />
                 )}
                 {p.kind === 'images' && <ImagesPanel />}
+                {p.kind === 'engine-info' && <EngineInfoPanel />}
                 {p.kind === 'flavors' && (
                   <FlavorsPanel
                     onLaunch={handleLaunchFlavor}
