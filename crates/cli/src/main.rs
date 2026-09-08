@@ -116,6 +116,21 @@ enum Commands {
         app_id: String,
     },
 
+    /// 存储健康诊断（docs/18 道路二）：rootless native overlay 建容器慢 → fuse-overlayfs 一键修复
+    Doctor {
+        /// 诊断后执行修复（写 storage.conf；自动备份、可回滚、幂等）
+        #[arg(long)]
+        fix: bool,
+
+        /// 跳过 --fix 的交互确认（CI 场景）
+        #[arg(long)]
+        yes: bool,
+
+        /// 用最近一份备份回滚（宿主侧操作，无需 podman 连接）
+        #[arg(long)]
+        rollback: bool,
+    },
+
     /// 删除容器
     Rm {
         /// 容器名或 ID
@@ -296,6 +311,10 @@ async fn main() -> Result<()> {
             // 宿主侧操作，无需 podman 连接
             cmd_unexport(container, app_id)
         }
+        Commands::Doctor { rollback: true, .. } => {
+            // 回滚是宿主侧操作（拷备份文件），无需 podman 连接
+            cmd_doctor_rollback()
+        }
         // flavor list 是纯本地操作（读 flavors 目录），无需 podman 连接——
         // 放在 podman 连接前，避免 socket 没起时报"连接 podman 失败"
         Commands::Flavor {
@@ -364,7 +383,8 @@ async fn main() -> Result<()> {
                         .await
                     }
                 },
-                // 外层已处理的变体（Run/Open/DockLogs/Unexport/Flavor::List）——
+                Commands::Doctor { fix, yes, .. } => cmd_doctor(podman, fix, yes).await,
+                // 外层已处理的变体（Run/Open/DockLogs/Unexport/Flavor::List/Doctor::rollback）——
                 // 运行时不可达（它们在 podman 连接前就返回了），仅满足 match 穷尽
                 _ => Ok(()),
             }
@@ -602,6 +622,86 @@ async fn cmd_stop(podman: Podman, container: String) -> Result<()> {
 fn cmd_unexport(container: String, app_id: String) -> Result<()> {
     let removed = easytidy_core::desktop::remove_passthrough(&container, &app_id)?;
     println!("已撤销导出：{}（{}）", app_id, removed.display());
+    Ok(())
+}
+
+/// 存储健康诊断 + 可选一键修复（docs/18 道路二）。
+async fn cmd_doctor(podman: Podman, fix: bool, yes: bool) -> Result<()> {
+    use easytidy_core::storage_health::Verdict;
+
+    let report = easytidy_core::storage_health::diagnose(&podman).await?;
+
+    println!("存储健康诊断：");
+    println!("  rootless:       {}", report.rootless);
+    println!(
+        "  存储驱动:       {}",
+        report.storage_driver.as_deref().unwrap_or("未知")
+    );
+    println!(
+        "  mount_program:  {}",
+        report.mount_program.as_deref().unwrap_or("（未配 = 原生 overlay）")
+    );
+    println!(
+        "  fuse-overlayfs: {}",
+        report.fuse_overlayfs.as_deref().unwrap_or("（未安装）")
+    );
+    println!("  /dev/fuse:        {}", report.dev_fuse);
+    println!("  结论:           {}", report.verdict);
+    println!("  {}", report.summary);
+
+    if !fix {
+        match report.verdict {
+            Verdict::Recommended => {
+                println!("\n建议：运行 `easytidy doctor --fix` 切换到 fuse-overlayfs（自动备份、可回滚）");
+            }
+            Verdict::NeedsInstall => {
+                println!("\n建议：先安装 fuse-overlayfs（如 `sudo apt install fuse-overlayfs`），再运行 `easytidy doctor --fix`");
+            }
+            _ => {}
+        }
+        return Ok(());
+    }
+
+    // --fix：交互确认（--yes 跳过）
+    if !yes {
+        println!(
+            "\n将向 {} 写入 mount_program（自动备份原文件，可 `easytidy doctor --rollback` 回滚）。",
+            easytidy_core::storage_health::storage_conf_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        );
+        print!("继续？[y/N] ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !matches!(line.trim(), "y" | "Y" | "yes" | "YES") {
+            println!("已取消");
+            return Ok(());
+        }
+    }
+
+    let apply = easytidy_core::storage_health::apply_fix(&podman).await?;
+    if apply.verified {
+        println!("✓ 修复完成：已验证生效（fuse-overlayfs = {}）", apply.fuse_overlayfs_path);
+    } else {
+        println!("✓ 配置已写入，但重诊断尚未生效（可能常驻 daemon 未重启）");
+    }
+    if let Some(b) = &apply.backup_path {
+        println!("  原配置备份：{}（回滚：`easytidy doctor --rollback`）", b.display());
+    }
+    if apply.note_daemon {
+        println!("  提示：若你在跑常驻 podman daemon（`podman system service`），需重启它才生效");
+    }
+    Ok(())
+}
+
+/// 用最近一份备份回滚 storage.conf（宿主侧操作，无需 podman）。
+fn cmd_doctor_rollback() -> Result<()> {
+    let backup = easytidy_core::storage_health::latest_backup()
+        .ok_or_else(|| anyhow::anyhow!("没有可用备份（storage.conf.bak-*）"))?;
+    let config = easytidy_core::storage_health::restore_backup(&backup)?;
+    println!("✓ 已回滚：{} ← {}", config.display(), backup.display());
+    println!("  提示：若你在跑常驻 podman daemon（`podman system service`），需重启它才生效");
     Ok(())
 }
 

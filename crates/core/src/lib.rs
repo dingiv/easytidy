@@ -28,6 +28,7 @@ pub mod libpod;
 pub mod models;
 pub mod pathvars;
 pub mod podman;
+pub mod storage_health;
 pub mod systemd;
 pub mod userenv;
 
