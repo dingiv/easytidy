@@ -41,6 +41,8 @@ export interface FsEntry {
 
 /// Application info from apps_list
 export interface AppInfo {
+  /// 稳定应用 id（server 登记表：`pt-<hash>`；导出/启动/撤销引用）
+  id: string;
   name: string;
   icon_path: string;
   exec: string;

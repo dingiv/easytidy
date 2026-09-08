@@ -1,0 +1,18 @@
+
+mounts:
+  - host_path: ${HOME}/Downloads
+    container_path: ${HOME}/Downloads
+    read_only: true
+    require_exists: true
+  - host_path: ${HOME}/Documents
+    container_path: ${HOME}/Documents
+    read_only: true
+    require_exists: true
+  - host_path: ${HOME}/Videos
+    container_path: ${HOME}/Videos
+    read_only: true
+    require_exists: true
+  - host_path: ${HOME}/Desktop
+    container_path: ${HOME}/Desktop
+    read_only: true
+    require_exists: true

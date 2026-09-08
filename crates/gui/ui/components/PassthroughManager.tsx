@@ -179,10 +179,10 @@ export function PassthroughManager() {
     }
   };
 
-  const handleRevoke = async (desktopFile: string) => {
+  const handleRevoke = async (appId: string) => {
     setError(null);
     try {
-      await invoke('passthrough_revoke', { desktopFile });
+      await invoke('passthrough_revoke', { appId });
       await loadData();
     } catch (err: any) {
       setError(errMsg(err, 'Failed to revoke app'));
@@ -190,14 +190,14 @@ export function PassthroughManager() {
     }
   };
 
-  /** 立即启动容器内应用（经 server apps.launch 拉起，server 保活、独立于连接存活）。
-   *  列表里点一下即拉起某个扫描到的 / 自定义应用，无需先收藏。返回 pid，
-   *  命令即时退出（如未安装 → 127）时后端已回报错误。 */
-  const handleLaunch = async (id: string, name: string, cmd: string) => {
+  /** 立即启动容器内应用（按 id 经 server 登记表解析拉起；server 保活、
+   *  独立于连接存活）。列表里点一下即拉起某个应用，无需先收藏。
+   *  返回 pid，命令即时退出（如未安装 → 127）时后端已回报错误。 */
+  const handleLaunch = async (id: string, name: string) => {
     setError(null);
     setLaunchingId(id);
     try {
-      const pid = await invoke<number>('passthrough_launch_app', { id, name, cmd });
+      const pid = await invoke<number>('passthrough_launch_app', { idOrName: id });
       message.success(`${name} 已启动 (pid=${pid})`);
     } catch (err: any) {
       setError(errMsg(err, `启动 ${name} 失败`));
@@ -213,6 +213,7 @@ export function PassthroughManager() {
     setError(null);
     try {
       const app: AppInfo = {
+        id: custom.id,
         name: custom.name,
         icon_path: custom.icon ?? '',
         exec: custom.cmd,
@@ -437,7 +438,7 @@ export function PassthroughManager() {
                 <Tooltip title="立即启动">
                   <button
                     className="secondary-button icon-only"
-                    onClick={() => handleLaunch(custom.id, custom.name, custom.cmd)}
+                    onClick={() => handleLaunch(custom.id, custom.name)}
                     disabled={launchingId === custom.id}
                   >
                     <PlayCircleOutlined />
@@ -530,7 +531,7 @@ export function PassthroughManager() {
                 <Tooltip title="立即启动">
                   <button
                     className="secondary-button icon-only"
-                    onClick={() => handleLaunch(app.desktop_file, app.name, app.exec)}
+                    onClick={() => handleLaunch(app.id, app.name)}
                     disabled={launchingId === app.desktop_file}
                   >
                     <PlayCircleOutlined />
@@ -561,7 +562,7 @@ export function PassthroughManager() {
                     </button>
                     <button
                       className="secondary-button"
-                      onClick={() => handleRevoke(app.desktop_file)}
+                      onClick={() => handleRevoke(app.id)}
                     >
                       撤销
                     </button>

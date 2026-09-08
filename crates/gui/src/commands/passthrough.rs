@@ -337,9 +337,7 @@ pub async fn passthrough_launch(
 #[tauri::command]
 pub async fn passthrough_launch_app(
     session: tauri::State<'_, Option<GuiSession>>,
-    id: String,
-    name: String,
-    cmd: String,
+    id_or_name: String,
 ) -> Result<u32, String> {
     let sess = session
         .inner()
@@ -347,35 +345,30 @@ pub async fn passthrough_launch_app(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = &sess.container_name;
 
-    // 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数，与 export 一致）
-    let cmd = clean_exec(&cmd);
-    if cmd.trim().is_empty() {
-        return Err("应用命令为空，无法启动".to_string());
+    if id_or_name.trim().is_empty() {
+        return Err("应用 id 为空，无法启动".to_string());
     }
 
-    let app = easytidy_core::passthrough::PassthroughApp {
-        id: id.clone(),
-        name,
-        cmd,
-        desktop_file: None,
-        auto_start: false,
-        icon: None,
-    };
-
-    let results = easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&app))
+    // 按引用拉起：server 查登记表/自定义应用解析 exec 并自行 spawn
+    // （调用方不传命令串）
+    let resp = easytidy_core::passthrough::launch_app_by_ref(container, &id_or_name)
         .await
         .map_err(|e| e.to_string())?;
-    match results.first() {
-        Some(r) => match r.pid {
-            Some(pid) => {
-                info!("应用已拉起：{id} (pid={pid})");
-                // 拉起后检测即时退出（命令不存在 → 127 等，避免误报「启动成功」）
-                detect_early_exit(container, pid).await?;
-                Ok(pid)
-            }
-            None => Err(r.error.clone().unwrap_or_else(|| "拉起失败".to_string())),
-        },
-        None => Err("server 无响应".to_string()),
+    match resp.pid {
+        Some(pid) => {
+            info!("应用已拉起：{} (id={}, pid={pid})", id_or_name, resp.id.unwrap_or_default());
+            // 拉起后检测即时退出（命令不存在 → 127 等，避免误报「启动成功」）
+            detect_early_exit(container, pid).await?;
+            Ok(pid)
+        }
+        None => Err(match resp.available {
+            Some(ref available) if !available.is_empty() => format!(
+                "{}（可用：{}）",
+                resp.error.unwrap_or_else(|| "启动失败".to_string()),
+                available.join(", ")
+            ),
+            _ => resp.error.unwrap_or_else(|| "启动失败".to_string()),
+        }),
     }
 }
 
@@ -518,6 +511,7 @@ pub async fn passthrough_add_custom(
     save_container_config(sess, &cfg).await?;
     info!("自定义应用已添加（容器内）：{container} {name}");
     Ok(AppInfoFrontend {
+        id: id.clone(),
         name,
         icon_path: None,
         exec: cmd,
@@ -822,8 +816,9 @@ pub async fn passthrough_set_custom_icon(
     Ok(())
 }
 
-/// 导出 passthrough 应用（宿主生成 .desktop：应用菜单 + 桌面图标。
-/// distrobox 风格 TryExec/GenericName/Keywords/Actions=Remove；桌面图标
+/// 导出 passthrough 应用（宿主生成**薄指针** .desktop：应用菜单 + 桌面图标。
+/// Exec 只引用应用 id（`easytidy launch <id> --container <n>`），启动决策
+/// 归容器内 server 登记表；宿主仅负责图标搬运+存在性验证。桌面图标
 /// 经 chmod +x + `gio metadata::trusted` 信任标记（GNOME 双击必需）。
 /// 生成逻辑在 core::desktop::write_passthrough，CLI unexport 与其共用）
 #[tauri::command]
@@ -838,9 +833,6 @@ pub async fn passthrough_export(
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     let container = sess.container_name.clone();
-
-    // Exec 清理 %U/%f 等占位符（宿主侧不展开容器内文件参数）
-    let exec = clean_exec(&app.exec);
 
     // 图标：两类应用均为**容器内**路径 → 导出时经 server 拷出到宿主缓存 →
     // Icon= 用宿主路径。custom 保留原始图标；扫描应用合成品牌化（边框+水印）；
@@ -872,13 +864,9 @@ pub async fn passthrough_export(
         if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
             if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
                 if std::fs::create_dir_all(&icons_dir).is_ok() {
-                    let base = app
-                        .desktop_file
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or("app")
-                        .trim_end_matches(".desktop");
-                    let safe: String = base
+                    // 图标缓存按应用 id 命名（与 .desktop 文件命名一致；id 稳定）
+                    let safe: String = app
+                        .id
                         .chars()
                         .map(|c| {
                             if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
@@ -907,7 +895,7 @@ pub async fn passthrough_export(
         app_name: app.name,
         comment: app.comment,
         categories: app.categories,
-        exec,
+        app_id: app.id.clone(),
         icon: icon_attr,
         desktop_file: app.desktop_file,
         cli_path: cli_path(),
@@ -916,22 +904,23 @@ pub async fn passthrough_export(
     };
     let menu_path = easytidy_core::desktop::write_passthrough(&spec, desktop_icon.unwrap_or(true))
         .map_err(|e| e.to_string())?;
-    info!("passthrough 导出：{} → {:?}", spec.desktop_file, menu_path);
+    info!("passthrough 导出：{} → {:?}", spec.app_id, menu_path);
 
     Ok(menu_path.to_string_lossy().into_owned())
 }
 
-/// 撤销 passthrough 导出（宿主删除对应 .desktop）
+/// 撤销 passthrough 导出（按应用 id 删除宿主 .desktop；兼容旧格式按
+/// X-easytidy-app 匹配）
 #[tauri::command]
 pub async fn passthrough_revoke(
     session: tauri::State<'_, Option<GuiSession>>,
-    desktop_file: String,
+    app_id: String,
 ) -> Result<String, String> {
     let sess = session
         .inner()
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
-    let removed = easytidy_core::desktop::remove_passthrough(&sess.container_name, &desktop_file)
+    let removed = easytidy_core::desktop::remove_passthrough(&sess.container_name, &app_id)
         .map_err(|e| e.to_string())?;
     Ok(removed.to_string_lossy().into_owned())
 }

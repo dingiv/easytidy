@@ -14,6 +14,8 @@ use crate::state::GuiSession;
 /// 应用信息（前端）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppInfoFrontend {
+    /// 稳定应用 id（server 登记表：`pt-<hash>`；导出/启动/收藏引用）
+    pub id: String,
     pub name: String,
     pub icon_path: Option<String>,
     pub exec: String,
@@ -49,6 +51,7 @@ pub async fn apps_list(
         .apps
         .into_iter()
         .map(|a| AppInfoFrontend {
+            id: a.id,
             name: a.name,
             icon_path: a.icon_path,
             exec: a.exec,
