@@ -344,15 +344,10 @@ export function ContainerConfigEditor({
           gidmaps={value.gidmaps ?? []}
           userUid={value.user_uid ?? null}
           userGid={value.user_gid ?? null}
-          userName={value.user_name ?? null}
           onKeepIdChange={(keep_id) => update({ keep_id })}
           onUidmapsChange={(uidmaps) => update({ uidmaps })}
           onGidmapsChange={(gidmaps) => update({ gidmaps })}
-          onUserUidChange={(user_uid) => update({ user_uid })}
-          onUserGidChange={(user_gid) => update({ user_gid })}
-          onUserNameChange={(user_name) => update({ user_name })}
           hostUser={hostUser}
-          effective={effective}
         />
       </section>
     </div>
