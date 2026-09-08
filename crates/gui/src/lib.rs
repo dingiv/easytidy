@@ -57,6 +57,17 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
         }
     }
 
+    // 存量容器入口统一：遗留 easytidy-<c>.desktop（无标记）→ 新格式
+    // easytidy-gui-<c>.desktop（去重 / 带桌面副本重生成 / 残留清理）
+    {
+        let n = easytidy_core::desktop::unify_entry_shortcuts(
+            &commands::passthrough::cli_path(),
+        );
+        if n > 0 {
+            tracing::info!("已统一 {n} 个遗留容器入口快捷方式");
+        }
+    }
+
     // 第二步：启动 Tauri 应用
     // 根据模式决定是否初始化 GuiSession
     let gui_session = match &mode {

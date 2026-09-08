@@ -640,6 +640,114 @@ pub fn migrate_dir(dir: &Path, cli_path: &str) -> usize {
     rewritten
 }
 
+/// 存量容器入口统一（幂等，GUI 启动时跑）：遗留 `easytidy-<c>.desktop`
+/// （无标记）收敛到新格式 `easytidy-gui-<c>.desktop`（X-easytidy-gui=1）：
+/// - 新格式已存在 → 删遗留副本（去重，菜单 + 桌面）
+/// - 新格式不存在且容器配置仍在 → 重生成（菜单 + 桌面，图标取容器配置）→ 删遗留
+/// - 容器配置已不在（已删容器的残留守口）→ 仅删遗留副本
+///
+/// 返回删除的遗留文件数。
+pub fn unify_entry_shortcuts(cli_path: &str) -> usize {
+    use std::collections::HashMap;
+
+    // 容器名 → 图标源（重生成用；不在 map 中的容器视为“配置已不在”）
+    let mut icons: HashMap<String, Option<String>> = HashMap::new();
+    if let Ok(cf) = crate::configfile::ConfigFile::default_instance() {
+        if let Ok(list) = cf.list_containers() {
+            for c in list {
+                icons.insert(c.name.clone(), c.icon);
+            }
+        }
+    }
+
+    unify_entry_shortcuts_in(
+        passthrough_dir().ok().as_deref(),
+        desktop_dir().as_deref(),
+        &icons,
+        cli_path,
+    )
+}
+
+/// 入口统一核心逻辑（可单测：目录与容器配置由调用方注入）。
+pub fn unify_entry_shortcuts_in(
+    menu: Option<&Path>,
+    desktop: Option<&Path>,
+    icons: &std::collections::HashMap<String, Option<String>>,
+    cli_path: &str,
+) -> usize {
+    let mut dirs: Vec<&Path> = Vec::new();
+    if let Some(d) = menu {
+        dirs.push(d);
+    }
+    if let Some(d) = desktop {
+        dirs.push(d);
+    }
+    if dirs.is_empty() {
+        return 0;
+    }
+
+    // 收集有遗留格式入口的容器（文件名约定 + 内容标记双重判定）
+    let mut legacy: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for dir in &dirs {
+        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
+                continue;
+            }
+            let stem = name.trim_start_matches("easytidy-").trim_end_matches(".desktop");
+            if stem.starts_with("gui-") || stem.starts_with("pt-") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if content
+                    .lines()
+                    .any(|l| l.trim() == "X-easytidy-gui=1" || l.trim() == "X-easytidy-pt=1")
+                {
+                    continue; // 有标记 → 非遗留格式（文件名异常，不动）
+                }
+            }
+            legacy.insert(stem.to_string());
+        }
+    }
+
+    let mut removed = 0usize;
+    for container in &legacy {
+        let new_name = format!("easytidy-gui-{container}.desktop");
+        let new_exists = dirs.iter().any(|d| d.join(&new_name).exists());
+
+        // 重生成：仅新格式不存在且容器配置仍在时
+        if !new_exists {
+            if let Some(icon) = icons.get(container) {
+                let content = generate_gui_entry_content(container, cli_path, icon.as_deref());
+                if let Some(m) = menu {
+                    let mp = m.join(&new_name);
+                    let _ = write_desktop_file(&mp, &content);
+                }
+                if let Some(d) = desktop {
+                    let p = d.join(&new_name);
+                    if write_desktop_file(&p, &content).is_ok() {
+                        mark_desktop_trusted(&p);
+                    }
+                }
+            }
+        }
+
+        // 清遗留副本（菜单 + 桌面）
+        for dir in &dirs {
+            let p = dir.join(format!("easytidy-{container}.desktop"));
+            if p.exists() && std::fs::remove_file(&p).is_ok() {
+                tracing::info!("入口统一：移除遗留快捷方式 {}", p.display());
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
 /// 单文件迁移（纯函数）：返回新内容；`None` = 无需迁移。
 ///
 /// 只重写**首个**（主）Exec 行与 TryExec 行（`open --container` 为幂等信号），
@@ -1391,5 +1499,59 @@ mod tests {
         // 幂等：二次调用零重写
         let n2 = migrate_dir(&apps, "/usr/bin/easytidy");
         assert_eq!(n2, 0, "已是新格式时不应再重写");
+    }
+
+    #[test]
+    fn test_unify_entry_shortcuts_dedup_regenerate_and_stale() {
+        let temp = TempDir::new().unwrap();
+        let menu = temp.path().join("menu");
+        let desk = temp.path().join("desktop");
+        fs::create_dir_all(&menu).unwrap();
+        fs::create_dir_all(&desk).unwrap();
+
+        // a：新格式已在（菜单）+ 遗留残留（菜单+桌面）→ 仅去重
+        fs::write(menu.join("easytidy-gui-a.desktop"), "X-easytidy-gui=1\n").unwrap();
+        fs::write(menu.join("easytidy-a.desktop"), "Name=easytidy a\n").unwrap();
+        fs::write(desk.join("easytidy-a.desktop"), "Name=easytidy a\n").unwrap();
+
+        // b：只有遗留（菜单+桌面），配置仍在（带图标源）→ 重生成 + 清旧
+        fs::write(menu.join("easytidy-b.desktop"), "Name=easytidy b\n").unwrap();
+        fs::write(desk.join("easytidy-b.desktop"), "Name=easytidy b\n").unwrap();
+
+        // c：只有遗留，配置已不在 → 仅删
+        fs::write(menu.join("easytidy-c.desktop"), "Name=easytidy c\n").unwrap();
+
+        // d：passthrough 应用 → 不动
+        fs::write(menu.join("easytidy-pt-b-app1.desktop"), "X-easytidy-pt=1\n").unwrap();
+
+        let mut icons = std::collections::HashMap::new();
+        icons.insert("b".to_string(), Some("/x/icon.png".to_string()));
+
+        let removed =
+            super::unify_entry_shortcuts_in(Some(&menu), Some(&desk), &icons, "/usr/bin/easytidy");
+
+        // a × 2 + b × 2 + c × 1 = 5 个遗留文件被删
+        assert_eq!(removed, 5);
+        assert!(!menu.join("easytidy-a.desktop").exists());
+        assert!(!desk.join("easytidy-a.desktop").exists());
+        assert!(menu.join("easytidy-gui-a.desktop").exists());
+        // b：菜单 + 桌面均重生成，内容正确
+        assert!(menu.join("easytidy-gui-b.desktop").exists());
+        assert!(desk.join("easytidy-gui-b.desktop").exists());
+        let content = fs::read_to_string(menu.join("easytidy-gui-b.desktop")).unwrap();
+        assert!(content.contains("X-easytidy-gui=1"));
+        assert!(content.contains("Icon=/x/icon.png"));
+        assert!(content.contains("open --container b"));
+        // c：删了，未重生成
+        assert!(!menu.join("easytidy-c.desktop").exists());
+        assert!(!menu.join("easytidy-gui-c.desktop").exists());
+        // d：passthrough 未动
+        assert!(menu.join("easytidy-pt-b-app1.desktop").exists());
+
+        // 幂等：二次运行零变更
+        assert_eq!(
+            super::unify_entry_shortcuts_in(Some(&menu), Some(&desk), &icons, "/usr/bin/easytidy"),
+            0
+        );
     }
 }
