@@ -372,17 +372,18 @@ pub fn mark_desktop_trusted(path: &Path) {
         .status();
 }
 
-/// passthrough 导出参数（宿主侧生成 .desktop 的全部输入）
+/// passthrough 导出参数（宿主侧生成薄指针 .desktop 的全部输入）
 pub struct PassthroughSpec {
     pub container: String,
     pub app_name: String,
     pub comment: Option<String>,
     pub categories: Option<String>,
-    /// 清理后的容器内执行命令（已去 %U 等占位符）
-    pub exec: String,
-    /// 宿主图标绝对路径（已搬运到本地；空则不写 Icon 字段）
+    /// 稳定应用 id（server 登记表：`pt-<hash>` / 自定义 `custom:<name>`）——
+    /// Exec 只引用 id，启动决策（谁/如何）由容器内 server 负责
+    pub app_id: String,
+    /// 宿主图标绝对路径（已搬运到本地并验证存在；空则不写 Icon 字段）
     pub icon: Option<String>,
-    /// 容器内 .desktop 路径（应用标识，revoke/state 用）
+    /// 容器内 .desktop 路径（显示/列表匹配用，`X-easytidy-app`）
     pub desktop_file: String,
     /// 宿主 easytidy CLI 绝对路径（Exec/TryExec）
     pub cli_path: String,
@@ -394,11 +395,14 @@ pub struct PassthroughSpec {
 
 /// 生成 distrobox 风格 .desktop 内容（TryExec/GenericName/Keywords/
 /// Actions=Remove——TryExec 缺失时部分桌面环境不显示入口，实测）。
+///
+/// **薄指针**：Exec 只含 `easytidy launch <id> --container <n>`——不嵌命令
+/// 行，容器内应用变更（升级/改参数）时快捷方式自动跟随（id 不变）。
 fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
     // INI 值清理：app_name / comment / categories / icon / wm / desktop_file 来自
     // 容器内 .desktop 或用户，可能含换行 / 控制字符 → 破坏单行 Key=value 结构。
     // container（podman 字符集限制 [a-zA-Z0-9][a-zA-Z0-9_.-]*）与 cli_path /
-    // exec（命令行 / 路径，空格合法）安全，不处理。
+    // app_id（哈希 / `custom:<name>`，无空格）安全，不处理。
     let app_name = sanitize_ini_value(&spec.app_name);
     let comment = sanitize_ini_value(spec.comment.as_deref().unwrap_or("easytidy passthrough"));
     let categories = sanitize_ini_value(spec.categories.as_deref().unwrap_or("Application;Utility;"));
@@ -414,13 +418,11 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
          Categories={categories}\n",
         app_name, spec.container, app_name,
     );
-    // ⚠️ --container 是子命令级参数（`easytidy open --container <n> -- ...`），
-    // 放顶层会报 "unexpected argument '--container'"（journalctl 实测）。
-    // open = 垫片入口：确保容器运行 + 等 server socket 就绪，再经 PTY 转发命令
-    // （阻塞至应用退出，退出码透传——同原 `run` 路径）。
+    // launch = 按引用启动：server 查登记表解析 exec 并自行 spawn（点火即走，
+    // 点图标秒回；应用生命周期归 server，可经 apps.ps/logs 跟踪）。
     content.push_str(&format!(
-        "Exec={} open --container {} -- {}\n",
-        spec.cli_path, spec.container, spec.exec,
+        "Exec={} launch --id {} --container {}\n",
+        spec.cli_path, spec.app_id, spec.container,
     ));
     if let Some(icon) = icon {
         content.push_str(&format!("Icon={icon}\n"));
@@ -441,19 +443,20 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
          \n\
          [Desktop Action Remove]\n\
          Name=Remove {} from system\n\
-         Exec={} unexport --container {} --desktop-file {}\n",
+         Exec={} unexport --container {} --app-id {}\n",
         spec.container,
         spec.cli_path,
         app_name,
         spec.cli_path,
         spec.container,
-        desktop_file,
+        spec.app_id,
     ));
     content.push_str(&format!(
         "X-easytidy-pt=1\n\
          X-easytidy-container={}\n\
+         X-easytidy-app-id={}\n\
          X-easytidy-app={}\n",
-        spec.container, desktop_file,
+        spec.container, spec.app_id, desktop_file,
     ));
     content
 }
@@ -655,13 +658,10 @@ fn migrate_one_content(content: &str, cli_path: &str) -> Option<String> {
 }
 
 /// 容器内 .desktop basename → 宿主文件名（sanitize，防路径穿越）
-fn passthrough_file_name(container: &str, desktop_file: &str) -> String {
-    let base = desktop_file
-        .rsplit('/')
-        .next()
-        .unwrap_or("app")
-        .trim_end_matches(".desktop");
-    let safe: String = base
+/// 容器内应用 id → 宿主文件名（sanitize，防路径穿越；`custom:chrome` →
+/// `custom-chrome`，`pt-<hash>` 天然安全）
+fn passthrough_file_name(container: &str, app_id: &str) -> String {
+    let safe: String = app_id
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
         .collect();
@@ -692,7 +692,7 @@ pub fn write_passthrough(spec: &PassthroughSpec, desktop_icon: bool) -> Result<P
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::Config(format!("创建 applications 目录失败：{e}")))?;
 
-    let file_name = passthrough_file_name(&spec.container, &spec.desktop_file);
+    let file_name = passthrough_file_name(&spec.container, &spec.app_id);
     let content = generate_passthrough_content(spec);
     let menu_path = dir.join(&file_name);
     write_desktop_file(&menu_path, &content)?;
@@ -783,7 +783,9 @@ pub fn list_passthrough_detailed(container: &str) -> Result<Vec<ExportedPassthro
 }
 
 /// 撤销某容器的 passthrough 导出（删除对应 .desktop；返回删除的路径）
-pub fn remove_passthrough(container: &str, desktop_file: &str) -> Result<PathBuf> {
+/// 撤销某容器的 passthrough 导出（按应用 id 定位；兼容旧格式按
+/// `X-easytidy-app` 匹配；删除对应 .desktop + 桌面副本；返回删除的路径）
+pub fn remove_passthrough(container: &str, app_id: &str) -> Result<PathBuf> {
     let dir = passthrough_dir()?;
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Err(Error::Config("applications 目录不存在".to_string()));
@@ -805,7 +807,12 @@ pub fn remove_passthrough(container: &str, desktop_file: &str) -> Result<PathBuf
         if parse_pt_value(&content, container, "X-easytidy-container=").is_none() {
             continue;
         }
-        if content.lines().any(|l| l == format!("X-easytidy-app={desktop_file}")) {
+        // 新格式按 id 匹配；旧格式（无 app-id）按 X-easytidy-app 兼容
+        let matched = parse_pt_value(&content, container, "X-easytidy-app-id=")
+            .or_else(|| parse_pt_value(&content, container, "X-easytidy-app="))
+            .as_deref()
+            == Some(app_id);
+        if matched {
             std::fs::remove_file(&path)
                 .map_err(|e| Error::Config(format!("删除 .desktop 失败：{e}")))?;
             // 同步删除桌面副本（若存在）
@@ -817,11 +824,11 @@ pub fn remove_passthrough(container: &str, desktop_file: &str) -> Result<PathBuf
                     }
                 }
             }
-            tracing::info!("passthrough 撤销：{desktop_file} → {path:?}");
+            tracing::info!("passthrough 撤销：{app_id} → {path:?}");
             return Ok(path);
         }
     }
-    Err(Error::Config(format!("未找到已导出的应用：{desktop_file}")))
+    Err(Error::Config(format!("未找到已导出的应用：{app_id}")))
 }
 
 #[cfg(test)]
@@ -866,7 +873,7 @@ mod tests {
             app_name: "My\nApp".to_string(),
             comment: Some("line1\nline2".to_string()),
             categories: None,
-            exec: "myapp".to_string(),
+            app_id: "pt-1234567890ab".to_string(),
             icon: None,
             desktop_file: "/usr/share/applications/myapp.desktop".to_string(),
             cli_path: "/usr/bin/easytidy".to_string(),
@@ -936,13 +943,13 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_passthrough_content_open_exec() {
+    fn test_generate_passthrough_content_thin_exec() {
         let spec = PassthroughSpec {
             container: "chrome".to_string(),
             app_name: "Google Chrome".to_string(),
             comment: None,
             categories: None,
-            exec: "google-chrome --incognito".to_string(),
+            app_id: "pt-abcdef123456".to_string(),
             icon: None,
             desktop_file: "/usr/share/applications/google-chrome.desktop".to_string(),
             cli_path: "/usr/bin/easytidy".to_string(),
@@ -951,11 +958,15 @@ mod tests {
         };
         let content = generate_passthrough_content(&spec);
 
-        // 垫片入口：open + 应用命令尾巴保留
-        assert!(content.contains("Exec=/usr/bin/easytidy open --container chrome -- google-chrome --incognito"));
-        // Remove action 的 unexport 行不变
-        assert!(content.contains("Exec=/usr/bin/easytidy unexport --container chrome --desktop-file /usr/share/applications/google-chrome.desktop"));
+        // 薄指针：Exec 只含 launch --id <id> --container，不嵌命令行
+        assert!(content.contains("Exec=/usr/bin/easytidy launch --id pt-abcdef123456 --container chrome"));
+        assert!(!content.lines().any(|l| l.starts_with("Exec=") && l.contains("google-chrome")));
+        // Remove action 的 unexport 行按 app-id
+        assert!(content.contains("Exec=/usr/bin/easytidy unexport --container chrome --app-id pt-abcdef123456"));
+        // 标记：id + 旧格式 app 并存（列表匹配用）
         assert!(content.contains("X-easytidy-pt=1"));
+        assert!(content.contains("X-easytidy-app-id=pt-abcdef123456"));
+        assert!(content.contains("X-easytidy-app=/usr/share/applications/google-chrome.desktop"));
     }
 
     #[test]

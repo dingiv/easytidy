@@ -111,9 +111,9 @@ enum Commands {
         #[arg(long)]
         container: String,
 
-        /// 容器内 .desktop 路径（passthrough 导出时的应用标识）
-        #[arg(long)]
-        desktop_file: String,
+        /// 应用 id（`pt-<hash>` / `custom:<name>`；新格式首选）
+        #[arg(long, required = true)]
+        app_id: String,
     },
 
     /// 删除容器
@@ -160,6 +160,18 @@ enum Commands {
         /// 要运行的应用命令及参数（如：-- google-chrome）；省略 = 容器入口
         #[arg(required = false)]
         command: Vec<String>,
+    },
+
+    /// 按引用启动容器内应用（id 或名称）：server 查应用登记表自行决定
+    /// 「启动谁、如何启动」——调用方不传命令行（导出 .desktop 的 Exec 用此）
+    Launch {
+        /// 容器名
+        #[arg(long)]
+        container: String,
+
+        /// 应用 id（`pt-<hash>` / `custom:<name>`）或名称
+        #[arg(long)]
+        id: String,
     },
 
     /// 查看容器内 easytidy-dock 日志（诊断 root 终端"静默失败"）
@@ -272,16 +284,17 @@ async fn main() -> Result<()> {
             let code = cmd_open(container, command, cli.config_dir.clone()).await?;
             std::process::exit(code);
         }
+        Commands::Launch { container, id } => {
+            let code = cmd_launch(container, id).await?;
+            std::process::exit(code);
+        }
         Commands::DockLogs { container, tail } => {
             cmd_dock_logs(&container, tail).await?;
             Ok(())
         }
-        Commands::Unexport {
-            container,
-            desktop_file,
-        } => {
+        Commands::Unexport { container, app_id } => {
             // 宿主侧操作，无需 podman 连接
-            cmd_unexport(container, desktop_file)
+            cmd_unexport(container, app_id)
         }
         // flavor list 是纯本地操作（读 flavors 目录），无需 podman 连接——
         // 放在 podman 连接前，避免 socket 没起时报"连接 podman 失败"
@@ -586,9 +599,9 @@ async fn cmd_stop(podman: Podman, container: String) -> Result<()> {
 }
 
 /// 撤销 passthrough 导出（删除宿主导出的 .desktop；桌面右键 Remove 调用）。
-fn cmd_unexport(container: String, desktop_file: String) -> Result<()> {
-    let removed = easytidy_core::desktop::remove_passthrough(&container, &desktop_file)?;
-    println!("已撤销导出：{}（{}）", desktop_file, removed.display());
+fn cmd_unexport(container: String, app_id: String) -> Result<()> {
+    let removed = easytidy_core::desktop::remove_passthrough(&container, &app_id)?;
+    println!("已撤销导出：{}（{}）", app_id, removed.display());
     Ok(())
 }
 
@@ -914,11 +927,10 @@ async fn ensure_running_and_ready(podman: &Podman, name: &str) -> Result<PathBuf
     wait_socket_ready(name).await
 }
 
-/// 连接容器 server socket → hello → pty.open → 双向流式转发，
-/// 阻塞至应用退出，返回其退出码（server 侧有损 0/-1，见 server pty.rs）。
+/// 连接容器 server socket + 握手，返回已建帧的双向流。
 ///
-/// [`cmd_run`]（非 root 带命令）与 [`cmd_open`]（passthrough 快捷方式）共用。
-async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32> {
+/// [`forward_pty_command`]（PTY 转发）与 [`send_json_op`]（one-shot JSON op）共用。
+async fn connect_server(socket: &Path) -> Result<Framed<UnixStream, FrameCodec>> {
     let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("连接 socket 失败（容器可能未就绪）：{}", socket.display()))?;
@@ -930,7 +942,7 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
     let handshake = Handshake {
         v: PROTOCOL_VERSION,
         client: "easytidy-cli".to_string(),
-        wants: vec!["pty".to_string()],
+        wants: vec!["pty".to_string(), "apps".to_string()],
     };
     let handshake_msg = Message {
         id: 1,
@@ -970,6 +982,52 @@ async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32>
             ack.v
         );
     }
+
+    Ok(framed)
+}
+
+/// one-shot JSON op：发请求 → 等同 id 响应 → 返回 payload（err 响应先报错）。
+/// 用于无流式交互的查询/拉起类 op（如 apps.launch_app）。
+async fn send_json_op(
+    mut framed: Framed<UnixStream, FrameCodec>,
+    op: &str,
+    req: &impl serde::Serialize,
+) -> Result<serde_json::Value> {
+    let msg = Message {
+        id: 2,
+        kind: MsgKind::Req,
+        op: op.to_string(),
+        payload: serde_json::to_value(req)?,
+        err: None,
+    };
+    framed
+        .send(Frame::Json(msg))
+        .await
+        .with_context(|| format!("发送 {op} 失败"))?;
+
+    let resp_frame = framed
+        .next()
+        .await
+        .with_context(|| format!("接收 {op} 响应失败"))?
+        .with_context(|| format!("{op} 响应帧为空"))?;
+
+    let resp_msg = match resp_frame {
+        Frame::Json(msg) => msg,
+        Frame::Raw { .. } => bail!("{op} 响应应为 JSON 帧（收到 Raw 帧）"),
+    };
+    // 错误响应优先检查（payload=null，直接 from_value 会报解析错误掩盖真实原因）
+    if let Some(err) = &resp_msg.err {
+        bail!("{op} 失败：{} - {}", err.code, err.message);
+    }
+    Ok(resp_msg.payload)
+}
+
+/// 连接容器 server socket → hello → pty.open → 双向流式转发，
+/// 阻塞至应用退出，返回其退出码（server 侧有损 0/-1，见 server pty.rs）。
+///
+/// [`cmd_run`]（非 root 带命令）与 [`cmd_open`]（passthrough 快捷方式）共用。
+async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32> {
+    let mut framed = connect_server(socket).await?;
 
     // 获取当前终端尺寸；无 tty 场景（桌面图标/CRON 启动，ioctl 返回
     // EAGAIN——journalctl 实测）回退 80×24，不影响命令执行
@@ -1331,6 +1389,62 @@ async fn cmd_open(
 
     // 透传应用命令（阻塞至应用退出，退出码透传）
     forward_pty_command(&socket, command).await
+}
+
+/// 按引用启动容器内应用（[`Commands::Launch`]）：
+/// 确保容器运行 + socket 就绪 → `apps.launch_app` one-shot op。server 查
+/// 应用登记表/自定义应用解析出 exec 并自行 spawn（stdio 缓冲 + 退出码记录，
+/// 可经 apps.ps / apps.logs 跟踪）；CLI 只报结果即退出。
+///
+/// 与 [`cmd_open`] 带命令路径（PTY 阻塞转发）的区别：launch 是「点火即走」
+/// ——桌面图标点击应秒回，应用生命周期归 server 所有。
+async fn cmd_launch(container: String, id_or_name: String) -> Result<i32> {
+    info!("launch：container={container}, app={id_or_name}");
+
+    let podman = Podman::connect().await?;
+
+    // 容器不存在（未创建/已删除）：友好终端报错
+    if !podman
+        .list_containers()
+        .await?
+        .iter()
+        .any(|c| c.name == container)
+    {
+        show_error_in_terminal(&format!(
+            "容器 {container} 不存在（可能已删除或尚未创建）。\n\n\
+             可通过 easytidy GUI（Master）或命令行创建：\n\
+             easytidy create --image <镜像> --name {container}"
+        ));
+        bail!("容器不存在：{container}");
+    }
+
+    let socket = ensure_running_and_ready(&podman, &container).await?;
+    let framed = connect_server(&socket).await?;
+
+    let req = easytidy_protocol::ops::AppLaunchApp { id_or_name };
+    let payload = send_json_op(framed, "apps.launch_app", &req).await?;
+    let resp: easytidy_protocol::ops::AppLaunchAppResp =
+        serde_json::from_value(payload).context("解析 apps.launch_app 响应失败")?;
+
+    match resp.pid {
+        Some(pid) => {
+            println!(
+                "已启动 {}（id={}, pid={pid}）",
+                resp.name.unwrap_or_default(),
+                resp.id.unwrap_or_default()
+            );
+            Ok(0)
+        }
+        None => {
+            let err = resp.error.unwrap_or_else(|| "启动失败".to_string());
+            if let Some(available) = &resp.available {
+                if !available.is_empty() {
+                    eprintln!("可用应用 id：{}", available.join(", "));
+                }
+            }
+            Err(anyhow::anyhow!("{err}"))
+        }
+    }
 }
 
 async fn cmd_run(container: String, command: Vec<String>, as_root: bool) -> Result<i32> {

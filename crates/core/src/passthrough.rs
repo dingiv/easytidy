@@ -5,13 +5,15 @@
 //! 容器自包含——容器删除/同名重建即随之清空。宿主侧不再持有 per-container
 //! 配置（修复「新建容器继承旧容器收藏」bug）。
 //!
-//! 宿主侧仅负责经容器 server socket 发 `apps.launch`——**由 server 拉起并保活**
+//! 宿主侧仅负责经容器 server socket 发 `apps.launch`（按命令串，auto-start/
+//! 收藏）或 `apps.launch_app`（按 id/名称，server 查登记表自行决定启动）
+//! ——**由 server 拉起并保活**
 //! （宿主一次性 CLI 连接断开即杀 PTY 会话，实测；server spawn 的子进程
 //! 独立于连接存活）。
 
 use easytidy_protocol::ops::{
-    AppLogs, AppLogsResp, AppsLaunch, AppsLaunchItem, AppsLaunchResp, AppsLaunchResult, AppsPsResp,
-    ManagedProcess,
+    AppLaunchApp, AppLaunchAppResp, AppLogs, AppLogsResp, AppsLaunch, AppsLaunchItem,
+    AppsLaunchResp, AppsLaunchResult, AppsPsResp, ManagedProcess,
 };
 use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::{Frame, Handshake, Message, MsgKind, PROTOCOL_VERSION};
@@ -130,6 +132,41 @@ pub async fn launch_apps(
             .map(|r| r.results)
             .map_err(|e| Error::Connect(format!("解析 apps.launch 响应失败：{e}"))),
         _ => Err(Error::Connect("apps.launch 响应异常".to_string())),
+    }
+}
+
+/// 按引用拉起应用（apps.launch_app：server 查应用登记表/自定义应用解析
+/// exec 并自行 spawn——调用方只传 id 或名称）。连接重试 2s 窗口容忍
+/// server 就绪延迟。
+pub async fn launch_app_by_ref(
+    container: &str,
+    id_or_name: &str,
+) -> Result<AppLaunchAppResp> {
+    let mut framed = connect_apps(container).await?;
+
+    let launch = Frame::Json(Message {
+        id: 2,
+        kind: MsgKind::Req,
+        op: "apps.launch_app".to_string(),
+        payload: serde_json::to_value(AppLaunchApp { id_or_name: id_or_name.to_string() })
+            .unwrap_or_default(),
+        err: None,
+    });
+    if framed.send(launch).await.is_err() {
+        return Err(Error::Connect("发送 apps.launch_app 失败".to_string()));
+    }
+    match framed.next().await {
+        Some(Ok(Frame::Json(resp))) => {
+            if let Some(err) = resp.err {
+                return Err(Error::Connect(format!(
+                    "apps.launch_app 失败：{} {}",
+                    err.code, err.message
+                )));
+            }
+            serde_json::from_value::<AppLaunchAppResp>(resp.payload)
+                .map_err(|e| Error::Connect(format!("解析 apps.launch_app 响应失败：{e}")))
+        }
+        _ => Err(Error::Connect("apps.launch_app 响应异常".to_string())),
     }
 }
 
