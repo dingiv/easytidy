@@ -108,6 +108,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::env_snapshot,
             commands::containers::env_start,
             commands::containers::env_stop,
+            // 容器入口图标选择（宿主文件选择 → icons 目录）
+            commands::passthrough::container_pick_icon,
             // 配置管理器（单实例 GUI：get/apply）
             commands::config::get_container_config,
             commands::config::apply_container_config,

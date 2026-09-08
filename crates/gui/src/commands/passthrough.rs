@@ -792,6 +792,48 @@ pub async fn passthrough_pick_host_icon(
     Ok(container_path)
 }
 
+/// 选择宿主图片作为容器入口图标源（容器管理「容器」页用，无 session 依赖）：
+/// 原生文件选择 → 拷入宿主 icons 目录（`easytidy-container-<name>.<ext>`，
+/// 保留原图源图——导出时经 [`easytidy_core::desktop::process_container_icon`]
+/// 品牌加工）→ 返回宿主路径（前端写入配置 icon 字段）。
+#[tauri::command]
+pub async fn container_pick_icon(name: String) -> Result<String, String> {
+    use std::io::Read;
+
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("容器名为空（请先填写名称）".to_string());
+    }
+
+    // 原生对话框阻塞主线程：spawn_blocking 避免卡 async runtime
+    let picked = tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .add_filter("图片", &["png", "jpg", "jpeg", "svg", "ico", "webp", "gif"])
+            .pick_file()
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("文件选择对话框失败：{e}"))?
+    .ok_or_else(|| "已取消".to_string())?;
+
+    let mut bytes = Vec::new();
+    std::fs::File::open(&picked)
+        .and_then(|mut f| f.read_to_end(&mut bytes))
+        .map_err(|e| format!("读取图片失败：{e}"))?;
+
+    let icons_dir = easytidy_core::appdata::icons_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&icons_dir).map_err(|e| e.to_string())?;
+    let ext = std::path::Path::new(&picked)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+        .unwrap_or("png");
+    let dest = icons_dir.join(format!("easytidy-container-{name}.{ext}"));
+    std::fs::write(&dest, &bytes).map_err(|e| format!("写入图标失败：{e}"))?;
+    info!("容器入口图标已选择：{name} ← {picked} → {}", dest.display());
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 /// 设置自定义应用图标（icon = **容器内**图片路径；None = 清除）。
 /// 写入**容器内**配置；导出时 Icon= 用该容器内路径拷出的宿主缓存。
 #[tauri::command]
@@ -843,14 +885,33 @@ pub async fn passthrough_export(
             if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
                 if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
                     if std::fs::create_dir_all(&icons_dir).is_ok() {
-                        let ext = std::path::Path::new(icon_path)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .filter(|e| !e.is_empty())
-                            .unwrap_or("png");
-                        let icon_file =
-                            icons_dir.join(format!("easytidy-custom-{container}-icon.{ext}"));
-                        if std::fs::write(&icon_file, &icon_data).is_ok() {
+                        // 与扫描应用统一：经内置图标加工工具处理（品牌渐变边框 +
+                        // 圆角内容 + 水印，输出 256×256 PNG）；加工失败（如 SVG
+                        // 等 image 不支持的格式）保留原图（原扩展名）
+                        let (bytes, file_name) =
+                            match easytidy_core::icon::compose_app_icon(
+                                &icon_data,
+                                EASYTIDY_BRAND_ICON,
+                            ) {
+                                Ok(composed) => (
+                                    composed,
+                                    format!("easytidy-custom-{container}-icon.png"),
+                                ),
+                                Err(e) => {
+                                    tracing::warn!("自定义应用图标加工失败，保留原图：{e}");
+                                    let ext = std::path::Path::new(icon_path)
+                                        .extension()
+                                        .and_then(|e| e.to_str())
+                                        .filter(|e| !e.is_empty())
+                                        .unwrap_or("png");
+                                    (
+                                        icon_data,
+                                        format!("easytidy-custom-{container}-icon.{ext}"),
+                                    )
+                                }
+                            };
+                        let icon_file = icons_dir.join(&file_name);
+                        if std::fs::write(&icon_file, &bytes).is_ok() {
                             icon_attr = Some(icon_file.to_string_lossy().into_owned());
                         }
                     }
@@ -948,10 +1009,20 @@ pub async fn export_gui_shortcut(
         .as_ref()
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
 
+    // 容器入口图标：配置里用户设置的图标源经品牌工具加工（未设置/失败回退品牌图标）
+    let icon = easytidy_core::configfile::ConfigFile::default_instance()
+        .ok()
+        .and_then(|cf| cf.get_container(&sess.container_name).ok())
+        .flatten()
+        .and_then(|c| {
+            easytidy_core::desktop::process_container_icon(&sess.container_name, c.icon.as_deref())
+        });
+
     let menu_path = easytidy_core::desktop::write_gui_entry(
         &sess.container_name,
         &cli_path(),
         desktop_icon.unwrap_or(true),
+        icon.as_deref(),
     )
     .map_err(|e| e.to_string())?;
     info!("GUI 入口导出：{} → {:?}", sess.container_name, menu_path);

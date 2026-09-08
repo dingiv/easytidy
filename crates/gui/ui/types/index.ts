@@ -141,6 +141,9 @@ export interface ContainerConfig {
   persistent: boolean;
   mounts: MountConfig[];
   network: ContainerNetworkConfig;
+  /// 容器入口图标（宿主图片路径，可选）：入口 .desktop 导出时经内置品牌工具加工。
+  /// 未设置 = 内置品牌图标。
+  icon?: string | null;
   /// 容器环境变量（"KEY=VALUE" 列表）
   env: string[];
   /// 用户一致性映射开关（keep-id：宿主 uid ↔ 容器同 uid 锁死 1:1）。

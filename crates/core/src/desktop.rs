@@ -484,12 +484,35 @@ pub fn ensure_gui_icon() -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
+/// 容器入口图标加工：用户配置的图标源（宿主路径）经内置品牌工具
+/// [`crate::icon::compose_app_icon`]（渐变圆角边框 + 圆角内容 + 品牌水印）
+/// 加工后写入 `icons_dir()/easytidy-gui-<container>.png`。
+///
+/// 返回加工后图标路径；未设置 / 源图读取失败 / 加工失败均返回 `None`
+///（调用方回退内置品牌图标）。
+pub fn process_container_icon(container: &str, icon_src: Option<&str>) -> Option<String> {
+    let src = icon_src?.trim();
+    if src.is_empty() {
+        return None;
+    }
+    let data = std::fs::read(src).ok()?;
+    let composed = crate::icon::compose_app_icon(&data, EASYTIDY_ICON_PNG).ok()?;
+    let dir = crate::appdata::icons_dir().ok()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("easytidy-gui-{container}.png"));
+    std::fs::write(&path, &composed).ok()?;
+    tracing::info!("容器入口图标加工：{container} ← {src} → {}", path.display());
+    Some(path.to_string_lossy().into_owned())
+}
+
 /// GUI 入口 .desktop 内容（纯函数，可单测）。
 ///
 /// Exec = `<cli> open --container <name>`——经 CLI 垫片确保容器运行、
 /// 等待 server socket 就绪，再按配置 silent_boot 决定是否拉起 Worker GUI
 /// （直接冷启动 380MB GUI 是点击慢的根源，垫片先行秒级保活）。
-pub fn generate_gui_entry_content(container: &str, cli_path: &str) -> String {
+/// `icon`：加工后的容器图标路径（[`process_container_icon`]）；
+/// 未设置回退内置品牌图标。
+pub fn generate_gui_entry_content(container: &str, cli_path: &str, icon: Option<&str>) -> String {
     let mut content = format!(
         "[Desktop Entry]\n\
          Name=easytidy {container}\n\
@@ -498,7 +521,11 @@ pub fn generate_gui_entry_content(container: &str, cli_path: &str) -> String {
          Categories=System;Utility;ContainerManagement;\n\
          Exec={cli_path} open --container {container}\n",
     );
-    if let Some(icon) = ensure_gui_icon() {
+    let icon = icon
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(ensure_gui_icon);
+    if let Some(icon) = icon {
         content.push_str(&format!("Icon={icon}\n"));
     }
     content.push_str(&format!(
@@ -520,14 +547,20 @@ pub fn generate_gui_entry_content(container: &str, cli_path: &str) -> String {
 /// - 桌面图标：桌面路径同名文件 + chmod +x + `gio metadata::trusted`
 ///   （GNOME 双击必需；`desktop_icon=true` 且桌面目录存在时）
 /// - `cli_path`：宿主 easytidy CLI 绝对路径（Exec/TryExec；垫片入口）
+/// - `icon`：加工后的容器图标路径（未设置回退内置品牌图标）
 ///
 /// 返回应用菜单路径。
-pub fn write_gui_entry(container: &str, cli_path: &str, desktop_icon: bool) -> Result<PathBuf> {
+pub fn write_gui_entry(
+    container: &str,
+    cli_path: &str,
+    desktop_icon: bool,
+    icon: Option<&str>,
+) -> Result<PathBuf> {
     let dir = passthrough_dir()?;
     std::fs::create_dir_all(&dir)
         .map_err(|e| Error::Config(format!("创建 applications 目录失败：{e}")))?;
 
-    let content = generate_gui_entry_content(container, cli_path);
+    let content = generate_gui_entry_content(container, cli_path, icon);
 
     let file_name = format!("easytidy-gui-{container}.desktop");
     let menu_path = dir.join(&file_name);
@@ -930,7 +963,7 @@ mod tests {
 
     #[test]
     fn test_generate_gui_entry_content_open_format() {
-        let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy");
+        let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy", None);
 
         assert!(content.contains("Exec=/usr/bin/easytidy open --container chrome"));
         assert!(content.contains("TryExec=/usr/bin/easytidy"));
@@ -940,6 +973,39 @@ mod tests {
         // Exec 不再直连 GUI 二进制（X-easytidy-gui 标记含该子串，须按行判定）
         let exec_line = content.lines().find(|l| l.starts_with("Exec=")).unwrap();
         assert!(!exec_line.contains("easytidy-gui"));
+    }
+
+    #[test]
+    fn test_process_container_icon_composes_and_writes() {
+        use image::RgbaImage;
+
+        // 2×2 红色源图（内存生成，不依赖外部资源）
+        let img = RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("src.png");
+        fs::write(&src, &bytes).unwrap();
+
+        let out = process_container_icon("e2e-icon-test", Some(src.to_str().unwrap()))
+            .expect("源图存在且可加工，应返回输出路径");
+        let out_path = std::path::PathBuf::from(&out);
+        assert!(out_path.exists());
+        assert!(out.ends_with("easytidy-gui-e2e-icon-test.png"));
+        // 加工输出 = 256×256 有效 PNG（PNG 头：16-19 宽 / 20-23 高，big-endian）
+        let data = fs::read(&out_path).unwrap();
+        assert_eq!(&data[12..16], b"IHDR", "应为 PNG（IHDR 块）");
+        let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+        let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+        assert_eq!((w, h), (256, 256));
+    }
+
+    #[test]
+    fn test_process_container_icon_none_on_missing() {
+        assert_eq!(process_container_icon("x", None), None);
+        assert_eq!(process_container_icon("x", Some("")), None);
+        assert_eq!(process_container_icon("x", Some("/nonexistent/icon.png")), None);
     }
 
     #[test]

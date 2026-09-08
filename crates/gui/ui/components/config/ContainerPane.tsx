@@ -6,7 +6,8 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Input, Space, Switch, Typography } from 'antd';
+import { App as AntApp, Button, Input, Space, Switch, Typography } from 'antd';
+import { PictureOutlined } from '@ant-design/icons';
 import type { ContainerConfig, ImageSummary } from '../../types';
 import { ImageSelect } from './ImageSelect';
 
@@ -18,6 +19,8 @@ interface ContainerPaneProps {
   nameLocked?: boolean;
   onNameChange(v: string): void;
   onImageChange(v: string): void;
+  /** 容器入口图标（宿主图片路径；null = 清除，回退内置品牌图标） */
+  onIconChange(v: string | null): void;
   onSilentBootChange(v: boolean): void;
   onPersistentChange(v: boolean): void;
   /** GUI 透传开关（实例一等项；存意图，展开/重建时按宿主实时注入） */
@@ -30,9 +33,10 @@ interface ContainerPaneProps {
 
 export function ContainerPane({
   edit, mode, nameLocked = false, onNameChange, onImageChange,
-  onSilentBootChange, onPersistentChange, onGuiChange,
+  onIconChange, onSilentBootChange, onPersistentChange, onGuiChange,
   onGpuNvidiaChange, onGpuAmdChange,
 }: ContainerPaneProps) {
+  const { message } = AntApp.useApp();
   // 镜像下拉数据：仅 create 模式需要拉（edit 模式镜像只读，渲染 Typography.Text）。
   const [images, setImages] = useState<ImageSummary[]>([]);
   useEffect(() => {
@@ -41,6 +45,18 @@ export function ContainerPane({
       .then((list) => setImages(list ?? []))
       .catch((err) => console.error('images_list failed:', err));
   }, [mode]);
+
+  /** 容器入口图标：原生文件选择 → 后端拷入 icons 目录 → 路径写入配置 */
+  const handlePickIcon = async () => {
+    try {
+      const path = await invoke<string>('container_pick_icon', { name: edit.name.trim() });
+      onIconChange(path);
+    } catch (err: any) {
+      if (String(err) !== '已取消') {
+        message.error(String(err));
+      }
+    }
+  };
 
   return (
     <div className="config-fields">
@@ -83,6 +99,35 @@ export function ContainerPane({
             点击桌面快捷方式时仅静默启动容器（不弹 GUI 窗口）
           </Typography.Text>
         </Space>
+      </div>
+      <div className="config-field">
+        <label>容器图标（可选）</label>
+        <Space wrap>
+          {edit.icon ? (
+            <Typography.Text code ellipsis style={{ maxWidth: 300 }}>
+              {edit.icon}
+            </Typography.Text>
+          ) : (
+            <Typography.Text type="secondary">未设置（使用内置品牌图标）</Typography.Text>
+          )}
+          <Button
+            size="small"
+            icon={<PictureOutlined />}
+            disabled={!edit.name.trim()}
+            onClick={handlePickIcon}
+            title={edit.name.trim() ? '选择宿主图片作为容器入口图标' : '请先填写名称'}
+          >
+            选择图片
+          </Button>
+          {edit.icon && (
+            <Button size="small" type="text" danger onClick={() => onIconChange(null)}>
+              清除
+            </Button>
+          )}
+        </Space>
+        <span className="section-hint">
+          容器入口桌面快捷方式图标：导出时经内置品牌工具加工（渐变边框 + 水印，256×256）
+        </span>
       </div>
       <div className="config-field">
         <label>持久化</label>

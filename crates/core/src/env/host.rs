@@ -336,6 +336,7 @@ mod tests {
             env: vec![],
             silent_boot: false,
             persistent: true,
+            icon: None,
         };
         inject_passthrough(&mut cfg);
         assert!(cfg.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));

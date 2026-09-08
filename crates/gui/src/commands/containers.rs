@@ -401,6 +401,8 @@ pub async fn env_new(
     }
 
     let config_file = try_log!(ConfigFile::default_instance(), "解析容器配置目录");
+    // 容器入口图标：用户设置的图标源经内置品牌工具加工（未设置/失败回退品牌图标）
+    let entry_icon = desktop::process_container_icon(&name, config.icon.as_deref());
     try_log!(config_file.register_container(config), "注册环境配置");
 
     // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可——旧
@@ -410,7 +412,7 @@ pub async fn env_new(
     if let Err(e) = desktop::install_desktop_entry(
         &name,
         None,
-        None,
+        entry_icon.as_deref(),
         &crate::commands::passthrough::cli_path(),
     ) {
         warn!("生成桌面图标失败（忽略）：{e}");

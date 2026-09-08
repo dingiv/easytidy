@@ -519,6 +519,11 @@ pub struct ContainerConfig {
     pub silent_boot: bool,
     /// 是否常驻（catatonit + server 生命周期）
     pub persistent: bool,
+    /// 容器入口图标（宿主图片路径，可选）：入口 .desktop 导出时经
+    /// [`crate::desktop::process_container_icon`]（内置品牌加工）写入宿主 icons 目录。
+    /// 未设置 = 内置品牌图标。
+    #[serde(default)]
+    pub icon: Option<String>,
 }
 
 impl Default for ContainerConfig {
@@ -530,6 +535,7 @@ impl Default for ContainerConfig {
             env: Vec::new(),
             silent_boot: false,
             persistent: false,
+            icon: None,
         }
     }
 }
@@ -810,6 +816,7 @@ user_name = "tidy"
             env: vec!["DISPLAY=:0".to_string()],
             silent_boot: true,
             persistent: true,
+            icon: None,
         };
 
         // TOML 往返（configfile 格式；flatten 平铺形状不变）

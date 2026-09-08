@@ -147,6 +147,7 @@ impl Flavor {
             env: Vec::new(),
             silent_boot: false,
             persistent: true,
+            icon: None,
         };
         crate::env::host::inject_passthrough(&mut config);
         Ok(config)

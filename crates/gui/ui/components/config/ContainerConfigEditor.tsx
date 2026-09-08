@@ -56,6 +56,7 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   persistent: true,
   mounts: [],
   network: { mode: 'host', ports: [] },
+  icon: null,
   env: [],
   keep_id: true,
   uidmaps: [],
@@ -280,6 +281,7 @@ export function ContainerConfigEditor({
           nameLocked={nameLocked}
           onNameChange={(name) => update({ name })}
           onImageChange={(image) => update({ image })}
+          onIconChange={(icon) => update({ icon })}
           onSilentBootChange={(silent_boot) => update({ silent_boot })}
           onPersistentChange={(persistent) => update({ persistent })}
           onGuiChange={(gui) => update({ gui })}
