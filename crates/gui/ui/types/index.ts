@@ -248,6 +248,9 @@ export interface EngineInfo {
   storage_driver_status: [string, string][];
   /// 存储根目录
   storage_root?: string | null;
+  /// overlay 挂载程序（storage.conf mount_program，如 /usr/bin/fuse-overlayfs）
+  /// ——缺 = native overlay
+  overlay_mount_program?: string | null;
   /// 是否 rootless（SecurityOptions 含 name=rootless）
   rootless: boolean;
   /// 默认 OCI 运行时（crun / runc）

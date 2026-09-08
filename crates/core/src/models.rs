@@ -47,6 +47,11 @@ pub struct EngineInfo {
     pub storage_driver_status: Vec<(String, String)>,
     /// 存储根目录（rootless：~/.local/share/containers/storage）
     pub storage_root: Option<String>,
+    /// overlay 挂载程序（宿主 storage.conf `[storage.options.overlay] mount_program`，
+    /// 如 `/usr/bin/fuse-overlayfs`）——None = native overlay（rootless + keep-id
+    /// 首次从 commit 镜像建容器付全层 chown 校验，见 docs/18）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overlay_mount_program: Option<String>,
     /// 是否 rootless（SecurityOptions 含 "name=rootless"）
     pub rootless: bool,
     /// 默认 OCI 运行时（crun / runc / ...）

@@ -107,6 +107,20 @@ export function EngineInfoPanel() {
         <Descriptions.Item label="存储驱动">
           <Tag color="green">{fmt(info.storage_driver)}</Tag>
         </Descriptions.Item>
+        {info.storage_driver === 'overlay' && (
+          <Descriptions.Item label="Overlay 挂载方式">
+            {info.overlay_mount_program ? (
+              <>
+                <Tag color="blue">fuse-overlayfs</Tag>
+                <span style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
+                  {info.overlay_mount_program}
+                </span>
+              </>
+            ) : (
+              <Tag color="orange">native（未配 mount_program）</Tag>
+            )}
+          </Descriptions.Item>
+        )}
         <Descriptions.Item label="存储根目录">
           <span style={{ fontFamily: 'monospace', fontSize: '0.8em' }}>
             {fmt(info.storage_root)}

@@ -158,7 +158,52 @@ impl Podman {
     /// 可随时调用。
     pub async fn engine_info(&self) -> Result<crate::models::EngineInfo> {
         let info = self.docker.info().await?;
-        Ok(map_system_info(info))
+        let mut e = map_system_info(info);
+        // 宿主侧补充：overlay 挂载方式（native vs fuse-overlayfs）——/info 不
+        // 区分（两者都报 Driver=overlay），可靠信号是 storage.conf 的
+        // mount_program（libpod /info 的 Store 字段实测为空）
+        if e.storage_driver.as_deref() == Some("overlay") {
+            e.overlay_mount_program = Self::detect_overlay_mount_program();
+        }
+        Ok(e)
+    }
+
+    /// 宿主 storage.conf 路径：`$XDG_CONFIG_HOME/containers/storage.conf`
+    /// （未设 XDG_CONFIG_HOME 时回退 `~/.config/containers/storage.conf`；
+    /// 文件可能不存在——podman 用默认配置）
+    pub fn storage_conf_path() -> Option<std::path::PathBuf> {
+        let base = std::env::var("XDG_CONFIG_HOME")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir)
+            .map(|h| h.join(".config"))?;
+        let path = base.join("containers/storage.conf");
+        path.exists().then_some(path)
+    }
+
+    /// 从 storage.conf 内容提取 overlay 挂载程序（`[storage.options.overlay]`
+    /// `mount_program`）；纯函数，单测入口。未配/解析失败 → None（= native）
+    pub fn parse_overlay_mount_program(conf: &str) -> Option<String> {
+        let v: toml::Value = toml::from_str(conf).ok()?;
+        v.get("storage")?
+            .get("options")?
+            .get("overlay")?
+            .get("mount_program")?
+            .as_str()?
+            .to_string()
+            .into()
+    }
+
+    /// 探测宿主 overlay 挂载方式（读 storage.conf；文件缺失/未配 = None = native）
+    fn detect_overlay_mount_program() -> Option<String> {
+        let path = Self::storage_conf_path()?;
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| {
+                tracing::warn!("读 storage.conf 失败（按 native 处理）：{e}");
+                String::new()
+            });
+        Self::parse_overlay_mount_program(&content)
     }
 
     /// 创建容器（默认配置，保持既有语义）。
@@ -1690,6 +1735,8 @@ fn map_system_info(info: bollard::models::SystemInfo) -> crate::models::EngineIn
             })
             .collect(),
         storage_root: info.docker_root_dir,
+        // overlay_mount_program 由 engine_info 宿主侧探测后填入（/info 不含）
+        overlay_mount_program: None,
         rootless: security_options.iter().any(|s| s.contains("rootless")),
         default_runtime: info.default_runtime,
         cgroup_driver: info.cgroup_driver.map(|d| d.to_string()),
@@ -2214,6 +2261,26 @@ mod tests {
 
         // 空字符串：原样返回（让 podman 报错）
         assert_eq!(super::parse_snapshot_ref(""), ("".into(), None));
+    }
+
+    #[test]
+    fn test_parse_overlay_mount_program() {
+        use super::Podman;
+        // 标准形态（本机 storage.conf）：[storage.options.overlay] mount_program
+        let conf = "\n[storage]\ndriver = \"overlay\"\n\n[storage.options.overlay]\nmount_program = \"/usr/bin/fuse-overlayfs\"\n";
+        assert_eq!(
+            Podman::parse_overlay_mount_program(conf).as_deref(),
+            Some("/usr/bin/fuse-overlayfs")
+        );
+
+        // 未配 mount_program（native overlay）→ None
+        let native = "[storage]\ndriver = \"overlay\"\n";
+        assert!(Podman::parse_overlay_mount_program(native).is_none());
+
+        // 无 overlay 节 / 非法 TOML / 空文件 → None（不 panic）
+        assert!(Podman::parse_overlay_mount_program("[storage]\n").is_none());
+        assert!(Podman::parse_overlay_mount_program("").is_none());
+        assert!(Podman::parse_overlay_mount_program("not [toml ===").is_none());
     }
 
     #[test]
