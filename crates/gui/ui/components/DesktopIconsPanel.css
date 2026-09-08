@@ -14,12 +14,12 @@
 
 .desktop-icons-title {
   margin: 0 !important;
-  font-size: 18px !important;
+  font-size: var(--fs-lg) !important;
 }
 
 .desktop-icons-sub {
   flex: 1;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .desktop-icons-loading {

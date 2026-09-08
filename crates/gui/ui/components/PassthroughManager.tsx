@@ -451,7 +451,7 @@ export function PassthroughManager() {
   return (
     <div className="passthrough-manager">
       <div className="passthrough-header">
-        <h3>Desktop Applications Passthrough</h3>
+        <h3 className='fs-lg'>Desktop Applications Passthrough</h3>
       </div>
 
       {error && (
@@ -463,6 +463,16 @@ export function PassthroughManager() {
       {/* ===== Section 1：容器导出（本容器管理界面的桌面快捷方式） ===== */}
       <section className="pt-section">
         <h4 className="pt-section-title">容器导出</h4>
+        <div className="container-export-row">
+          <span className="container-export-label">名称</span>
+          <input
+            className="container-export-input"
+            value={entryName}
+            onChange={(e) => setEntryName(e.target.value)}
+            placeholder={containerName ? `easytidy ${containerName}` : 'easytidy <容器名>'}
+            maxLength={64}
+          />
+        </div>
         <div className="container-export">
           <div className="container-export-row">
             <span className="container-export-label">图标</span>
@@ -498,17 +508,8 @@ export function PassthroughManager() {
                   清除
                 </button>
               )}
+
             </div>
-          </div>
-          <div className="container-export-row">
-            <span className="container-export-label">名称</span>
-            <input
-              className="container-export-input"
-              value={entryName}
-              onChange={(e) => setEntryName(e.target.value)}
-              placeholder={containerName ? `easytidy ${containerName}` : 'easytidy <容器名>'}
-              maxLength={64}
-            />
           </div>
           <div className="container-export-row">
             <span className="container-export-label" />
@@ -527,26 +528,26 @@ export function PassthroughManager() {
          *  应用自启动在下方各应用行的「容器启动时自动拉起」开关（容器启动时
          *  经 server apps.launch 拉起） */}
         <div className="boot-section">
-        <h4>容器自启动（登录时）</h4>
-        <Radio.Group
-          value={state?.boot_mode ?? 'off'}
-          onChange={(e) => handleSetBootMode(e.target.value)}
-          optionType="button"
-          size="small"
-          options={[
-            { label: '关闭', value: 'off' },
-            { label: '静默启动', value: 'silent' },
-            { label: '非静默（+GUI）', value: 'gui' },
-          ]}
-        />
-        <div className="boot-hint">
-          {state?.boot_mode === 'gui'
-            ? '用户登录后启动容器，并打开该容器的管理窗口'
-            : state?.boot_mode === 'silent'
-              ? '用户登录后仅后台启动容器，不打开窗口'
-              : '未启用：用户登录后不自动启动容器'}
+          <h4>容器自启动（登录时）</h4>
+          <Radio.Group
+            value={state?.boot_mode ?? 'off'}
+            onChange={(e) => handleSetBootMode(e.target.value)}
+            optionType="button"
+            size="small"
+            options={[
+              { label: '关闭', value: 'off' },
+              { label: '静默启动', value: 'silent' },
+              { label: '非静默（+GUI）', value: 'gui' },
+            ]}
+          />
+          <div className="boot-hint">
+            {state?.boot_mode === 'gui'
+              ? '用户登录后启动容器，并打开该容器的管理窗口'
+              : state?.boot_mode === 'silent'
+                ? '用户登录后仅后台启动容器，不打开窗口'
+                : '未启用：用户登录后不自动启动容器'}
+          </div>
         </div>
-      </div>
 
       </section>
 
@@ -554,251 +555,251 @@ export function PassthroughManager() {
       <section className="pt-section">
         <h4 className="pt-section-title">应用导出</h4>
 
-      <div className="custom-section">
-        <h4>自定义应用（容器固定目录之外）</h4>
-        <div id="custom-form-anchor" className="custom-form custom-form-vertical">
-          {editingId && (
-            <div className="custom-form-editing">
-              正在编辑：<strong>{customApps.find((a) => a.id === editingId)?.name ?? editingId}</strong>
-            </div>
-          )}
-          <div className="custom-form-row">
-            <label className="custom-form-label">名称</label>
-            <input
-              placeholder="名称，如 Chrome (自定义)"
-              value={customName}
-              onChange={(e) => setCustomName(e.target.value)}
-            />
-          </div>
-          <div className="custom-form-row">
-            <label className="custom-form-label">命令</label>
-            <input
-              placeholder="命令，如 google-chrome-stable --disable-dev-shm-usage"
-              value={customCmd}
-              onChange={(e) => setCustomCmd(e.target.value)}
-            />
-          </div>
-          <div className="custom-form-row">
-            <label className="custom-form-label">图标</label>
-            <div className="custom-form-icon">
-              <input
-                placeholder="容器内路径，如 ~/.easytidy/icons/app.png（可留空）"
-                value={customIcon ?? ''}
-                onChange={(e) => setCustomIcon(e.target.value || null)}
-                title="图标容器内路径（可直接键入、从宿主机选用，或拖下方/上方预选图标到这里）"
-                onDragOver={(e) => e.preventDefault()}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  const p = readDroppedIconPath(e);
-                  if (p) setCustomIcon(p);
-                }}
-              />
-              <button
-                className="secondary-button"
-                onClick={pickHostIcon}
-                disabled={pickingHostIcon}
-                title="打开宿主原生文件对话框选图片，自动复制进容器并回填路径"
-              >
-                {pickingHostIcon ? '复制中…' : (
-                  <>
-                    <DownloadOutlined /> 从宿主机选用
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-          <div className="custom-form-row custom-form-preselect">
-            <span className="custom-form-label custom-form-preselect-label">预选图标</span>
-            <IconPreselectGrid
-              apps={apps}
-              selected={customIcon}
-              onSelect={(path) => setCustomIcon(path)}
-            />
-          </div>
-          <div className="custom-form-row custom-form-actions">
+        <div className="custom-section">
+          <h4>自定义应用（容器固定目录之外）</h4>
+          <div id="custom-form-anchor" className="custom-form custom-form-vertical">
             {editingId && (
-              <button className="secondary-button" onClick={handleCancelEdit} disabled={addingCustom}>
-                取消
-              </button>
+              <div className="custom-form-editing">
+                正在编辑：<strong>{customApps.find((a) => a.id === editingId)?.name ?? editingId}</strong>
+              </div>
             )}
-            <button className="primary-button" onClick={handleSaveCustom} disabled={addingCustom}>
-              {addingCustom ? '保存中…' : editingId ? '保存' : '添加'}
-            </button>
-          </div>
-        </div>
-        {customApps.map((custom) => {
-          const isExported =
-            state?.exported.some((e) => e.desktop_file === custom.id) ?? false;
-          return (
-            <div
-              key={custom.id}
-              className={`app-item ${isExported ? 'exported' : ''}`}
-            >
-              <div className="app-icon">
-                {/* 图标 = 容器内路径（经 server 拉取显示；缺失自动占位） */}
-                <PinnedAppIcon id={custom.id} icon={custom.icon} size={28} />
-              </div>
-              <div className="app-info">
-                <div className="app-name">{custom.name}</div>
-                <div className="app-exec" title={custom.cmd}>{custom.cmd}</div>
-              </div>
-              <div className="app-actions">
-                <Tooltip title="立即启动">
-                  <button
-                    className="secondary-button icon-only"
-                    onClick={() => handleLaunch(custom.id, custom.name)}
-                    disabled={launchingId === custom.id}
-                  >
-                    <PlayCircleOutlined />
-                  </button>
-                </Tooltip>
-                <Tooltip title={isPinned(custom.id) ? '取消收藏' : '收藏到工具栏'}>
-                  <button
-                    className={`secondary-button icon-only ${isPinned(custom.id) ? 'pinned' : ''}`}
-                    onClick={() =>
-                      handlePinToggle(
-                        { id: custom.id, name: custom.name, cmd: custom.cmd, icon: custom.icon },
-                        !isPinned(custom.id),
-                      )
-                    }
-                  >
-                    {isPinned(custom.id) ? <PushpinFilled /> : <PushpinOutlined />}
-                  </button>
-                </Tooltip>
-                {!isExported && (
-                  <button className="secondary-button" onClick={() => handleExportCustom(custom)}>
-                    导出
-                  </button>
-                )}
-                {isExported && (
-                  <button className="secondary-button" onClick={() => handleRevoke(custom.id)}>
-                    撤销
-                  </button>
-                )}
-                <Tooltip title="编辑名称/命令">
-                  <button
-                    className="secondary-button icon-only"
-                    onClick={() => handleEditCustom(custom)}
-                  >
-                    <EditOutlined />
-                  </button>
-                </Tooltip>
-                <Tooltip title="更换图标（宿主机/容器）">
-                  <button
-                    className="secondary-button icon-only"
-                    onClick={() => setIconPickerFor(custom.id)}
-                  >
-                    <PictureOutlined />
-                  </button>
-                </Tooltip>
+            <div className="custom-form-row">
+              <label className="custom-form-label">名称</label>
+              <input
+                placeholder="名称，如 Chrome (自定义)"
+                value={customName}
+                onChange={(e) => setCustomName(e.target.value)}
+              />
+            </div>
+            <div className="custom-form-row">
+              <label className="custom-form-label">命令</label>
+              <input
+                placeholder="命令，如 google-chrome-stable --disable-dev-shm-usage"
+                value={customCmd}
+                onChange={(e) => setCustomCmd(e.target.value)}
+              />
+            </div>
+            <div className="custom-form-row">
+              <label className="custom-form-label">图标</label>
+              <div className="custom-form-icon">
+                <input
+                  placeholder="容器内路径，如 ~/.easytidy/icons/app.png（可留空）"
+                  value={customIcon ?? ''}
+                  onChange={(e) => setCustomIcon(e.target.value || null)}
+                  title="图标容器内路径（可直接键入、从宿主机选用，或拖下方/上方预选图标到这里）"
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    const p = readDroppedIconPath(e);
+                    if (p) setCustomIcon(p);
+                  }}
+                />
                 <button
-                  className="secondary-button danger"
-                  onClick={() => handleRemoveCustom(custom.id)}
+                  className="secondary-button"
+                  onClick={pickHostIcon}
+                  disabled={pickingHostIcon}
+                  title="打开宿主原生文件对话框选图片，自动复制进容器并回填路径"
                 >
-                  删除
+                  {pickingHostIcon ? '复制中…' : (
+                    <>
+                      <DownloadOutlined /> 从宿主机选用
+                    </>
+                  )}
                 </button>
-                <span className="app-autostart">
-                  <Tooltip title="容器启动时自动拉起">
-                    <Switch
-                      checked={custom.auto_start}
-                      onChange={(v) => handleAutoStart(custom.id, custom.name, custom.cmd, v)}
-                    />
-                  </Tooltip>
-                  <span className="app-autostart-label">自启</span>
-                </span>
               </div>
             </div>
-          );
-        })}
-      </div>
-
-      <div className="apps-list">
-        {apps.map((app) => {
-          const isExported =
-            state?.exported.some((e) => e.desktop_file === app.desktop_file) ?? false;
-          const autoStart = autoStartOf(app.desktop_file);
-
-          return (
-            <div
-              key={app.desktop_file}
-              className={`app-item ${isExported ? 'exported' : ''}`}
-            >
-              <div className="app-icon">
-                {/* 容器内图标：经 server（socket）拉取显示，不走宿主文件系统 */}
-                <AppIcon path={app.icon_path} />
-              </div>
-              <div className="app-info">
-                <div className="app-name">{app.name}</div>
-                {app.comment && (
-                  <div className="app-comment">{app.comment}</div>
-                )}
-                <div className="app-exec" title={app.exec}>{app.exec}</div>
-                <div className="app-desktop-file">{app.desktop_file}</div>
-              </div>
-              <div className="app-actions">
-                <Tooltip title="立即启动">
-                  <button
-                    className="secondary-button icon-only"
-                    onClick={() => handleLaunch(app.id, app.name)}
-                    disabled={launchingId === app.desktop_file}
-                  >
-                    <PlayCircleOutlined />
-                  </button>
-                </Tooltip>
-                <Tooltip title={isPinned(app.desktop_file) ? '取消收藏' : '收藏到工具栏'}>
-                  <button
-                    className={`secondary-button icon-only ${isPinned(app.desktop_file) ? 'pinned' : ''}`}
-                    onClick={() =>
-                      handlePinToggle(
-                        { id: app.desktop_file, name: app.name, cmd: app.exec, icon: app.icon_path },
-                        !isPinned(app.desktop_file),
-                      )
-                    }
-                  >
-                    {isPinned(app.desktop_file) ? <PushpinFilled /> : <PushpinOutlined />}
-                  </button>
-                </Tooltip>
-                {isExported ? (
-                  <>
+            <div className="custom-form-row custom-form-preselect">
+              <span className="custom-form-label custom-form-preselect-label">预选图标</span>
+              <IconPreselectGrid
+                apps={apps}
+                selected={customIcon}
+                onSelect={(path) => setCustomIcon(path)}
+              />
+            </div>
+            <div className="custom-form-row custom-form-actions">
+              {editingId && (
+                <button className="secondary-button" onClick={handleCancelEdit} disabled={addingCustom}>
+                  取消
+                </button>
+              )}
+              <button className="primary-button" onClick={handleSaveCustom} disabled={addingCustom}>
+                {addingCustom ? '保存中…' : editingId ? '保存' : '添加'}
+              </button>
+            </div>
+          </div>
+          {customApps.map((custom) => {
+            const isExported =
+              state?.exported.some((e) => e.desktop_file === custom.id) ?? false;
+            return (
+              <div
+                key={custom.id}
+                className={`app-item ${isExported ? 'exported' : ''}`}
+              >
+                <div className="app-icon">
+                  {/* 图标 = 容器内路径（经 server 拉取显示；缺失自动占位） */}
+                  <PinnedAppIcon id={custom.id} icon={custom.icon} size={28} />
+                </div>
+                <div className="app-info">
+                  <div className="app-name">{custom.name}</div>
+                  <div className="app-exec" title={custom.cmd}>{custom.cmd}</div>
+                </div>
+                <div className="app-actions">
+                  <Tooltip title="立即启动">
                     <button
-                      className="secondary-button"
+                      className="secondary-button icon-only"
+                      onClick={() => handleLaunch(custom.id, custom.name)}
+                      disabled={launchingId === custom.id}
+                    >
+                      <PlayCircleOutlined />
+                    </button>
+                  </Tooltip>
+                  <Tooltip title={isPinned(custom.id) ? '取消收藏' : '收藏到工具栏'}>
+                    <button
+                      className={`secondary-button icon-only ${isPinned(custom.id) ? 'pinned' : ''}`}
                       onClick={() =>
-                        setExpandedContent(expandedContent === app.desktop_file ? null : app.desktop_file)
+                        handlePinToggle(
+                          { id: custom.id, name: custom.name, cmd: custom.cmd, icon: custom.icon },
+                          !isPinned(custom.id),
+                        )
                       }
                     >
-                      {expandedContent === app.desktop_file ? '收起内容' : '查看 .desktop'}
+                      {isPinned(custom.id) ? <PushpinFilled /> : <PushpinOutlined />}
                     </button>
-                    <button
-                      className="secondary-button"
-                      onClick={() => handleRevoke(app.id)}
-                    >
+                  </Tooltip>
+                  {!isExported && (
+                    <button className="secondary-button" onClick={() => handleExportCustom(custom)}>
+                      导出
+                    </button>
+                  )}
+                  {isExported && (
+                    <button className="secondary-button" onClick={() => handleRevoke(custom.id)}>
                       撤销
                     </button>
-                  </>
-                ) : (
-                  <button className="secondary-button" onClick={() => handleExportOne(app)}>
-                    导出
-                  </button>
-                )}
-                <span className="app-autostart">
-                  <Tooltip title="容器启动时自动拉起">
-                    <Switch
-                      checked={autoStart}
-                      onChange={(v) => handleAutoStart(app.desktop_file, app.name, app.exec, v)}
-                    />
+                  )}
+                  <Tooltip title="编辑名称/命令">
+                    <button
+                      className="secondary-button icon-only"
+                      onClick={() => handleEditCustom(custom)}
+                    >
+                      <EditOutlined />
+                    </button>
                   </Tooltip>
-                  <span className="app-autostart-label">自启</span>
-                </span>
+                  <Tooltip title="更换图标（宿主机/容器）">
+                    <button
+                      className="secondary-button icon-only"
+                      onClick={() => setIconPickerFor(custom.id)}
+                    >
+                      <PictureOutlined />
+                    </button>
+                  </Tooltip>
+                  <button
+                    className="secondary-button danger"
+                    onClick={() => handleRemoveCustom(custom.id)}
+                  >
+                    删除
+                  </button>
+                  <span className="app-autostart">
+                    <Tooltip title="容器启动时自动拉起">
+                      <Switch
+                        checked={custom.auto_start}
+                        onChange={(v) => handleAutoStart(custom.id, custom.name, custom.cmd, v)}
+                      />
+                    </Tooltip>
+                    <span className="app-autostart-label">自启</span>
+                  </span>
+                </div>
               </div>
+            );
+          })}
+        </div>
+
+        <div className="apps-list">
+          {apps.map((app) => {
+            const isExported =
+              state?.exported.some((e) => e.desktop_file === app.desktop_file) ?? false;
+            const autoStart = autoStartOf(app.desktop_file);
+
+            return (
+              <div
+                key={app.desktop_file}
+                className={`app-item ${isExported ? 'exported' : ''}`}
+              >
+                <div className="app-icon">
+                  {/* 容器内图标：经 server（socket）拉取显示，不走宿主文件系统 */}
+                  <AppIcon path={app.icon_path} />
+                </div>
+                <div className="app-info">
+                  <div className="app-name">{app.name}</div>
+                  {app.comment && (
+                    <div className="app-comment">{app.comment}</div>
+                  )}
+                  <div className="app-exec" title={app.exec}>{app.exec}</div>
+                  <div className="app-desktop-file">{app.desktop_file}</div>
+                </div>
+                <div className="app-actions">
+                  <Tooltip title="立即启动">
+                    <button
+                      className="secondary-button icon-only"
+                      onClick={() => handleLaunch(app.id, app.name)}
+                      disabled={launchingId === app.desktop_file}
+                    >
+                      <PlayCircleOutlined />
+                    </button>
+                  </Tooltip>
+                  <Tooltip title={isPinned(app.desktop_file) ? '取消收藏' : '收藏到工具栏'}>
+                    <button
+                      className={`secondary-button icon-only ${isPinned(app.desktop_file) ? 'pinned' : ''}`}
+                      onClick={() =>
+                        handlePinToggle(
+                          { id: app.desktop_file, name: app.name, cmd: app.exec, icon: app.icon_path },
+                          !isPinned(app.desktop_file),
+                        )
+                      }
+                    >
+                      {isPinned(app.desktop_file) ? <PushpinFilled /> : <PushpinOutlined />}
+                    </button>
+                  </Tooltip>
+                  {isExported ? (
+                    <>
+                      <button
+                        className="secondary-button"
+                        onClick={() =>
+                          setExpandedContent(expandedContent === app.desktop_file ? null : app.desktop_file)
+                        }
+                      >
+                        {expandedContent === app.desktop_file ? '收起内容' : '查看 .desktop'}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        onClick={() => handleRevoke(app.id)}
+                      >
+                        撤销
+                      </button>
+                    </>
+                  ) : (
+                    <button className="secondary-button" onClick={() => handleExportOne(app)}>
+                      导出
+                    </button>
+                  )}
+                  <span className="app-autostart">
+                    <Tooltip title="容器启动时自动拉起">
+                      <Switch
+                        checked={autoStart}
+                        onChange={(v) => handleAutoStart(app.desktop_file, app.name, app.exec, v)}
+                      />
+                    </Tooltip>
+                    <span className="app-autostart-label">自启</span>
+                  </span>
+                </div>
+              </div>
+            );
+          })}
+          {apps.length === 0 && (
+            <div className="empty-message">
+              No desktop applications found in container
             </div>
-          );
-        })}
-        {apps.length === 0 && (
-          <div className="empty-message">
-            No desktop applications found in container
-          </div>
-        )}
-      </div>
+          )}
+        </div>
       </section>
 
       {expandedContent && (

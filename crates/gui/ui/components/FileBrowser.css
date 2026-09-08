@@ -31,7 +31,6 @@
   color: #cdd6f4;
   padding: 0.8rem;
   font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
-  font-size: 0.85rem;
   line-height: 1.6;
   tab-size: 4;
 }
@@ -59,7 +58,7 @@
 }
 
 .import-progress-file {
-  font-size: 0.75rem;
+  font-size: var(--fs-sm);
   color: #a6adc8;
   white-space: nowrap;
   overflow: hidden;
@@ -82,7 +81,6 @@
 
 .file-editor-cm .cm-editor {
   height: 100%;
-  font-size: 0.85rem;
 }
 
 .file-editor-cm .cm-scroller {

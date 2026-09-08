@@ -7,9 +7,8 @@
 
 .storage-health-banner.dismissed {
   margin: 6px 16px 0;
-  font-size: 12px;
+  font-size: var(--fs-sm);
 }
 
 .storage-health-message {
-  font-size: 13px;
 }
