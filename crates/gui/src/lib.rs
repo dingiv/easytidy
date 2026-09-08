@@ -127,6 +127,12 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::desktop_icons::desktop_icons_pick,
             commands::desktop_icons::desktop_icons_set_icon,
             commands::desktop_icons::host_file_b64,
+            // 存储健康（docs/18 道路二：诊断/一键修复/横幅忽略标记）
+            commands::storage_health::storage_health_diagnose,
+            commands::storage_health::storage_health_fix,
+            commands::storage_health::storage_health_dismissed,
+            commands::storage_health::storage_health_dismiss,
+            commands::storage_health::storage_health_reset_dismiss,
             // 配置管理器（单实例 GUI：get/apply）
             commands::config::get_container_config,
             commands::config::apply_container_config,

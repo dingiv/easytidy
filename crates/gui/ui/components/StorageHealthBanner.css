@@ -1,0 +1,15 @@
+// 存储健康横幅（MasterView 顶部）
+
+.storage-health-banner {
+  margin: 8px 12px 0;
+  border-radius: 8px;
+}
+
+.storage-health-banner.dismissed {
+  margin: 6px 16px 0;
+  font-size: 12px;
+}
+
+.storage-health-message {
+  font-size: 13px;
+}
