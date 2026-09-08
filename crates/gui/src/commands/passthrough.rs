@@ -861,32 +861,39 @@ pub async fn passthrough_export(
             icon_attr = easytidy_core::desktop::ensure_gui_icon();
         }
     } else if let Some(icon_path) = app.icon_path.as_ref() {
-        if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
-            if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
-                if std::fs::create_dir_all(&icons_dir).is_ok() {
-                    // 图标缓存按应用 id 命名（与 .desktop 文件命名一致；id 稳定）
-                    let safe: String = app
-                        .id
-                        .chars()
-                        .map(|c| {
-                            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                                c
-                            } else {
-                                '-'
-                            }
-                        })
-                        .collect();
-                    let icon_file = icons_dir.join(format!("easytidy-pt-{container}-{safe}.png"));
-                    // 品牌化合成:208px 内容 + 天蓝→深蓝 45° 渐变圆角边框 +
-                    // 右下角 easytidy 水印(96px);合成失败回退原始图标
-                    let composed =
-                        easytidy_core::icon::compose_app_icon(&icon_data, EASYTIDY_BRAND_ICON);
-                    let bytes = composed.unwrap_or(icon_data);
-                    if std::fs::write(&icon_file, &bytes).is_ok() {
-                        icon_attr = Some(icon_file.to_string_lossy().into_owned());
+        if icon_path.starts_with('/') {
+            if let Ok(icon_data) = fetch_container_file(sess, icon_path).await {
+                if let Ok(icons_dir) = easytidy_core::desktop::passthrough_icon_dir() {
+                    if std::fs::create_dir_all(&icons_dir).is_ok() {
+                        // 图标缓存按应用 id 命名（与 .desktop 文件命名一致；id 稳定）
+                        let safe: String = app
+                            .id
+                            .chars()
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                                    c
+                                } else {
+                                    '-'
+                                }
+                            })
+                            .collect();
+                        let icon_file = icons_dir.join(format!("easytidy-pt-{container}-{safe}.png"));
+                        // 品牌化合成:208px 内容 + 天蓝→深蓝 45° 渐变圆角边框 +
+                        // 右下角 easytidy 水印(96px);合成失败回退原始图标
+                        let composed =
+                            easytidy_core::icon::compose_app_icon(&icon_data, EASYTIDY_BRAND_ICON);
+                        let bytes = composed.unwrap_or(icon_data);
+                        if std::fs::write(&icon_file, &bytes).is_ok() {
+                            icon_attr = Some(icon_file.to_string_lossy().into_owned());
+                        }
                     }
                 }
             }
+        } else {
+            // 主题图标名（org.gnome.Screenshot / printer / …）：无文件可拉。
+            // 宿主与容器共用同一图标主题（容器挂载宿主 icons），直接写名字，
+            // 桌面环境按主题解析（避免导出后图标缺失）。
+            icon_attr = Some(icon_path.clone());
         }
     }
 

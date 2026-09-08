@@ -8,33 +8,50 @@ import { invoke } from '@tauri-apps/api/core';
 import { mimeForPath } from './mime';
 
 interface AppIconProps {
-  /** 容器内图标路径（apps_list.icon_path） */
+  /** 容器内图标路径（apps_list.icon_path）；.desktop 的 Icon= 也可能是
+   *  freedesktop 主题名（org.gnome.Screenshot / printer 等，无对应文件） */
   path?: string | null;
   size?: number;
 }
 
-/** 容器内应用图标（经 server fs.read 分块拉取；加载失败回退占位符） */
+/** 路径→data: URI 缓存（列表刷新 / tab 切换重挂载不重复拉取） */
+const iconCache = new Map<string, string>();
+
+/** 容器内应用图标（经 server fs.read 分块拉取；加载失败回退占位符）。
+ *  仅绝对路径会拉取；主题图标名无对应文件（server fs.read 必 ENOENT），
+ *  不发请求直接占位（避免 op_failed 告警风暴）。 */
 export function AppIcon({ path, size = 28 }: AppIconProps) {
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
+  const [src, setSrc] = useState<string | null>(() =>
+    path && path.startsWith('/') ? iconCache.get(path) ?? null : null,
+  );
+  const [failed, setFailed] = useState(!path || !path.startsWith('/'));
 
   useEffect(() => {
-    let cancelled = false;
-    setSrc(null);
-    setFailed(false);
-    if (!path) {
+    if (!path || !path.startsWith('/')) {
+      // 主题图标名 / 空：无文件可拉，占位
+      setSrc(null);
       setFailed(true);
       return;
     }
+    let cancelled = false;
+    const cached = iconCache.get(path);
+    if (cached) {
+      setSrc(cached);
+      setFailed(false);
+      return;
+    }
+    setSrc(null);
+    setFailed(false);
     invoke<string>('fetch_file_b64', { path })
       .then((b64) => {
-        if (!cancelled) setSrc(`data:${mimeForPath(path)};base64,${b64}`);
+        if (cancelled) return;
+        const uri = `data:${mimeForPath(path)};base64,${b64}`;
+        iconCache.set(path, uri);
+        setSrc(uri);
       })
-      .catch((err: any) => {
-        if (!cancelled) {
-          console.error('AppIcon fetch failed:', path, err);
-          setFailed(true);
-        }
+      .catch(() => {
+        // 图标缺失是常见情况（server 侧已记 op_failed 日志），不再重复 error
+        if (!cancelled) setFailed(true);
       });
     return () => {
       cancelled = true;
