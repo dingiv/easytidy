@@ -9,3 +9,6 @@ tsconfig.tsbuildinfo
 
 # dev 期宿主数据目录（dev/prod 分离：dev → 源码树内，prod → ~/.easytidy）
 crates/core/data/
+
+# tauri externalBin 打包暂存（beforeBuildCommand 生成，带 target-triple 后缀）
+crates/gui/binaries/
