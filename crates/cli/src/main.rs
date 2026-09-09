@@ -13,22 +13,22 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+
+mod conn;
+
 use crossterm::terminal;
 use futures::{SinkExt, StreamExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::AsyncWriteExt;
-use tokio::net::UnixStream;
-use tokio_util::codec::Framed;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::models::{ContainerConfig, MountConfig, NetworkMode};
 use easytidy_core::podman::Podman;
 use easytidy_protocol::ops::{PtyExited, PtyOpen, PtyOpenResp, PtyResize};
-use easytidy_protocol::{Frame, FrameCodec, Message, MsgKind, PROTOCOL_VERSION};
-use easytidy_protocol::{Handshake, HandshakeAck};
+use easytidy_protocol::{Frame, Message, MsgKind};
 
 #[derive(Parser)]
 #[command(name = "easytidy")]
@@ -1011,8 +1011,14 @@ async fn ensure_running(podman: &Podman, name: &str) -> Result<()> {
 /// 取代旧的固定 sleep(2s)——容器刚 start 时 server 未 bind 会连接失败）。
 async fn wait_socket_ready(name: &str) -> Result<PathBuf> {
     let socket = easytidy_core::host_socket_path(name)?;
+    // 判就绪必须试连，不能只看文件存在：容器停止/podman.service 重启后
+    // 旧 socket 文件会残留在磁盘上（存在但无监听），曾致首次启动必败
+    //（exists → 立即返回 → connect 被拒 Connection refused，而 server
+    // 稍后才真正 listen）。连接成功即就绪（连接随即关闭，无害）。
     for _ in 0..40 {
-        if socket.exists() {
+        if socket.exists()
+            && tokio::net::UnixStream::connect(&socket).await.is_ok()
+        {
             return Ok(socket);
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -1026,107 +1032,13 @@ async fn ensure_running_and_ready(podman: &Podman, name: &str) -> Result<PathBuf
     wait_socket_ready(name).await
 }
 
-/// 连接容器 server socket + 握手，返回已建帧的双向流。
-///
-/// [`forward_pty_command`]（PTY 转发）与 [`send_json_op`]（one-shot JSON op）共用。
-async fn connect_server(socket: &Path) -> Result<Framed<UnixStream, FrameCodec>> {
-    let stream = UnixStream::connect(socket)
-        .await
-        .with_context(|| format!("连接 socket 失败（容器可能未就绪）：{}", socket.display()))?;
-
-    let codec = FrameCodec::new();
-    let mut framed = Framed::new(stream, codec);
-
-    // 握手
-    let handshake = Handshake {
-        v: PROTOCOL_VERSION,
-        client: "easytidy-cli".to_string(),
-        wants: vec!["pty".to_string(), "apps".to_string()],
-    };
-    let handshake_msg = Message {
-        id: 1,
-        kind: MsgKind::Req,
-        op: "hello".to_string(),
-        payload: serde_json::to_value(handshake)?,
-        err: None,
-    };
-    framed
-        .send(Frame::Json(handshake_msg))
-        .await
-        .context("发送握手失败")?;
-
-    let ack_frame = framed
-        .next()
-        .await
-        .context("接收握手确认失败")?
-        .context("握手确认帧为空")?;
-
-    let ack_msg = match ack_frame {
-        Frame::Json(msg) => msg,
-        Frame::Raw { .. } => bail!("握手响应应为 JSON 帧"),
-    };
-
-    if ack_msg.kind != MsgKind::Resp || ack_msg.op != "hello" {
-        bail!("握手响应格式错误");
-    }
-
-    let ack: HandshakeAck = serde_json::from_value(ack_msg.payload).context("解析握手确认失败")?;
-
-    debug!("握手成功：server={}, v={}", ack.server, ack.v);
-
-    if ack.v != PROTOCOL_VERSION {
-        bail!(
-            "协议版本不匹配：客户端={}，服务端={}",
-            PROTOCOL_VERSION,
-            ack.v
-        );
-    }
-
-    Ok(framed)
-}
-
-/// one-shot JSON op：发请求 → 等同 id 响应 → 返回 payload（err 响应先报错）。
-/// 用于无流式交互的查询/拉起类 op（如 apps.launch_app）。
-async fn send_json_op(
-    mut framed: Framed<UnixStream, FrameCodec>,
-    op: &str,
-    req: &impl serde::Serialize,
-) -> Result<serde_json::Value> {
-    let msg = Message {
-        id: 2,
-        kind: MsgKind::Req,
-        op: op.to_string(),
-        payload: serde_json::to_value(req)?,
-        err: None,
-    };
-    framed
-        .send(Frame::Json(msg))
-        .await
-        .with_context(|| format!("发送 {op} 失败"))?;
-
-    let resp_frame = framed
-        .next()
-        .await
-        .with_context(|| format!("接收 {op} 响应失败"))?
-        .with_context(|| format!("{op} 响应帧为空"))?;
-
-    let resp_msg = match resp_frame {
-        Frame::Json(msg) => msg,
-        Frame::Raw { .. } => bail!("{op} 响应应为 JSON 帧（收到 Raw 帧）"),
-    };
-    // 错误响应优先检查（payload=null，直接 from_value 会报解析错误掩盖真实原因）
-    if let Some(err) = &resp_msg.err {
-        bail!("{op} 失败：{} - {}", err.code, err.message);
-    }
-    Ok(resp_msg.payload)
-}
 
 /// 连接容器 server socket → hello → pty.open → 双向流式转发，
 /// 阻塞至应用退出，返回其退出码（server 侧有损 0/-1，见 server pty.rs）。
 ///
 /// [`cmd_run`]（非 root 带命令）与 [`cmd_open`]（passthrough 快捷方式）共用。
 async fn forward_pty_command(socket: &Path, command: Vec<String>) -> Result<i32> {
-    let mut framed = connect_server(socket).await?;
+    let mut framed = conn::connect_server(socket, "easytidy-cli").await?;
 
     // 获取当前终端尺寸；无 tty 场景（桌面图标/CRON 启动，ioctl 返回
     // EAGAIN——journalctl 实测）回退 80×24，不影响命令执行
@@ -1474,15 +1386,28 @@ async fn cmd_open(
             info!("silent_boot：仅确保容器 {container} 运行（不弹 GUI）");
             return Ok(0);
         }
-        // 非静默：拉起 Worker GUI（detached），复用 cmd_boot 的二进制探测
-        let gui_bin =
-            gui_binary_path().ok_or_else(|| anyhow::anyhow!("找不到 easytidy-gui 可执行文件"))?;
-        std::process::Command::new(&gui_bin)
-            .arg("--container")
-            .arg(&container)
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("拉起 Worker GUI 失败：{e}"))?;
-        info!("已拉起 Worker GUI（{container}）");
+        // 非静默：拉起 Worker GUI（detached），复用 cmd_boot 的二进制探测。
+        // 找不到 Worker GUI：**降级保活**——容器已拉起，桌面点击至少生效；
+        // 弹终端可见地报告缺失原因（直接 error 会在桌面启动场景下无声失败：
+        // 用户看不到 stderr，曾致「点了没反应」）。重新导出前需重装/补齐
+        // easytidy-gui（与 CLI 同目录或 PATH）。
+        match gui_binary_path() {
+            Some(gui_bin) => {
+                std::process::Command::new(&gui_bin)
+                    .arg("--container")
+                    .arg(&container)
+                    .spawn()
+                    .map_err(|e| anyhow::anyhow!("拉起 Worker GUI 失败：{e}"))?;
+                info!("已拉起 Worker GUI（{container}）");
+            }
+            None => {
+                warn!("找不到 easytidy-gui 可执行文件：容器 {container} 已保活，但无法打开管理窗口");
+                show_error_in_terminal(
+                    "找不到 easytidy-gui 可执行文件（Worker GUI 未安装或不在 CLI 同目录/PATH）。\n\n\
+                     容器已启动；请补齐 easytidy-gui 后重试，或用 easytidy GUI（Master）打开。",
+                );
+            }
+        }
         return Ok(0);
     }
 
@@ -1518,10 +1443,10 @@ async fn cmd_launch(container: String, id_or_name: String) -> Result<i32> {
     }
 
     let socket = ensure_running_and_ready(&podman, &container).await?;
-    let framed = connect_server(&socket).await?;
+    let framed = conn::connect_server(&socket, "easytidy-cli").await?;
 
     let req = easytidy_protocol::ops::AppLaunchApp { id_or_name };
-    let payload = send_json_op(framed, "apps.launch_app", &req).await?;
+    let payload = conn::send_json_op(framed, "apps.launch_app", &req).await?;
     let resp: easytidy_protocol::ops::AppLaunchAppResp =
         serde_json::from_value(payload).context("解析 apps.launch_app 响应失败")?;
 

@@ -90,6 +90,7 @@ fn make_fake_bins(dir: &std::path::Path) -> easytidy_core::ContainerBins {
     easytidy_core::ContainerBins {
         server: fake_server,
         dock: fake_dock,
+        ets: None, // e2e 不覆盖 ets 挂载（可选分发链）
     }
 }
 
