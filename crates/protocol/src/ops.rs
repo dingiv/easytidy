@@ -637,6 +637,33 @@ pub struct ServerEnvResp {
 }
 
 // ============================================================================
+// ui: 客户端 UI 联动族（server 主动推事件到 GUI）
+// ============================================================================
+
+/// 请求在 GUI 中打开文件编辑器（`ui.edit`；容器内 `ets edit <path>` 发）。
+///
+/// server 行为：找存活的 GUI 连接（client == "easytidy-gui" 且握手 wants 含
+/// "events"）→ 向其推同 op 的 [`MsgKind::Evt`] 帧（payload = 本结构体）→
+/// 回 [`UiEditResp`] {routed: true}；无 GUI 连接 → {routed: false}，调用方
+/// （ets）自行回退本地编辑器。
+///
+/// `path` 是**容器内**路径（~ 由调用方展开后传绝对路径）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiEdit {
+    /// 容器内文件绝对路径
+    pub path: String,
+}
+
+/// UiEdit 响应：是否已路由到 GUI
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiEditResp {
+    /// true = 已推事件到 GUI 连接
+    pub routed: bool,
+    /// 路由目标（"gui" | "none"）
+    pub target: String,
+}
+
+// ============================================================================
 // 测试
 // ============================================================================
 
@@ -823,6 +850,17 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         let decoded: ServerEnvResp = serde_json::from_str(&json).unwrap();
         assert_eq!(resp, decoded);
+    }
+
+    #[test]
+    fn test_ui_edit_serde() {
+        let op = UiEdit { path: "/home/div/.bashrc".to_string() };
+        let json = serde_json::to_string(&op).unwrap();
+        assert_eq!(serde_json::from_str::<UiEdit>(&json).unwrap(), op);
+
+        let resp = UiEditResp { routed: true, target: "gui".to_string() };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert_eq!(serde_json::from_str::<UiEditResp>(&json).unwrap(), resp);
     }
 
     #[test]
