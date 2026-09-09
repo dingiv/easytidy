@@ -334,13 +334,31 @@ pub(crate) async fn spawn_managed_process(
     // （su 要求调用方 root，新模型下不存在）。命令串经 shell 执行
     // （entry/passthrough 命令含 `;`/引号/重定向，裸 split_whitespace
     // 直 exec 本来就是错的）。
-    let mut child = TokioCommand::new("sh")
-        .arg("-c")
+    //
+    // **登录 shell**（bash -l）：托管进程的环境须与终端一致——dev 工具链
+    // （rustup/nvm/conda…）的 PATH 都在 /etc/profile、~/.profile 里，裸
+    // sh -c 的 PATH 只有系统基础目录，cargo/node 等直接找不到（实测
+    // desk-pilot dev-up.sh 起不来）。bash 不存在时回退 sh -c（不加载登录
+    // env；嵌入式容器场景）。
+    // 注意：~/.bashrc 的非交互守卫仍会跳过 bashrc 内的 PATH 初始化——
+    // 工具链装在 .bashrc 里的场景，用户应在脚本里自行 source 或改用 .profile。
+    let use_bash = std::path::Path::new("/bin/bash").exists();
+    let mut spawn_cmd = if use_bash {
+        let mut c = TokioCommand::new("bash");
+        c.arg("-l").arg("-c");
+        c
+    } else {
+        let mut c = TokioCommand::new("sh");
+        c.arg("-c");
+        c
+    };
+    let shell_desc = if use_bash { "bash -lc" } else { "sh -c" };
+    let mut child = spawn_cmd
         .arg(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("Failed to spawn command (sh -c)")?;
+        .with_context(|| format!("Failed to spawn command ({shell_desc})"))?;
 
     let pid = child.id().unwrap();
 

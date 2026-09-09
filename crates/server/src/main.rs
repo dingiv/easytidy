@@ -83,7 +83,7 @@ where
 use connection::handle_connection;
 use services::apps::child_prune_task;
 use services::lifecycle::perform_graceful_shutdown;
-use setup::{ensure_xauthority, finalize_injected_env, fixup_xdg_data_dirs, setup_user_identity};
+use setup::{ensure_xauthority, finalize_injected_env, fixup_xdg_data_dirs, setup_user_identity, xauthority_watch_task};
 use state::ServerState;
 
 #[derive(Parser, Debug)]
@@ -154,10 +154,23 @@ async fn main() -> Result<()> {
     // 默认目录（/usr/local/share:/usr/share，glib 默认；缺失路径无害）。
     let xdg_fixed = fixup_xdg_data_dirs();
 
-    // XAUTHORITY server 内置自动注入：路径含随机后缀,每次会话都变,不让用户配——
-    // 自动探 /run/user/$uid 下 mutter-Xwaylandauth.* 或 xauth_*,覆盖进程 env
-    // (忽略 podman create 时可能注入的旧值)。
-    let xauth = ensure_xauthority();
+    // XAUTHORITY server 内置自动注入：真实 auth 文件路径含随机后缀,每次会话都变,
+    // 不让用户配——探到后维护稳定软链 <socket 目录>/xauthority,进程 env 统一
+    // 覆盖为稳定路径（与 gui-passthrough.yaml 创建期注入值一致,全系统一个值）。
+    // socket 目录（容器内 /run/easytidy）rw bind-mount,软链对 podman exec 等
+    // 容器内所有进程同样生效。
+    let auth_dir = args
+        .socket
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let xauth = ensure_xauthority(&auth_dir);
+
+    // XAUTHORITY 重探任务：会话轮换（auth 文件换随机名/注销重登）时重链稳定路径
+    if xauth.is_some() {
+        tokio::spawn(xauthority_watch_task(auth_dir));
+    }
 
     // 汇总 server 运行时注入的 env（配置管理器「easytidy 注入」行来源）——记录
     // 确实发生的修正/注入，供 `server.env` 查询。
@@ -173,6 +186,7 @@ async fn main() -> Result<()> {
         children: Arc::new(RwLock::new(HashMap::new())),
         next_stream_id: Arc::new(AtomicU32::new(1)),
         next_conn_id: Arc::new(AtomicU64::new(1)),
+        conns: Arc::new(RwLock::new(HashMap::new())),
         next_msg_id: Arc::new(AtomicU32::new(1)),
         shutting_down: Arc::new(AtomicBool::new(false)),
     });
@@ -279,6 +293,12 @@ async fn run_server(
         .with_context(|| format!("Failed to bind socket: {}", socket_path.display()))?;
 
     // Set socket permissions
+    // 0o777 是**刻意的**：宿主 GUI/CLI 经 bind-mount 的 $XDG_RUNTIME_DIR/easytidy/<name>/
+    // server.sock 连接。非 keep-id 容器的 uid 落在宿主 subuid 段（如 100999），
+    // socket 文件在宿主侧归 subuid 所有——收窄到 0o600/0o660 会让宿主登录用户
+    // 连不上（整个 GUI 失效）。安全性由外层路径保底：目录在用户私有
+    // XDG_RUNTIME_DIR（0700）下，宿主其他用户不可达；容器内多用户场景下
+    // 任意用户可连 server（以容器默认用户权限执行操作），当前模型可接受。
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o777))
         .with_context(|| format!("Failed to set socket permissions: {}", socket_path.display()))?;
 

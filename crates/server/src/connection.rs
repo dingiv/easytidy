@@ -56,12 +56,15 @@ pub(crate) async fn handle_connection(
         &session_id,
     )
     .await;
+    // 注销连接登记（ui.edit 事件路由不再命中本连接）
+    state.conns.write().await.remove(&conn_token);
     close_conn_ptys(&state, &conn_ptys, conn_token).await;
     result
 }
 
 // FIXME: 该函数是无意义的拆分, 合并到 handle_conntion 中
 /// 单连接主循环（见 [`handle_connection`]：退出后统一清理 PTY 会话）。
+#[allow(clippy::too_many_arguments)] // 拆分过渡态，待合并回 handle_connection
 pub(crate) async fn connection_loop(
     framed: &mut Framed<UnixStream, easytidy_protocol::frame::FrameCodec>,
     state: &Arc<ServerState>,

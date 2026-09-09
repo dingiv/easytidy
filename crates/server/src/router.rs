@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use easytidy_protocol::{
     Frame,
     Handshake, HandshakeAck, Message, MsgKind, ServerEnvItem, ServerEnvResp, ServerInfoResp,
-    PROTOCOL_VERSION, RpcError,
+    PROTOCOL_VERSION, RpcError, UiEdit, UiEditResp,
 };
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -88,7 +88,10 @@ pub(crate) async fn dispatch(
     }
     match (msg.kind, msg.op.as_str()) {
         (MsgKind::Req, "hello") => {
-            Ok(Some(handle_handshake(msg, handshake_done, session_id).await?))
+            Ok(Some(
+                handle_handshake(msg, state, handshake_done, event_tx, conn_token, session_id)
+                    .await?,
+            ))
         }
         (MsgKind::Req, "ping") => {
             Ok(Some(handle_ping(msg).await?))
@@ -171,6 +174,9 @@ pub(crate) async fn dispatch(
         (MsgKind::Req, "lifecycle.shutdown") => {
             Ok(Some(handle_lifecycle_shutdown(msg, state).await?))
         }
+        (MsgKind::Req, "ui.edit") => {
+            Ok(Some(handle_ui_edit(msg, state).await?))
+        }
         (MsgKind::Req, op) => {
             warn!("Unknown operation: {}", op);
             Ok(Some(Frame::Json(Message {
@@ -191,10 +197,13 @@ pub(crate) async fn dispatch(
     }
 }
 
-/// Handle handshake
+/// Handle handshake（并登记连接——ui.edit 事件路由的查找源）
 pub(crate) async fn handle_handshake(
     msg: Message,
+    state: &Arc<ServerState>,
     handshake_done: &Arc<AtomicBool>,
+    event_tx: mpsc::UnboundedSender<Frame>,
+    conn_token: u64,
     session_id: &str,
 ) -> Result<Frame> {
     let hs: Handshake = serde_json::from_value(msg.payload)
@@ -219,6 +228,17 @@ pub(crate) async fn handle_handshake(
     }
 
     handshake_done.store(true, Ordering::SeqCst);
+
+    // 登记连接（client/wants + 发送通道）：ui.edit 等事件据此找 GUI 连接推送；
+    // 连接退出时由 handle_connection 注销。
+    state.conns.write().await.insert(
+        conn_token,
+        Arc::new(crate::state::ConnInfo {
+            client: hs.client.clone(),
+            wants: hs.wants.clone(),
+            events: event_tx.clone(),
+        }),
+    );
 
     let ack = HandshakeAck {
         v: PROTOCOL_VERSION,
@@ -285,4 +305,64 @@ pub(crate) async fn handle_server_env(msg: Message) -> Result<Frame> {
         payload: serde_json::to_value(ServerEnvResp { env })?,
         err: None,
     }))
+}
+
+/// Handle ui.edit：把编辑请求事件推到存活的 GUI 连接。
+///
+/// GUI 连接 = client "easytidy-gui" 且握手 wants 含 "events"（新 GUI 共享
+/// socket 声明；PTY 专用连接不声明、不会收到）。多 GUI 窗口 → 取 conn_token
+/// 最小（最先连接）的一个，避免多窗口重复开编辑器。无 GUI → routed:false，
+/// 调用方（容器内 ets）自行回退本地编辑器。
+pub(crate) async fn handle_ui_edit(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: UiEdit = serde_json::from_value(msg.payload).context("Failed to parse UiEdit")?;
+    if req.path.trim().is_empty() {
+        return Err(anyhow::anyhow!("ui.edit: path 不能为空"));
+    }
+
+    let conns = state.conns.read().await;
+    let target = conns
+        .iter()
+        .filter(|(_, c)| c.client == "easytidy-gui" && c.wants.iter().any(|w| w == "events"))
+        .min_by_key(|(token, _)| *token)
+        .map(|(_, c)| c.clone());
+    drop(conns);
+
+    match target {
+        Some(conn) => {
+            let evt = Frame::Json(Message {
+                id: state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64,
+                kind: MsgKind::Evt,
+                op: "ui.edit".to_string(),
+                payload: serde_json::to_value(&req)?,
+                err: None,
+            });
+            conn.events.send(evt).map_err(|e| {
+                anyhow::anyhow!("ui.edit: 向 GUI 推送事件失败（连接已断？）：{e}")
+            })?;
+            info!("ui.edit: 已推事件到 GUI 连接：{}", req.path);
+            Ok(Frame::Json(Message {
+                id: msg.id,
+                kind: MsgKind::Resp,
+                op: "ui.edit".to_string(),
+                payload: serde_json::to_value(UiEditResp {
+                    routed: true,
+                    target: "gui".to_string(),
+                })?,
+                err: None,
+            }))
+        }
+        None => {
+            debug!("ui.edit: 无存活 GUI 连接，回 none（调用方回退本地编辑器）");
+            Ok(Frame::Json(Message {
+                id: msg.id,
+                kind: MsgKind::Resp,
+                op: "ui.edit".to_string(),
+                payload: serde_json::to_value(UiEditResp {
+                    routed: false,
+                    target: "none".to_string(),
+                })?,
+                err: None,
+            }))
+        }
+    }
 }

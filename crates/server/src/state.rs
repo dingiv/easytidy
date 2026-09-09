@@ -7,6 +7,8 @@ use std::sync::Arc;
 use portable_pty::MasterPty;
 use tokio::sync::{mpsc, RwLock};
 
+use easytidy_protocol::Frame;
+
 /// Server state（连接/服务共享，经 Arc 传递）。
 pub(crate) struct ServerState {
     /// PTY sessions: stream_id -> session
@@ -27,11 +29,26 @@ pub(crate) struct ServerState {
     /// Next connection token（PTY 订阅退订标识）
     pub(crate) next_conn_id: Arc<AtomicU64>,
 
+    /// 连接登记表（ui.edit 事件路由 / 客户端识别）：conn_token → ConnInfo。
+    /// 握手成功时登记、连接退出时注销（[`crate::connection::handle_connection`]）。
+    pub(crate) conns: Arc<RwLock<HashMap<u64, Arc<ConnInfo>>>>,
+
     /// Next message ID
     pub(crate) next_msg_id: Arc<AtomicU32>,
 
     /// Shutdown flag
     pub(crate) shutting_down: Arc<AtomicBool>,
+}
+
+/// 单条连接的信息（握手时登记；ui.edit 据此找 GUI 连接推事件）
+#[derive(Clone)]
+pub(crate) struct ConnInfo {
+    /// 握手 client 标识（"easytidy-gui" / "easytidy-cli" / "ets" …）
+    pub client: String,
+    /// 客户端请求的能力列表（含 "events" = 订阅 server 主动推送事件）
+    pub wants: Vec<String>,
+    /// 本连接发送通道（server → 客户端事件帧）
+    pub events: mpsc::UnboundedSender<Frame>,
 }
 
 /// PTY session
@@ -123,6 +140,7 @@ impl Clone for ServerState {
             children: self.children.clone(),
             next_stream_id: self.next_stream_id.clone(),
             next_conn_id: self.next_conn_id.clone(),
+            conns: self.conns.clone(),
             next_msg_id: self.next_msg_id.clone(),
             shutting_down: self.shutting_down.clone(),
         }
