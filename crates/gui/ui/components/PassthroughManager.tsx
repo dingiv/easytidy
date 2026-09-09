@@ -6,7 +6,7 @@
 import { useState, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
-import { App as AntApp, Input, Modal, Radio, Switch, Tooltip } from 'antd';
+import { App as AntApp, Radio, Switch, Tooltip } from 'antd';
 import {
   DownloadOutlined,
   EditOutlined,
@@ -110,31 +110,38 @@ export function PassthroughManager() {
     }
   };
 
-  // 导出显示名对话框（null = 关闭；确认后 onConfirm 执行实际导出）
-  const [exportNameModal, setExportNameModal] = useState<{
-    title: string;
-    placeholder: string;
-    onConfirm: (name: string) => void;
-  } | null>(null);
-  const [exportName, setExportName] = useState('');
 
-  const openExportNameModal = (
-    title: string,
-    initial: string,
-    placeholder: string,
-    onConfirm: (name: string) => void,
-  ) => {
-    setExportName(initial);
-    setExportNameModal({ title, placeholder, onConfirm });
-  };
-
-  /** 容器导出：加载当前入口图标（预览） */
-  const loadEntryIcon = async () => {
+  /** 容器导出：加载入口配置（显示名 + 图标源，存容器 config.json 由 server
+   *  维护）+ 图标预览。server 不可达时后端回退宿主 ConfigFile.icon。 */
+  const loadEntryConfig = async () => {
     try {
       setEntryIcon(await invoke<string>('container_entry_icon'));
     } catch (err: any) {
       console.error('container_entry_icon failed:', err);
     }
+    try {
+      const cfg = await invoke<{ name: string | null; icon: string | null }>(
+        'container_entry_config',
+      );
+      if (cfg.name) setEntryName(cfg.name);
+      if (cfg.icon) setEntryIconInput(cfg.icon);
+    } catch (err: any) {
+      console.error('container_entry_config failed:', err);
+    }
+  };
+
+  /** 容器导出：显示名变更同步到 server（blur 时；空 = 清除，恢复默认名） */
+  const syncEntryName = () => {
+    invoke('container_set_entry_name', { name: entryName.trim() || null }).catch((err) =>
+      console.error('container_set_entry_name failed:', err),
+    );
+  };
+
+  /** 容器导出：图标源路径变更同步到 server（blur 时；空 = 清除，恢复兒底） */
+  const syncEntryIconInput = () => {
+    invoke('container_set_entry_icon', { path: entryIconInput.trim() || null }).catch((err) =>
+      console.error('container_set_entry_icon failed:', err),
+    );
   };
 
   /** 容器导出：选择宿主图片作为图标源（原生文件浏览器选宿主图片 →
@@ -146,6 +153,10 @@ export function PassthroughManager() {
     try {
       const p = await invoke<string>('passthrough_pick_host_icon');
       setEntryIconInput(p);
+      // 选完立即同步到 server（不依赖 blur）
+      invoke('container_set_entry_icon', { path: p }).catch((err) =>
+        console.error('container_set_entry_icon failed:', err),
+      );
     } catch (err: any) {
       const msg = errMsg(err, '选择图标失败');
       if (!msg.includes('已取消')) setError(msg);
@@ -154,10 +165,10 @@ export function PassthroughManager() {
     }
   };
 
-  /** 容器导出：清除图标输入框（同时清除容器内登记的 entry_icon，恢复默认） */
+  /** 容器导出：清除图标输入框（同步清除容器内登记的 entry_icon，恢复兒底） */
   const clearEntryIcon = () => {
     setEntryIconInput('');
-    void loadEntryIcon();
+    void loadEntryConfig();
     void invoke('container_set_entry_icon', { path: null }).catch(() => {});
   };
 
@@ -187,16 +198,11 @@ export function PassthroughManager() {
 
   useEffect(() => {
     loadData();
-    void loadEntryIcon();
-    // 跨会话持久化：预填上次登记的入口图标源（容器内 config.json 的 entry_icon）
-    void invoke<string | null>('container_entry_icon_source')
-      .then((p) => {
-        if (p) setEntryIconInput(p);
-      })
-      .catch(() => {});
+    // 拉取入口配置（显示名 + 图标源，容器内 config.json 由 server 维护）预填 UI
+    void loadEntryConfig();
   }, []);
 
-  // 容器名已知后预填默认显示名（仅在用户未输入时）
+  // 容器名已知后预填默认显示名（仅在用户未输入且 server 无存档时）
   useEffect(() => {
     if (containerName) {
       setEntryName((cur) => (cur.trim() ? cur : `easytidy ${containerName}`));
@@ -284,23 +290,16 @@ export function PassthroughManager() {
     }
   };
 
-  /** 导出单个扫描应用（逐行导出，取代多选批量导出；导出时可指定桌面显示名） */
-  const handleExportOne = (app: AppInfo) => {
-    openExportNameModal(
-      `导出「${app.name}」`,
-      app.name,
-      `留空 = ${app.name}`,
-      async (name: string) => {
-        setError(null);
-        try {
-          await invoke('passthrough_export', { app, displayName: name.trim() || null });
-          await loadData();
-        } catch (err: any) {
-          setError(errMsg(err, 'Failed to export app'));
-          console.error('passthrough_export failed:', err);
-        }
-      },
-    );
+  /** 导出单个扫描应用（逐行导出；直接用应用名作桌面显示名，不弹窗） */
+  const handleExportOne = async (app: AppInfo) => {
+    setError(null);
+    try {
+      await invoke('passthrough_export', { app, displayName: null });
+      await loadData();
+    } catch (err: any) {
+      setError(errMsg(err, 'Failed to export app'));
+      console.error('passthrough_export failed:', err);
+    }
   };
 
   const handleRevoke = async (appId: string) => {
@@ -332,31 +331,24 @@ export function PassthroughManager() {
   };
 
   /** 导出自定义应用（构造 AppInfoFrontend 走现有导出流；
-   *  icon = 宿主 ~/.easytidy/icons 路径，export 时 Icon= 直接用；可指定桌面显示名） */
-  const handleExportCustom = (custom: PassthroughApp) => {
-    openExportNameModal(
-      `导出自定义应用「${custom.name}」`,
-      custom.name,
-      `留空 = ${custom.name}`,
-      async (name: string) => {
-        setError(null);
-        try {
-          const app: AppInfo = {
-            id: custom.id,
-            name: custom.name,
-            icon_path: custom.icon ?? '',
-            exec: custom.cmd,
-            desktop_file: custom.id,
-            startup_notify: false,
-          };
-          await invoke('passthrough_export', { app, displayName: name.trim() || null });
-          await loadData();
-        } catch (err: any) {
-          setError(errMsg(err, 'Failed to export custom app'));
-          console.error('passthrough_export (custom) failed:', err);
-        }
-      },
-    );
+   *  icon = 宿主 ~/.easytidy/icons 路径，export 时 Icon= 直接用；直接用应用名，不弹窗） */
+  const handleExportCustom = async (custom: PassthroughApp) => {
+    setError(null);
+    try {
+      const app: AppInfo = {
+        id: custom.id,
+        name: custom.name,
+        icon_path: custom.icon ?? '',
+        exec: custom.cmd,
+        desktop_file: custom.id,
+        startup_notify: false,
+      };
+      await invoke('passthrough_export', { app, displayName: null });
+      await loadData();
+    } catch (err: any) {
+      setError(errMsg(err, 'Failed to export custom app'));
+      console.error('passthrough_export (custom) failed:', err);
+    }
   };
 
   const handleSaveCustom = async () => {
@@ -457,6 +449,7 @@ export function PassthroughManager() {
             className="container-export-input"
             value={entryName}
             onChange={(e) => setEntryName(e.target.value)}
+            onBlur={syncEntryName}
             placeholder={containerName ? `easytidy ${containerName}` : 'easytidy <容器名>'}
             maxLength={64}
           />
@@ -469,6 +462,7 @@ export function PassthroughManager() {
                 className="container-export-input container-export-icon-input"
                 value={entryIconInput}
                 onChange={(e) => setEntryIconInput(e.target.value)}
+                onBlur={syncEntryIconInput}
                 placeholder="容器内图标路径（拖下方预选图标，或点「选择图标」从宿主选用并拷入容器）"
                 title="容器内路径（可拖入预选图标，或从宿主机选用后自动拷入容器）"
                 onDragOver={(e) => e.preventDefault()}
@@ -811,31 +805,6 @@ export function PassthroughManager() {
           onChanged={loadData}
         />
       )}
-
-      {/* 导出显示名（.desktop Name=；留空 = 默认名） */}
-      <Modal
-        open={exportNameModal !== null}
-        title={exportNameModal?.title}
-        okText="导出"
-        cancelText="取消"
-        onOk={() => {
-          const fn = exportNameModal?.onConfirm;
-          setExportNameModal(null);
-          void fn?.(exportName);
-        }}
-        onCancel={() => setExportNameModal(null)}
-      >
-        <p style={{ marginBottom: 8, fontSize: 13, color: 'rgba(0,0,0,0.65)' }}>
-          桌面/应用菜单中显示的名字（.desktop 的 Name=），留空使用默认名。
-        </p>
-        <Input
-          value={exportName}
-          onChange={(e) => setExportName(e.target.value)}
-          placeholder={exportNameModal?.placeholder}
-          allowClear
-          maxLength={64}
-        />
-      </Modal>
     </div>
   );
 }

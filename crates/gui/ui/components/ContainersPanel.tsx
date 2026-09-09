@@ -157,16 +157,6 @@ function ContainersPanelInner(
     }
   };
 
-  /** 打开容器控制台(Worker GUI) */
-  const handleOpen = async (env: EnvView) => {
-    try {
-      await invoke('open_container_window', { name: env.name });
-    } catch (err: any) {
-      setError(errMsg(err, '打开容器窗口失败'));
-      console.error('open_container_window failed:', err);
-    }
-  };
-
   /** 快照/重建统一动作：不询问用户确认，点击即执行。 */
   const handleAction = async (env: EnvView, key: string) => {
     // 记忆：下次下拉优先显示（置顶 + 标记）
@@ -427,15 +417,41 @@ function ContainersPanelInner(
                     ) : null}
                     {/* 控制台/重建依赖 easytidy server 或注册配置，未接管容器不适用；
                         快照仅 podman commit，不依赖注册配置，未接管容器同样可快照 */}
+                    {/* 控制台下拉：原控制台 / VS Code / 宿主终端 */}
                     {managed && (
-                      <Button
-                        size="small"
-                        icon={<ExportOutlined />}
-                        onClick={() => handleOpen(env)}
-                        title="打开容器控制台(Worker GUI)"
+                      <Dropdown
+                        trigger={['click']}
+                        menu={{
+                          items: [
+                            { key: 'console', label: '控制台（Web 终端）' },
+                            { key: 'vscode', label: 'VS Code 终端' },
+                            { key: 'terminal', label: '宿主终端' },
+                          ],
+                          onClick: async ({ key }) => {
+                            try {
+                              if (key === 'console') {
+                                await invoke('open_container_window', { name: env.name });
+                              } else if (key === 'vscode') {
+                                await invoke('open_container_vscode', { name: env.name });
+                              } else if (key === 'terminal') {
+                                await invoke('open_container_terminal', { name: env.name });
+                              }
+                            } catch (err: any) {
+                              setError(errMsg(err, '打开容器窗口失败'));
+                              console.error('open_container failed:', err);
+                            }
+                          },
+                        }}
                       >
-                        控制台
-                      </Button>
+                        <Button
+                          size="small"
+                          icon={<ExportOutlined />}
+                          title="打开容器控制台（下拉选方式）"
+                        >
+                          控制台
+                          <DownOutlined />
+                        </Button>
+                      </Dropdown>
                     )}
                     {/* 复制：读注册配置预填新建容器表单（名字 <原名>_copy）；
                         仅已接管（未接管无配置）；missing 配置仍在,同样可复制 */}

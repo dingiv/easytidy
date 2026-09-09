@@ -10,6 +10,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { errMsg } from '../lib/errors';
 import { App as AntApp, Dropdown, Tooltip } from 'antd';
 import {
@@ -21,6 +22,7 @@ import {
   InfoCircleOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
+  AppstoreOutlined,
   SettingOutlined,
 } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
@@ -37,6 +39,7 @@ import logo from '../assets/logo.png';
 import { PinnedAppIcon } from './PinnedAppIcon';
 import { Terminal } from './Terminal';
 import { RootTerminal } from './RootTerminal';
+import { ProcessManager } from './ProcessManager';
 import { FileBrowser } from './FileBrowser';
 import { FileEditor } from './FileEditor';
 import { ImageViewer } from './ImageViewer';
@@ -51,7 +54,7 @@ interface WorkerViewProps {
 /** 打开的面板 */
 interface Pane {
   id: string;
-  kind: 'terminal' | 'root' | 'passthrough' | 'config' | 'editor' | 'image' | 'status';
+  kind: 'terminal' | 'root' | 'passthrough' | 'config' | 'editor' | 'image' | 'status' | 'processes';
   title: string;
   /** 用户终端会话 stream_id（null = 尚未建立/新开；attach 重连用）。
    *  root 终端单例共享会话，无 stream_id（流 ID 恒 ROOT_STREAM_ID） */
@@ -77,6 +80,8 @@ function openPaneTitle(kind: Pane['kind']): string {
       return '容器配置';
     case 'status':
       return '容器状态';
+    case 'processes':
+      return '进程管理器';
     case 'terminal':
     case 'root':
     case 'editor':
@@ -111,6 +116,9 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
   //（终端列表 + passthrough 收藏），再决定初始面板——避免"默认面板先建、
   // 恢复列表后到"的重复建终端竞态
   const [panes, setPanes] = useState<Pane[]>([]);
+  // panes 镜像（同步更新）：供事件回调读取当前面板列表而不受 React 批处理时序影响
+  const panesRef = useRef<Pane[]>([]);
+  panesRef.current = panes;
   const [sessionReady, setSessionReady] = useState(false);
   const [activePaneId, setActivePaneId] = useState<string | null>(null);
   // 容器启动失败/未运行时呈现的状态信息（null = 容器正常或尚未探测）
@@ -127,10 +135,11 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
   // 1. get_terminals 触发共享 socket 连接（hello 握手）→ 活跃用户终端
   //    列表，各恢复一个面板（附接重连，回放当前屏幕）
   // 2. passthrough_state 同步收藏（工具栏不依赖面板打开）
-  // 3. root_terminal_status 探测共享 root 会话——存活则恢复 root 面板
-  //    （attach 即回放；root 通道与 server socket 相互独立，探测失败
-  //    仅表示未运行，不阻塞打开）
-  // 4. 无活跃用户终端 → 默认单个用户终端（新建持久会话）
+  // 3. 无活跃用户终端 → 默认单个用户终端（新建持久会话）。
+  //    **不自动恢复 root 面板**：共享 root 会话在 daemon 里跨 GUI 重启
+  //    存活，自动弹 会同时出现用户+root 两个终端（预期只开一个）；root
+  //    终端改为仅工具栏显式打开（openRootTerminal → attach 同一会话，
+  //    输出回放，不丢失）
   useEffect(() => {
     (async () => {
       // Step 0: 检测容器状态（先于握手——未运行时直接呈现失败页）
@@ -156,10 +165,9 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
         console.error('container_failure_info 失败（继续正常握手）:', err);
       }
 
-      const [terminalsRes, stateRes, rootRes] = await Promise.allSettled([
+      const [terminalsRes, stateRes] = await Promise.allSettled([
         invoke<TerminalInfo[]>('get_terminals'),
         invoke<PassthroughState>('passthrough_state'),
-        invoke<boolean>('root_terminal_status'),
       ]);
       const restored: Pane[] = [];
       if (terminalsRes.status === 'fulfilled') {
@@ -174,13 +182,6 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
       } else {
         console.error('get_terminals failed（回退默认终端）:', terminalsRes.reason);
       }
-      if (rootRes.status === 'fulfilled' && rootRes.value) {
-        restored.push({
-          id: ROOT_PANE_ID,
-          kind: 'root',
-          title: '终端 (root)',
-        });
-      }
       if (restored.length > 0) {
         setPanes(restored);
       }
@@ -189,7 +190,7 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
       } else {
         console.error('passthrough_state 同步失败:', stateRes.reason);
       }
-      // 无活跃用户终端：默认打开一个用户终端（root 面板恢复与否不影响）
+      // 无活跃用户终端：默认打开一个用户终端（root 终端仅工具栏显式打开）
       const userTerminalCount = terminalsRes.status === 'fulfilled' ? terminalsRes.value.length : 0;
       if (userTerminalCount === 0) {
         setPanes((prev) =>
@@ -210,6 +211,21 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
       setSessionReady(true);
     })();
   }, [containerName]);
+
+  // server 主动推「编辑文件」事件（容器内 ets edit → server → 本窗口）：
+  // 打开/聚焦编辑器面板。后端 emit 在 socket reader 任务（Tauri 事件广播到所有
+  // 窗口，单容器模式只有一个 Worker 窗口）。
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ path: string }>('server-ui-edit', (event) => {
+      const path = event.payload?.path;
+      if (path) openFilePane('editor', path);
+    }).then((u) => {
+      unlisten = u;
+    });
+    return () => unlisten?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 侧边栏：折叠 + 宽度（拖拽调宽，低于 200px 自动折叠）
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -360,8 +376,20 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
   /** 打开「容器状态」面板（status pane 与 passthrough/config 同级，单例） */
   const openStatusPane = () => openPane('status');
 
-  /** 终端会话建立后回填面板（新开路径拿到 stream_id） */
+  /** 终端会话建立后回填面板（新开路径拿到 stream_id）。
+   *  ⚠️ 泄露防护：若 pty_open resolve 时面板已被关闭（map 找不到 → 无人认
+   *  领该会话），立即 pty_close 收取，否则 bash 在 server 里永久残留 */
   const bindTerminalStream = (paneId: string, sid: number) => {
+    // 用 panesRef 同步判定（setPanes updater 是异步执行的，不能当场读）
+    const exists = panesRef.current.some((p) => p.id === paneId);
+    if (!exists) {
+      // pty_open resolve 时面板已被关闭 → 会话无人认领 → 立即收取（泄露防护）
+      invoke('pty_close', { streamId: sid }).catch((err) =>
+        console.error('pty_close (orphan stream) failed:', err),
+      );
+      useTerminalStore.getState().clearCwd(sid);
+      return;
+    }
     setPanes((prev) =>
       prev.map((p) => (p.id === paneId ? { ...p, streamId: sid } : p)),
     );
@@ -516,6 +544,11 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                   <SettingOutlined />
                 </button>
               </Tooltip>
+              <Tooltip title="进程管理器（server 托管的应用进程）" mouseEnterDelay={4}>
+                <button className="tool-button" onClick={() => openPane('processes')}>
+                  <AppstoreOutlined />
+                </button>
+              </Tooltip>
               <Tooltip title="关闭容器" mouseEnterDelay={4}>
                 <button className="tool-button danger" onClick={handleCloseContainer}>
                   <CloseOutlined />
@@ -630,6 +663,13 @@ function WorkerViewInner({ containerName }: WorkerViewProps) {
                     <ConfigManager containerName={containerName} />
                   ) : (
                     <DisconnectedPlaceholder paneName="容器配置" />
+                  )
+                )}
+                {p.kind === 'processes' && (
+                  connected ? (
+                    <ProcessManager />
+                  ) : (
+                    <DisconnectedPlaceholder paneName="进程管理器" />
                   )
                 )}
                 {p.kind === 'editor' && p.path && (

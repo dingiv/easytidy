@@ -2006,3 +2006,99 @@ button:disabled {
 .host-path-file {
   color: #a6adc8;
 }
+
+/* ===== 进程管理器（server 托管进程） ===== */
+.proc-manager {
+  padding: 1ch;
+  overflow: auto;
+  height: 100%;
+}
+.proc-error {
+  color: #f38ba8;
+  margin-bottom: 0.8rem;
+  font-size: 13px;
+}
+.proc-empty {
+  color: rgba(255, 255, 255, 0.55);
+  padding: 2rem 1rem;
+  text-align: center;
+  line-height: 1.8;
+}
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.proc-table th,
+.proc-table td {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  vertical-align: top;
+}
+.proc-table th {
+  color: rgba(255, 255, 255, 0.6);
+  font-weight: normal;
+  white-space: nowrap;
+}
+.proc-table .mono,
+.mono {
+  font-family: 'DejaVu Sans Mono', 'Noto Sans Mono', monospace;
+  white-space: nowrap;
+}
+.proc-cmd {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proc-running {
+  color: #a6e3a1;
+}
+.proc-dead {
+  color: rgba(255, 255, 255, 0.45);
+}
+tr.proc-exited td {
+  opacity: 0.65;
+}
+.proc-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+.proc-btn {
+  padding: 0.15rem 0.5rem;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+}
+.proc-btn-danger {
+  color: #f38ba8;
+}
+.proc-stdio-box {
+  margin-top: 1rem;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  padding: 0.6rem;
+}
+.proc-stdio-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+}
+.proc-stdio {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  padding: 0.8rem;
+  border-radius: 6px;
+  max-height: 400vh;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

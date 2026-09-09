@@ -65,10 +65,16 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
   // Mount 2 await Mount 1 的 resolve → streamIdRef 已写 → Mount 2 用
   // attachStreamId 二次 invoke(server fan-out 不创建新 bash)。
   const inFlightInvokeRef = useRef<Promise<number> | null>(null);
+  // 挂载代际：区分 StrictMode dev 伪卸载（同实例 remount，ref 共享、代际递增）
+  // 与真卸载（面板关闭，实例销毁、代际不再递增）。真卸载时若 pty_open 仍在
+  // 飞行，resolve 后必须补发 pty_close 收取刚建的会话——否则 bash 在 server
+  // 里永久残留（资源泄露）。
+  const mountGenRef = useRef(0);
   const [exited, setExited] = useState(false);
 
   useEffect(() => {
     if (!terminalRef.current || exited) return;
+    const mountGen = ++mountGenRef.current;
 
     // Clean up previous instance
     if (terminalInstance.current) {
@@ -119,25 +125,18 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
     fitAddonRef.current = fitAddon;
 
     // PTY 事件处理（data → xterm 输出；exited → 提示 + 失效缓存）。
-    // 写入批量（rAF flush）：高频输出（回放/大输出）逐块 write 触发大量 DOM
-    // 渲染（社区实测 100+ renders/sec）；攒帧后一帧内 flush 一次 write，
-    // DOM 渲染器下闪烁与卡顿显著降低（调研 2026-08-07）
-    let pendingWrites: number[] = [];
-    let writeRaf: number | null = null;
-    const flushWrites = () => {
-      writeRaf = null;
-      if (pendingWrites.length === 0) return;
-      const data = new Uint8Array(pendingWrites);
-      pendingWrites = [];
-      term.write(data);
+    // 后端已合并输出洪流帧（8ms 窗口）+ base64 编码；此处 base64 解码后直写
+    // xterm——xterm 内部写缓冲保序，无需前端再攒帧。旧实现逐字节 push 到
+    // JSON 数字数组（体积 4-5x 膨胀）曾打爆 WebKitGTK IPC → 输入卡死。
+    const b64ToBytes = (b64: string): Uint8Array => {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
     };
     const handlePtyEvent = (event: PtyEvent) => {
       if (event.kind === 'data' && event.data) {
-        // 循环 push（不用 spread：帧超过 ~65535 元素会 RangeError）
-        for (const b of event.data) pendingWrites.push(b);
-        if (writeRaf === null) {
-          writeRaf = requestAnimationFrame(flushWrites);
-        }
+        term.write(b64ToBytes(event.data));
       } else if (event.kind === 'cwdChanged' && event.cwd) {
         // server TTY 事件驱动推送（输入回车时检测）：更新 store 供跟随
         const sid = streamIdRef.current;
@@ -145,11 +144,6 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
           useTerminalStore.getState().setCwd(sid, event.cwd);
         }
       } else if (event.kind === 'exited') {
-        if (writeRaf !== null) {
-          cancelAnimationFrame(writeRaf);
-          writeRaf = null;
-          flushWrites();
-        }
         const code = event.code ?? 0;
         term.writeln(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m`);
         // 会话已终结：清理 store cwd，通知父面板关闭（关闭面板 = 关闭终端）
@@ -207,9 +201,15 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
           });
           sid = await inFlightInvokeRef.current!;
           if (streamCancelled) {
-            // StrictMode remount：ref 已在 promise 链发布，本 mount 已卸载、term
-            // 已 dispose——直接返回，由下一次 mount attach 到同一会话。
-            // ⚠️ 不在这里 pty_close：会杀掉 remount 要复用的会话（曾因此双终端）。
+            if (mountGenRef.current !== mountGen) {
+              // StrictMode remount：ref 已在 promise 链发布，本 mount 已卸载、
+              // term 已 dispose——直接返回，由下一次 mount attach 到同一会话。
+              // ⚠️ 不在这里 pty_close：会杀掉 remount 要复用的会话（曾因此双终端）。
+              return;
+            }
+            // 真卸载（面板关闭）且无后继 mount：pty_open 是本 mount 发起的，
+            // 会话无人认领 → 立即收取，否则 bash 在 server 里永久残留（泄露）
+            invoke('pty_close', { streamId: sid }).catch(() => {});
             return;
           }
         } else {
@@ -385,10 +385,6 @@ function TerminalInner({ streamId: initialStreamId, onStream, onExit }: Terminal
       streamCancelled = true;
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
-      if (writeRaf !== null) {
-        cancelAnimationFrame(writeRaf);
-        writeRaf = null;
-      }
       if (resizeTimeout) clearTimeout(resizeTimeout);
       clearInterval(pingTimer);
       document.removeEventListener('visibilitychange', restoreFocus);

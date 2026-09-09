@@ -14,8 +14,10 @@
 #
 # 设计意图：YAML 只存静态意图（映射规则），宿主耦合的运行时值（DISPLAY /
 # XDG_RUNTIME_DIR）留到创建时实时探测注入——避免硬编 session 特有的值。
-# XAUTHORITY 不在此处（路径含随机后缀，由容器内 easytidy-server 启动时自动探测，
-# 见 crates/server/src/setup.rs ensure_xauthority）。
+# XAUTHORITY 注入**稳定间接路径** /run/easytidy/xauthority（真实 auth 文件含随机
+# 后缀且随会话轮换；server 启动探到后维护软链指向真实文件，周期重探重链，
+# 见 crates/server/src/setup.rs ensure_xauthority / xauthority_watch_task）。
+# 稳定路径进容器 spec Env → 容器内所有进程（含 podman exec / ets）拿到同一值。
 #
 # 注：
 # - XDG_DATA_DIRS 必须**追加**系统默认、不能纯覆盖：gdk-pixbuf 经
@@ -30,6 +32,10 @@ env:
   - DISPLAY=${DISPLAY}
   - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
   - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
+  # XAUTHORITY 稳定间接路径（/run/easytidy = server socket 目录，bind-mount rw；
+  # 真实 auth 文件由容器内 server 探到后维护软链，见上方注）。
+  # 注：core 创建时会无条件注入此值（单一真相源，见 env/gui.rs），本行仅文档用途。
+  - XAUTHORITY=/run/easytidy/xauthority
   # 系统默认 XDG_DATA_DIRS（不能纯覆盖——见上方注）
   - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
 

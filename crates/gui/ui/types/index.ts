@@ -317,8 +317,22 @@ export interface ConfTemplate extends ContainerConfig {
 /// PTY event from pty_open
 export interface PtyEvent {
   kind: 'data' | 'exited' | 'cwdChanged';
-  data?: number[];
+  /** stdout/stderr（kind="data" 时；base64 编码——避免 JSON 数字数组 4-5x 膨胀打爆 WebKitGTK IPC） */
+  data?: string;
   code?: number;
   /// 工作目录（kind="cwdChanged" 时;server 主动推送）
   cwd?: string;
+}
+
+/// server 托管进程（apps.ps；passthrough / 桌面快捷方式 / auto-start 由
+/// easytidy-server spawn 的子进程，不含终端 bash）
+export interface ManagedProcess {
+  pid: number;
+  name: string;
+  kind: string;
+  cmd: string;
+  started_at: number;
+  status: string;
+  exit_code?: number;
+  stdio_len: number;
 }

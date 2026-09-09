@@ -97,28 +97,17 @@ function RootTerminalInner({ onExited }: RootTerminalProps) {
     terminalInstance.current = term;
     fitAddonRef.current = fitAddon;
 
-    // 输出写入批量（rAF flush，与 Terminal.tsx 同款）
-    let pendingWrites: number[] = [];
-    let writeRaf: number | null = null;
-    const flushWrites = () => {
-      writeRaf = null;
-      if (pendingWrites.length === 0) return;
-      const data = new Uint8Array(pendingWrites);
-      pendingWrites = [];
-      term.write(data);
+    // base64 解码直写 xterm（后端已 base64 编码；xterm 内部写缓冲保序）
+    const b64ToBytes = (b64: string): Uint8Array => {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      return bytes;
     };
     const handlePtyEvent = (event: PtyEvent) => {
       if (event.kind === 'data' && event.data) {
-        for (const b of event.data) pendingWrites.push(b);
-        if (writeRaf === null) {
-          writeRaf = requestAnimationFrame(flushWrites);
-        }
+        term.write(b64ToBytes(event.data));
       } else if (event.kind === 'exited') {
-        if (writeRaf !== null) {
-          cancelAnimationFrame(writeRaf);
-          writeRaf = null;
-          flushWrites();
-        }
         term.writeln('\r\n\x1b[90m[root 会话已退出]\x1b[0m');
         setExited(true);
         onExited?.();
@@ -282,10 +271,6 @@ function RootTerminalInner({ onExited }: RootTerminalProps) {
       cancelled = true;
       resizeObserver.disconnect();
       visibilityObserver.disconnect();
-      if (writeRaf !== null) {
-        cancelAnimationFrame(writeRaf);
-        writeRaf = null;
-      }
       if (resizeTimeout) clearTimeout(resizeTimeout);
       if (initialAttachTimer) clearTimeout(initialAttachTimer);
       document.removeEventListener('visibilitychange', restoreFocus);
