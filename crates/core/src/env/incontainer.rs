@@ -37,6 +37,11 @@ const FONTCONF_XML: &str = "<?xml version=\"1.0\"?>\n\
   <dir>/mnt/host/.local/share/fonts</dir>\n\
 </fontconfig>\n";
 
+/// ets 命令软链（prepare 幂等维护）：目标 = 宿主 bind-mount 的容器内二进制，
+/// 链 = /usr/local/bin/ets（PATH 上可直接敲 ets）。
+const ETS_BIN_TARGET: &str = "/run/easytidy-bin/ets";
+const ETS_LINK: &str = "/usr/local/bin/ets";
+
 // ── 身份（单一事实源：server 身份自发现 + dock ensure-home 共用）────────────
 
 /// 容器默认用户身份。
@@ -367,10 +372,27 @@ pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Resu
         fontconf_dir: PathBuf::from(FONTCONF_DIR),
     };
     apply_plan(&plan, &paths)?;
+    // ets 命令软链（幂等；宿主未挂载 ets 时静默跳过）
+    ensure_ets_symlink();
     Ok(PrepareReport {
         user_created: plan.add_passwd.is_some(),
         skip_reason: plan.skip_reason.clone(),
     })
+}
+
+/// 建/刷新 `/usr/local/bin/ets` → `/run/easytidy-bin/ets` 软链（幂等）。
+///
+/// 目标不存在（宿主未装 ets / 旧容器未挂载）→ 跳过；失败仅 warn（不阻断
+/// prepare——ets 是增强项，非核心路径）。以 root 执行（dock prepare 身份）。
+fn ensure_ets_symlink() {
+    use std::os::unix::fs::symlink;
+    if !Path::new(ETS_BIN_TARGET).exists() {
+        return;
+    }
+    let _ = fs::remove_file(ETS_LINK); // 清旧链/旧文件（不存在则忽略）
+    if let Err(e) = symlink(ETS_BIN_TARGET, ETS_LINK) {
+        tracing::warn!("创建 {ETS_LINK} 软链失败：{e}");
+    }
 }
 
 // ── IO 细节 ─────────────────────────────────────────────────────────────────

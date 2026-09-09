@@ -400,32 +400,36 @@ fn write_container_entry_icon(container: &str, bytes: &[u8]) -> Option<String> {
     Some(path.to_string_lossy().into_owned())
 }
 
-/// 确保容器入口品牌图标存在（`container_icon_dir(container)/easytidy-gui.png`）——
-/// 未设自定义图标时的入口 .desktop 兜底。返回图标绝对路径；写失败返回 None。
-pub fn ensure_container_entry_icon(container: &str) -> Option<String> {
-    let path = container_entry_icon_path(container)?;
-    if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_PNG).is_err() {
-        return None;
-    }
+/// 容器入口兒底图标（未设自定义图标时）：按 `seed`（导出显示名；改名重导出
+/// 后图标随之变）确定性生成的 identicon 像素图 + 品牌包装，写入
+/// `container_icon_dir(container)/identicon.png`
+/// （独立文件名——不与用户自定义/加工图标 `easytidy-gui.png` 同文件互踩）。
+/// **每次覆盖写**。返回图标绝对路径；生成/写失败返回 None。
+pub fn ensure_container_entry_icon(container: &str, seed: &str) -> Option<String> {
+    let path = container_entry_icon_path(container)?.with_file_name("identicon.png");
+    // 每次都覆盖写：同容器路径固定，重写保证文件内容始终反映当前种子/算法/
+    // 品牌包装（生成成本毫秒级）；也避免旧版本残留文件被固化
+    let raw = crate::icon::generate_icon(seed).ok()?;
+    let wrapped = crate::icon::compose_app_icon(&raw, EASYTIDY_ICON_PNG).ok()?;
+    std::fs::write(&path, &wrapped).ok()?;
     Some(path.to_string_lossy().into_owned())
 }
 
-/// 确保 easytidy 品牌图标存在（~/.easytidy/icons/easytidy-gui.png）
-/// 返回图标绝对路径；写入失败返回 None（不影响快捷方式导出）。
-///
-/// 历史遗留：旧版本写 SVG 线条图标（easytidy-gui.svg，v0.1 设计）——
-/// 已导出的 .desktop 若仍指向它则图标失效/显示旧设计，顺手清理。
-pub fn ensure_gui_icon() -> Option<String> {
+/// 应用兒底图标（passthrough 应用无图标时）：按应用 id 确定性生成的
+/// identicon 像素图（同应用 id = 同图标），写入
+/// `~/.easytidy/icons/identicon-<safe-id>.png`。返回图标绝对路径；
+/// 生成/写失败返回 None（不影响快捷方式导出）。
+pub fn ensure_app_icon(app_id: &str) -> Option<String> {
     let dir = crate::appdata::icons_dir().ok()?;
-    let path = dir.join("easytidy-gui.png");
-    if !path.exists() && std::fs::write(&path, EASYTIDY_ICON_PNG).is_err() {
-        return None;
-    }
-    // 清理旧版 SVG（同目录同名 .svg；新导出一律指向 PNG）
-    let legacy_svg = dir.join("easytidy-gui.svg");
-    if legacy_svg.exists() {
-        let _ = std::fs::remove_file(&legacy_svg);
-    }
+    let safe: String = app_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect();
+    let path = dir.join(format!("identicon-{safe}.png"));
+    // 同应用 id 路径固定 → 每次覆盖写（理由同容器入口兒底）
+    let raw = crate::icon::generate_icon(app_id).ok()?;
+    let wrapped = crate::icon::compose_app_icon(&raw, EASYTIDY_ICON_PNG).ok()?;
+    std::fs::write(&path, &wrapped).ok()?;
     Some(path.to_string_lossy().into_owned())
 }
 
@@ -459,7 +463,7 @@ pub fn process_container_icon_bytes(container: &str, data: &[u8]) -> Option<Stri
 /// 等待 server socket 就绪，再按配置 silent_boot 决定是否拉起 Worker GUI
 /// （直接冷启动 380MB GUI 是点击慢的根源，垫片先行秒级保活）。
 /// `icon`：加工后的容器图标路径（[`process_container_icon`]）；
-/// 未设置回退内置品牌图标。
+/// 未设置回退按容器名生成的 identicon。
 pub fn generate_gui_entry_content(
     container: &str,
     cli_path: &str,
@@ -482,7 +486,9 @@ pub fn generate_gui_entry_content(
     let icon = icon
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .or_else(|| ensure_container_entry_icon(container));
+        // 兒底种子 = 最终桌面显示名（display），与 .desktop Name= 同源：
+        // 改名重导出 → 图标与名字一起变
+        .or_else(|| ensure_container_entry_icon(container, &display));
     if let Some(icon) = icon {
         content.push_str(&format!("Icon={icon}\n"));
     }
@@ -505,9 +511,11 @@ pub fn generate_gui_entry_content(
 /// - 桌面图标：桌面路径同名文件 + chmod +x + `gio metadata::trusted`
 ///   （GNOME 双击必需；`desktop_icon=true` 且桌面目录存在时）
 /// - `cli_path`：宿主 easytidy CLI 绝对路径（Exec/TryExec；垫片入口）
-/// - `icon`：加工后的容器图标路径（未设置回退内置品牌图标）
+/// - `icon`：加工后的容器图标路径（未设置回退按容器名生成的 identicon）
 ///
-/// 返回应用菜单路径。
+/// **覆盖写语义**：同容器路径固定，`std::fs::write` 直接覆盖已有 .desktop
+/// （含桌面副本），Icon=/Exec= 等字段始终反映本次导出状态；权限/信任标记
+/// 同步重打。返回应用菜单路径。
 pub fn write_gui_entry(
     container: &str,
     cli_path: &str,
@@ -553,6 +561,8 @@ fn passthrough_file_name(container: &str, app_id: &str) -> String {
 }
 
 /// 写入 .desktop 文件（+x 权限）。
+/// 写入 .desktop 文件（+x 权限）。**覆盖写**：同路径已有文件直接覆盖，
+/// 字段始终反映本次导出；权限同步重打。
 fn write_desktop_file(path: &Path, content: &str) -> Result<()> {
     std::fs::write(path, content)
         .map_err(|e| Error::Config(format!("写入 .desktop 失败（{}）：{e}", path.display())))?;

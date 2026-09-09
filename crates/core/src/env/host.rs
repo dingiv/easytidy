@@ -45,9 +45,11 @@ pub fn inject_passthrough(config: &mut ContainerConfig) {
 /// `ASSETS_DIR::gui-passthrough.yaml`（dev 源码树 / prod 数据目录），本函数只
 /// 负责执行——详见 [`super::gui`]。
 ///
-/// **`XAUTHORITY` 不在此处注入**：路径含随机后缀（`mutter-Xwaylandauth.<random>`
-/// 或 `xauth_<random>`），由容器内 `easytidy-server` 启动时自动探 `$XDG_RUNTIME_DIR`
-/// 下已知模式并覆盖进程 env（见 `crates/server/src/setup.rs` `ensure_xauthority`）。
+/// **`XAUTHORITY` 注入稳定间接路径**（`/run/easytidy/xauthority`，见上方
+/// gui-passthrough.yaml）：真实 auth 文件含随机后缀、随登录会话轮换，不能写死；
+/// 由容器内 `easytidy-server` 启动时探 `$XDG_RUNTIME_DIR` 下已知模式并维护
+/// 软链指向真实文件（周期重探重链，见 crates/server/src/setup.rs）。
+/// 稳定路径进容器 spec Env，容器内所有进程（含 `podman exec` / `ets`）生效。
 pub fn inject_gui_passthrough(params: &mut ContainerParams, env: &mut Vec<String>) {
     crate::env::gui::apply(params, env);
 }

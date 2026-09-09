@@ -29,6 +29,135 @@ const SKY: [u8; 3] = [0x6a, 0xa2, 0xe7];
 /// 深蓝色(渐变终点,右下)
 const DEEP: [u8; 3] = [0x1e, 0x66, 0xf5];
 
+// ============================================================================
+// 自动生成图标（字符串种子 → GitHub identicon 风格像素图）
+// ============================================================================
+
+// 生成图标边长
+const GEN_SIZE: u32 = 256;
+// 网格规格（GitHub identicon 同款 5×5，左右镜像）
+const GEN_GRID: usize = 5;
+// 四周留白（像素块区 = GEN_SIZE − 2×MARGIN；256−36=220=5×44 整除无残边）
+const GEN_MARGIN: u32 = 18;
+
+/// FNV-1a 64 位哈希（跨进程/跨平台稳定——不用 DefaultHasher，它的跨版本
+/// 稳定性无保证）。字符串种子 → PRNG 种子。
+fn fnv1a64(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// splitmix64 PRNG（确定性；下一个伪随机数 + 均匀区间采样）。
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E3779B97F4A7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+        z ^ (z >> 31)
+    }
+
+    /// [0, n) 均匀整数
+    fn below(&mut self, n: u64) -> u64 {
+        self.next_u64() % n.max(1)
+    }
+
+    /// [0, 1) 均匀浮点
+    fn unit(&mut self) -> f32 {
+        (self.next_u64() >> 40) as f32 / (1u64 << 24) as f32
+    }
+}
+
+/// HSL → RGB（h ∈ [0,360)，s/l ∈ [0,1]）。生成图标的前景色在 HSL 空间取：
+/// 随机色相 + 受控饱和度/亮度 → 任意种子都清晰可辨。
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> [u8; 3] {
+    let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
+    let hp = h / 60.0;
+    let x = c * (1.0 - (hp % 2.0 - 1.0).abs());
+    let (r1, g1, b1) = match hp as u32 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    let m = l - c / 2.0;
+    [
+        ((r1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((g1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+        ((b1 + m) * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
+/// 生成图标（确定性）：种子字符串 → FNV-1a → splitmix64 → GitHub identicon
+/// 风格 5×5 像素图（左侧 3 列随机取格、镜像到右侧）。输出**满幅方形**不
+/// 自带圆角——圆角由品牌包装 [`compose_app_icon`] 统一给（内容区裁角 +
+/// 渐变边框），调用方直接用本函数输出时应自行决定是否包装。
+/// 同一种子永远逐字节相同的 PNG。
+///
+/// 用途：容器没有可用图标源时的兜底视觉身份（同容器名 = 同图标，稳定可辨）。
+pub fn generate_icon(seed: &str) -> Result<Vec<u8>> {
+    let img = generate_icon_image(seed);
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| Error::Config(format!("生成图标 PNG 编码失败：{e}")))?;
+    Ok(png)
+}
+
+/// 生成图标渲染主体（返回图像，供单测断言对称性/确定性）。
+fn generate_icon_image(seed: &str) -> image::RgbaImage {
+    let mut rng = SplitMix64(fnv1a64(seed));
+
+    // 前景色：随机色相 + GitHub 风格固定饱和度/亮度（任何色相都清晰可辨）；
+    // 背景浅灰（GitHub 同款 #F0F0F0 观感）
+    let fg = hsl_to_rgb(rng.unit() * 360.0, 0.60, 0.42);
+    let bg = [0xf0u8, 0xf0, 0xf0];
+
+    // 5×5 取格：只随机左侧 3 列（含中列），镜像到右侧——保证左右对称
+    let mut cells = [[false; GEN_GRID]; GEN_GRID];
+    let mut any = false;
+    for col in 0..=GEN_GRID / 2 {
+        for cell_row in &mut cells {
+            let on = rng.below(2) == 1;
+            cell_row[col] = on;
+            cell_row[GEN_GRID - 1 - col] = on;
+            any |= on;
+        }
+    }
+    // 全空兜底（概率 1/1024）：强制中列全亮，保证图标非空白
+    if !any {
+        for cell_row in &mut cells {
+            cell_row[GEN_GRID / 2] = true;
+        }
+    }
+
+    let mut img = image::RgbaImage::from_pixel(GEN_SIZE, GEN_SIZE, image::Rgba([bg[0], bg[1], bg[2], 255]));
+    let cell = (GEN_SIZE - 2 * GEN_MARGIN) / GEN_GRID as u32; // 44，整除无累计误差
+    for (row, cell_row) in cells.iter().enumerate() {
+        for (col, &on) in cell_row.iter().enumerate() {
+            if !on {
+                continue;
+            }
+            let x0 = GEN_MARGIN + col as u32 * cell;
+            let y0 = GEN_MARGIN + row as u32 * cell;
+            for y in y0..y0 + cell {
+                for x in x0..x0 + cell {
+                    img.put_pixel(x, y, image::Rgba([fg[0], fg[1], fg[2], 255]));
+                }
+            }
+        }
+    }
+    img
+}
+
 /// 圆角矩形有符号距离场(SDF,负值 = 内部)。
 ///
 /// 标准 Inigo Quilez 公式:把点折到第一象限,圆角部分用角点圆弧判定。
@@ -357,6 +486,73 @@ fn parse_xpm_color(s: &str) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generate_icon_deterministic() {
+        // 同一种子 → 逐字节相同（跨调用稳定；FNV/splitmix 无随机源）
+        let a = generate_icon("chrome").unwrap();
+        let b = generate_icon("chrome").unwrap();
+        assert_eq!(a, b);
+
+        // 不同种子 → 不同图标
+        let c = generate_icon("firefox").unwrap();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_generate_icon_shape_square_opaque() {
+        // 输出满幅方形不透明背景（圆角交给品牌包装 compose_app_icon 统一做）
+        let png = generate_icon("chrome").unwrap();
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(img.dimensions(), (256, 256));
+        for (x, y) in [(0, 0), (255, 0), (0, 255), (255, 255)] {
+            assert_eq!(img.get_pixel(x, y).0[3], 255, "角 ({x},{y}) 应不透明");
+        }
+        assert_eq!(img.get_pixel(128, 128).0[3], 255);
+    }
+
+    #[test]
+    fn test_generate_icon_mirror_symmetry() {
+        // identicon 左右镜像：逐行比对中轴两侧像素颜色一致（留白区内）
+        let img = generate_icon_image("chrome");
+        let m = GEN_MARGIN;
+        let cell = (GEN_SIZE - 2 * m) / GEN_GRID as u32;
+        for row in 0..GEN_GRID as u32 {
+            let y = m + row * cell + cell / 2;
+            for col in 0..(GEN_GRID as u32 / 2) {
+                let xl = m + col * cell + cell / 2;
+                let xr = GEN_SIZE - m - (col + 1) * cell + cell / 2;
+                assert_eq!(img.get_pixel(xl, y).0[3], img.get_pixel(xr, y).0[3]);
+                assert_eq!(img.get_pixel(xl, y).0[0], img.get_pixel(xr, y).0[0]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_generate_icon_non_empty() {
+        // 任何种子都至少有一格前景色（不会生成空白图标）
+        for seed in ["a", "chrome", "zzz"] {
+            let img = generate_icon_image(seed);
+            let bg = [0xf0u8, 0xf0, 0xf0];
+            let has_fg = img.pixels().any(|p| p.0[0..3] != bg && p.0[3] == 255);
+            assert!(has_fg, "seed={seed} 不应生成空白图标");
+        }
+    }
+
+    #[test]
+    fn test_fnv1a64_known_vectors() {
+        // FNV-1a 64 标准测试向量（跨平台稳定性的锚点）
+        assert_eq!(fnv1a64(""), 0xcbf29ce484222325);
+        assert_eq!(fnv1a64("a"), 0xaf63dc4c8601ec8c);
+        assert_eq!(fnv1a64("foobar"), 0x85944171f73967e8);
+    }
+
+    #[test]
+    fn test_hsl_to_rgb_basics() {
+        assert_eq!(hsl_to_rgb(0.0, 1.0, 0.5), [255, 0, 0]);
+        assert_eq!(hsl_to_rgb(120.0, 1.0, 0.5), [0, 255, 0]);
+        assert_eq!(hsl_to_rgb(240.0, 1.0, 0.5), [0, 0, 255]);
+    }
 
     #[test]
     fn test_compose_app_icon() {

@@ -50,6 +50,11 @@ SERVER_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/u
 # `cargo build -p easytidy-dock --target x86_64-unknown-linux-musl`（gui
 # beforeDevCommand 已含）。
 DOCK_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
+# ets（容器内 easytidy-server 命令行客户端，/run/easytidy-bin/ets → 软链
+# /usr/local/bin/ets）：与 server/dock 同为 musl 静态（同一构建目标目录；
+# dev 须 `cargo build -p easytidy --target x86_64-unknown-linux-musl`）。
+# 缺失时 ContainerBins.ets = None（容器内无 ets，不阻断创建）。
+ETS_BIN = { dev = "../../target/x86_64-unknown-linux-musl/debug/", prod = "/usr/bin" }
 # GUI 透传规则等内置资源（内容，非代码）：dev = 源码树 crates/gui/assets
 # （core manifest 的 ../gui/assets）；prod = 数据目录 ~/.easytidy/assets（首跑从
 # 内嵌默认播种、可被用户定制）。core 经 ASSETS_DIR:: 加载（见 gui_passthrough.rs）。

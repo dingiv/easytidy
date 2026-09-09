@@ -139,16 +139,19 @@ pub fn migrate_legacy_configs() {
     // 配置文件
     // （passthrough 配置已迁容器内 `{home}/.easytidy/passthrough.toml`，
     //  宿主侧不再持有 per-container 配置，故不迁移旧宿主 passthrough.toml）
-    for name in ["config.toml"] {
-        let legacy = legacy_dir.join(name);
-        let new = new_dir.join(name);
-        if legacy.exists() && !new.exists() {
-            let _ = std::fs::create_dir_all(&new_dir);
-            if let Ok(bytes) = std::fs::read(&legacy) {
-                if std::fs::write(&new, &bytes).is_ok() {
-                    tracing::info!("迁移旧配置：{} → {}", legacy.display(), new.display());
-                }
+    // 旧配置文件（历史上曾有多种；现仅 config.toml 一种，新文件不存在且旧存在时复制）
+    let legacy = legacy_dir.join("config.toml");
+    let new = new_dir.join("config.toml");
+    if legacy.exists() && !new.exists() {
+        let _ = std::fs::create_dir_all(&new_dir);
+        if let Ok(bytes) = std::fs::read(&legacy) {
+            if std::fs::write(&new, &bytes).is_ok() {
+                tracing::info!("迁移旧配置：{} → {}", legacy.display(), new.display());
+            } else {
+                tracing::warn!("迁移旧配置失败（写入 {} 失败），旧文件保留：{}", new.display(), legacy.display());
             }
+        } else {
+            tracing::warn!("迁移旧配置失败（读取 {} 失败）", legacy.display());
         }
     }
 
@@ -162,7 +165,9 @@ pub fn migrate_legacy_configs() {
                 let src = entry.path();
                 let dst = new_flavors.join(entry.file_name());
                 if let Ok(bytes) = std::fs::read(&src) {
-                    let _ = std::fs::write(&dst, &bytes);
+                    if let Err(e) = std::fs::write(&dst, &bytes) {
+                        tracing::warn!("迁移 flavor 失败（{} → {}）：{e}", src.display(), dst.display());
+                    }
                 }
             }
         }

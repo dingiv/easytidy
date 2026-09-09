@@ -56,6 +56,10 @@ impl Podman {
     /// → "no such file or directory"）。GUI/CLI 一律 exec 本常量。
     pub const DOCK_TARGET: &str = "/run/easytidy-bin/easytidy-dock";
 
+    /// ets 二进制的容器内挂载目标（容器内 easytidy-server 命令行客户端；
+    /// prepare 另建 /usr/local/bin/ets 软链使其上 PATH）。
+    pub const ETS_TARGET: &str = "/run/easytidy-bin/ets";
+
     /// 连接到 rootless podman socket 并协商 API 版本。
     ///
     /// 路径规则：$XDG_RUNTIME_DIR/podman/podman.sock（缺失则 Error::NoXdgRuntime）。
@@ -288,6 +292,12 @@ impl Podman {
         use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
 
+        // 透传注入（幂等，同 key/同挂载目标去重）：创建入口统一兜底——模板路径
+        // build_config 已注入（此处重复无副作用）；存量实例重建（从 toml 加载
+        // 烘焙 env/mounts）必须经此处才能拿到新增规则（如 XAUTHORITY 稳定路径）。
+        let mut config = config.clone();
+        crate::env::inject_passthrough(&mut config);
+
         // 检查镜像是否存在，不存在则直接报错（不自动拉取——拉取是显式用户动作）
         if !self.image_exists(image).await? {
             return Err(Error::Config(format!(
@@ -336,6 +346,17 @@ impl Podman {
                 ..Default::default()
             },
         ];
+        // ets 二进制（只读，可选）：宿主未安装时跳过（容器内无 ets 命令，
+        // prepare 不建软链）
+        if let Some(ets) = &bins.ets {
+            mounts.push(Mount {
+                typ: Some(MountTypeEnum::BIND),
+                source: Some(ets.to_string_lossy().to_string()),
+                target: Some(Self::ETS_TARGET.to_string()),
+                read_only: Some(true),
+                ..Default::default()
+            });
+        }
         // 容器默认用户解析（新模型）：配置值优先，缺省取宿主登录用户；
         // 均不可得 → 报错（不再静默回退 root——root 模型已移除）。
         // 上移到挂载展开前——容器侧 ${HOME}/${USER} 展开需容器 uid/gid/user_name。
@@ -1677,8 +1698,11 @@ fn validate_mount(m: &MountConfig) -> Result<()> {
     Ok(())
 }
 
-/// 解析快照名为 `(repo, tag)`：第一个 `:` 切分，余下 `:` 视为 name/tag 一部分（podman 切最后 `:`）。
-/// `name` 仅允许 `[A-Za-z0-9_.-]+`（同 podman repo 命名规则）；含非法字符直接走原样透传（podman 自己报具体错误）。
+/// 解析快照名为 `(repo, tag)`：第一个 `:` 切分。合法的 `name:tag` 才拆开传
+///（libpod commit 的 `repo` 不允许含 `:`）；**非法时原样透传**（tag=None），让
+/// podman 报出与用户输入一致的错误——不静默剥掉 tag（曾致 `myimg:1.0:latest`
+/// 被降级成无 tag 的 `myimg`，用户看到的报错与输入不符）。空 tag（`foo:`）
+/// 例外：视为纯名 `foo`（空 tag 无信息量，剥掉无副作用）。
 /// 返回的 `tag=None` 表示无 tag（podman 走默认 `:latest`）。
 fn parse_snapshot_ref(input: &str) -> (String, Option<String>) {
     // 第一个 `:` 切（避免被 tag 内部的 `:` 干扰：name 不能再含 `:`）
@@ -1690,9 +1714,13 @@ fn parse_snapshot_ref(input: &str) -> (String, Option<String>) {
             if !is_valid_image_name_component(name) {
                 return (input.to_string(), None);
             }
-            if tag.is_empty() || !is_valid_image_name_component(tag) {
-                // 空 tag 或非法 tag：把 name 部分当纯名透传（不保留 `:` 痕迹）
+            if tag.is_empty() {
+                // 空 tag：纯名透传（剥掉无信息的 `:`）
                 return (name.to_string(), None);
+            }
+            if !is_valid_image_name_component(tag) {
+                // 非法 tag（如 `1.0:latest`）：**原样透传**，podman 自己报具体错误
+                return (input.to_string(), None);
             }
             (name.to_string(), Some(tag.to_string()))
         }
@@ -2257,7 +2285,15 @@ mod tests {
             super::parse_snapshot_ref("foo/bar"),
             ("foo/bar".into(), None)
         );
+        // 空 tag（`foo:`）：纯名 foo（无信息量的 `:` 剥掉）
         assert_eq!(super::parse_snapshot_ref("foo:"), ("foo".into(), None));
+
+        // 非法 tag（多 `:`）：**原样透传**，不静默剥 tag（让 podman 报与用户
+        // 输入一致的错误）
+        assert_eq!(
+            super::parse_snapshot_ref("myimg:1.0:latest"),
+            ("myimg:1.0:latest".into(), None)
+        );
 
         // 空字符串：原样返回（让 podman 报错）
         assert_eq!(super::parse_snapshot_ref(""), ("".into(), None));

@@ -75,7 +75,7 @@ fn resolve_socket_dirs(name: &str) -> Vec<PathBuf> {
             Some((modified, e.path()))
         })
         .collect();
-    dirs.sort_by(|a, b| b.0.cmp(&a.0)); // 新 → 旧
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0)); // 新 → 旧
     dirs.into_iter().map(|(_, p)| p).collect()
 }
 
@@ -172,9 +172,35 @@ pub fn dock_binary_path() -> Result<PathBuf> {
     })
 }
 
+/// `ets` 二进制位置（容器内 easytidy-server 命令行客户端，musl 静态）。
+///
+/// 与 server/dock 同构：`ETS_BIN` namespace dev/prod 候选 + XDG 历史回退。
+/// **允许缺失**：老宿主构建没有 ets 二进制时返回 Err，调用方（
+/// [`ContainerBins::resolve`]）降级为 `None`——容器不挂载、prepare 不建软链，
+/// 功能优雅缺省，不阻断容器创建。
+pub fn ets_binary_path() -> Result<PathBuf> {
+    let loader = easytidy_shared::loader!();
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    candidates.extend(loader.ns_candidates("ETS_BIN", "ets"));
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        candidates.push(PathBuf::from(xdg).join("easytidy/bin/ets"));
+    }
+    candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
+        let tried = candidates
+            .iter()
+            .map(|p| format!("  {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Error::Connect(format!(
+            "ets 二进制不存在（已尝试：\n{tried}）\n容器内将无 ets 命令（可重新构建后 rebuild 容器）"
+        ))
+    })
+}
+
 /// 容器内二进制（ro bind-mount 进容器 `/run/easytidy-bin/`）：server（常驻）
 /// + dock（容器内 root 工具：prepare 容器准备 + daemon/client root 终端
-/// 通道）。`create_with_config`/`rebuild` 的统一输入。
+///   通道）+ ets（容器内 server 命令行客户端，可选）。
+///   `create_with_config`/`rebuild` 的统一输入。
 #[derive(Debug, Clone)]
 pub struct ContainerBins {
     /// → `/run/easytidy-bin/easytidy-server`
@@ -187,14 +213,20 @@ pub struct ContainerBins {
     /// 同时 attach 同一 session（fan-out + 128KB 回放）。daemon 与容器共死，
     /// **零主机端残留**。
     pub dock: PathBuf,
+    /// → `/run/easytidy-bin/ets`（容器内命令行客户端；None = 宿主未安装，
+    /// 不挂载不软链，容器内无 ets 命令）
+    pub ets: Option<PathBuf>,
 }
 
 impl ContainerBins {
     /// 宿主侧解析二进制的安装位置（纯路径解析，无副作用）。
+    ///
+    /// server/dock 缺失 → 报错（核心依赖）；ets 缺失 → None（优雅降级）。
     pub fn resolve() -> Result<Self> {
         Ok(Self {
             server: server_binary_path()?,
             dock: dock_binary_path()?,
+            ets: ets_binary_path().ok(),
         })
     }
 }

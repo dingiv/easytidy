@@ -16,9 +16,11 @@
 //! `${XDG_RUNTIME_DIR}`。展开后 host_path 为空（session 变量未设）→ 挂载跳过；
 //! env 值为空 → env 跳过。
 //!
-//! XAUTHORITY 不在此处：路径含随机后缀（mutter-Xwaylandauth.<random> 等），由容器
-//! 内 easytidy-server 启动时自动探测 `$XDG_RUNTIME_DIR` 下已知模式并覆盖进程 env
-//! （见 `crates/server/src/setup.rs` `ensure_xauthority`）。
+//! XAUTHORITY：core 无条件注入稳定间接路径（[`XAUTHORITY_STABLE_PATH`]）
+//! （不在 yaml env 段——播种副本会过时，且旧版 yaml 可能残留随机路径行，
+//! core 注入时过滤覆盖）。真实 auth 文件含随机后缀（mutter-Xwaylandauth.<random>
+//! 等）随会话轮换，由容器内 server 探到后维护该路径的软链（见
+//! `crates/server/src/setup.rs` `ensure_xauthority`）。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -52,6 +54,14 @@ pub struct GuiPassthroughMount {
     #[serde(default)]
     pub require_exists: bool,
 }
+
+/// 容器内 XAUTHORITY 稳定间接路径（core 单一真相源）。
+///
+/// 真实 auth 文件（`$XDG_RUNTIME_DIR/mutter-Xwaylandauth.<random>` 等）随会话轮换
+/// 且路径随机；容器内 server 启动时探测并维护 `{socket_dir}/xauthority` 软链
+/// （socket 目录固定 /run/easytidy，见 server 入口）。容器 Config.Env 恒注入本值，
+/// 所有入口（PTY / apps.launch / podman exec）统一。
+pub const XAUTHORITY_STABLE_PATH: &str = "/run/easytidy/xauthority";
 
 /// 加载 GUI 透传规则。
 ///
@@ -107,6 +117,11 @@ pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>) {
         let Some((key, value)) = entry.split_once('=') else {
             continue;
         };
+        if key == "XAUTHORITY" {
+            // core 无条件注入稳定路径（见下），yaml 声明一律让位（旧版播种
+            // 副本可能残留随机路径行）
+            continue;
+        }
         if existing_env_keys.contains(key) {
             continue;
         }
@@ -116,6 +131,11 @@ pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>) {
         }
         env.push(format!("{key}={expanded}"));
     }
+
+    // XAUTHORITY 稳定间接路径：core 恒注入（幂等去重 + 覆盖模板/yaml 已有值）。
+    // 真实文件由容器内 server 启动时探测并维护软链（setup.rs ensure_xauthority）。
+    env.retain(|e| !e.starts_with("XAUTHORITY="));
+    env.push(format!("XAUTHORITY={XAUTHORITY_STABLE_PATH}"));
 
     // mounts：两侧展开；host 路径为空（session 变量未设）跳过；require_exists 且
     // 宿主路径缺失跳过；已声明同 container_path 跳过
