@@ -1,9 +1,19 @@
 //! 容器 server socket 连接与请求（共享连接 + 专用 PTY 连接）。
+//!
+//! 共享连接为 **push-ready** 模型（2026-09-03）：连接建立后拆读写侧
+//! （照 [`crate::commands::pty`] 专用连接模式）——写侧给所有请求方共享，
+//! 读侧归单一 **reader 任务**：Resp 按 msg.id 路由到各自 oneshot
+//! （[`GuiSession::pending`]），Evt（server 主动推送，如 ui.edit）即时
+//! Tauri emit 到前端。旧同步模型（发一帧收一帧）在无请求在途时没人读
+//! socket，server 推的事件会滞留缓冲。`spawn_keepalive` 每 20s ping 防
+//! server 30s 空闲超时，使「GUI 开着」≈「GUI 连着」。
 
 use anyhow::{Context, Result};
+use futures::stream::SplitStream;
 use futures::{SinkExt, StreamExt};
 use std::io::ErrorKind;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
@@ -11,10 +21,11 @@ use tracing::{debug, info, warn};
 
 use easytidy_core::podman::Podman;
 use easytidy_protocol::{
-    Frame, FrameCodec, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION,
+    Frame, FrameCodec, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION, UiEdit,
 };
+use tauri::Emitter;
 
-use crate::state::GuiSession;
+use crate::state::{ConnectionState, GuiSession, SharedConn};
 
 // ============================================================================
 // 单容器模式命令（socket 通信）
@@ -25,6 +36,12 @@ use crate::state::GuiSession;
 /// 错误重试等待，其余错误（协议不匹配、容器未运行等）立即返回。
 const CONNECT_ATTEMPTS: u32 = 10;
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// 响应等待超时（server 无 PTY 连接空闲超时 30s；正常 op 毫秒级返回）
+const RESP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 保活 ping 周期（< server 无 PTY 连接空闲超时 30s）
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
 
 /// 「server 未就绪」类瞬时连接错误（socket 文件未创建 / 尚无监听）——可重试。
 fn is_not_ready_error(e: &anyhow::Error) -> bool {
@@ -108,6 +125,9 @@ async fn connect_and_handshake(
             "passthrough".to_string(),
             "config".to_string(),
             "lifecycle".to_string(),
+            // 订阅 server 主动推送事件（ui.edit 等）：server 据此把 Evt 路由
+            // 到本连接（PTY 专用连接不声明，不会收到）
+            "events".to_string(),
         ],
     };
     let handshake_msg = Message {
@@ -155,82 +175,211 @@ async fn connect_and_handshake(
     Ok((framed, ack.session_id))
 }
 
+/// 确保共享 socket 已连接（无则连接 + 拆读写侧 + 起 reader/keepalive 任务），
+/// 返回当前连接（写侧句柄）。
+///
+/// 连接建立持 [`GuiSession::socket`] 锁完成；reader/keepalive 任务持 Arc 克隆
+/// 独立运行（任务不借用 GuiSession 本体，可长于任何命令生命周期）。
+async fn ensure_connect(session: &GuiSession) -> Result<Arc<SharedConn>> {
+    let mut guard = session.socket.lock().await;
+    if let Some(conn) = guard.clone() {
+        return Ok(conn);
+    }
+
+    *session.conn_state.lock().unwrap() = ConnectionState::Connecting;
+    let container_name = session.container_name.clone();
+    tracing::warn!("socket 未建立，连接到 {container_name}");
+    let (framed, session_id) = match connect_to_container(&container_name).await {
+        Ok(r) => r,
+        Err(e) => {
+            *session.conn_state.lock().unwrap() = ConnectionState::Unconnected;
+            return Err(e);
+        }
+    };
+
+    // 拆读写侧（照 pty.rs 模式）：写侧共享，读侧归 reader 任务
+    let (sink, stream) = framed.split();
+    let conn = Arc::new(SharedConn {
+        sink: tokio::sync::Mutex::new(sink),
+    });
+
+    *session.session_id.lock().unwrap() = Some(session_id);
+    *session.conn_state.lock().unwrap() = ConnectionState::Connected;
+    *guard = Some(conn.clone());
+    drop(guard);
+    tracing::info!("socket 已建立（push-ready：读侧归 reader 任务）");
+
+    spawn_shared_reader(session, stream, conn.clone());
+    spawn_keepalive(session, conn.clone());
+    Ok(conn)
+}
+
+/// 共享 socket reader 任务：Resp 按 msg.id 路由到 pending oneshot；Evt 推
+/// Tauri 事件（前端监听）；读错/EOF 清除连接（下次请求自动重连）。
+fn spawn_shared_reader(
+    session: &GuiSession,
+    stream: SplitStream<Framed<UnixStream, FrameCodec>>,
+    conn: Arc<SharedConn>,
+) {
+    let socket = session.socket.clone();
+    let pending = session.pending.clone();
+    let conn_state = session.conn_state.clone();
+    tokio::spawn(async move {
+        let mut stream = stream;
+        loop {
+            match stream.next().await {
+                Some(Ok(Frame::Json(msg))) => match msg.kind {
+                    MsgKind::Resp => {
+                        // 按 id 路由；无等待者（客户端已超时）→ 丢弃
+                        let mut p = pending.lock().await;
+                        if let Some(tx) = p.remove(&msg.id) {
+                            let _ = tx.send(msg);
+                        }
+                    }
+                    MsgKind::Evt => match msg.op.as_str() {
+                        "ui.edit" => {
+                            let Ok(payload) =
+                                serde_json::from_value::<UiEdit>(msg.payload.clone())
+                            else {
+                                warn!("ui.edit 事件 payload 解析失败");
+                                continue;
+                            };
+                            match crate::state::app_handle() {
+                                Some(app) => {
+                                    if let Err(e) = app.emit("server-ui-edit", &payload) {
+                                        warn!("emit server-ui-edit 失败：{e}");
+                                    }
+                                }
+                                None => warn!("无 AppHandle（setup 未完成？），无法 emit server-ui-edit"),
+                            }
+                        }
+                        _ => debug!("忽略未处理的 Evt：{}", msg.op),
+                    },
+                    MsgKind::Req => {
+                        warn!("收到 server 发来的 Req 帧（不应发生）：{}", msg.op);
+                    }
+                },
+                Some(Ok(Frame::Raw { .. })) => {
+                    debug!("共享连接收到 Raw 帧（不应发生），忽略");
+                }
+                Some(Err(e)) => {
+                    warn!("共享 socket 读取错误：{e}");
+                    break;
+                }
+                None => {
+                    warn!("共享 socket 服务端关闭");
+                    break;
+                }
+            }
+        }
+        // 退出时清连接（仅当仍为当前连接——避免误清新连接）
+        let mut guard = socket.lock().await;
+        if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
+            guard.take();
+            *conn_state.lock().unwrap() = ConnectionState::Unconnected;
+            tracing::warn!("共享 socket 连接已清除（下次请求自动重连）");
+        }
+    });
+}
+
+/// 保活任务：每 20s 发一个 ping——防 server 30s 空闲超时断连，使「GUI
+/// 开着」≈「GUI 连着」（ui.edit 可路由到 GUI）。只保活不重连：连接断后
+/// 本任务退出，下次请求自动重连。ping 的响应由 reader 丢弃（无 pending 注册）。
+fn spawn_keepalive(session: &GuiSession, conn: Arc<SharedConn>) {
+    let socket = session.socket.clone();
+    let next_msg_id = session.next_msg_id.clone();
+    tokio::spawn(async move {
+        let mut iv = tokio::time::interval(KEEPALIVE_INTERVAL);
+        loop {
+            iv.tick().await;
+            // 连接已被替换/清除 → 退出（新连接有新的 keepalive）
+            {
+                let guard = socket.lock().await;
+                if !guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, &conn)) {
+                    return;
+                }
+            }
+            let id = next_msg_id.fetch_add(1, Ordering::SeqCst);
+            let msg = Message {
+                id,
+                kind: MsgKind::Req,
+                op: "ping".to_string(),
+                payload: serde_json::json!(null),
+                err: None,
+            };
+            if let Err(e) = conn.sink.lock().await.send(Frame::Json(msg)).await {
+                debug!("keepalive ping 发送失败（连接已断）：{e}");
+                return;
+            }
+        }
+    });
+}
+
+/// 发送失败/断连/超时后清除当前连接（仅当仍为该连接——避免误清新连接）。
+async fn invalidate(session: &GuiSession, conn: &Arc<SharedConn>) {
+    let mut guard = session.socket.lock().await;
+    if guard.as_ref().is_some_and(|c| Arc::ptr_eq(c, conn)) {
+        guard.take();
+    }
+    *session.conn_state.lock().unwrap() = ConnectionState::Unconnected;
+}
+
 /// 发送 JSON 请求并接收响应（共享 session socket）。
 ///
-/// **原子**：「无连接则连接」与发送/接收在同一把锁内完成——并发请求要么
-/// 排队等连接建好后直接复用，要么自己触发连接，绝不会看到半拆掉的 None
-/// socket（旧两段式 ensure→send 在并发 + 旧连接被重试路径 take 时会产生
-/// 「Socket 未初始化」误报）。
+/// push-ready 模型：发送与等待响应分离——响应由 reader 任务按 msg.id 路由到
+/// oneshot（[`GuiSession::pending`]），server 在请求间隙推的 Evt 事件不再
+/// 干扰请求-响应配对；并发请求天然排队（写侧 Mutex 只锁单帧写入）。
 pub async fn try_send_json_request(session: &GuiSession, msg: &Message) -> Result<Message> {
-    let mut socket_guard = session.socket.lock().await;
+    let conn = ensure_connect(session).await?;
 
-    // 无连接（首连 / 旧连接因断连被丢弃）：持锁连接，等待者队在我们之后
-    if socket_guard.is_none() {
-        *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Connecting;
-        let container_name = session.container_name.clone();
-        tracing::warn!("socket 未建立，连接到 {}", container_name);
-        match connect_to_container(&container_name).await {
-            Ok((framed, session_id)) => {
-                *session.session_id.lock().unwrap() = Some(session_id);
-                *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Connected;
-                *socket_guard = Some(framed);
-                tracing::info!("socket 已建立");
-            }
-            Err(e) => {
-                *session.conn_state.lock().unwrap() = crate::state::ConnectionState::Unconnected;
-                return Err(e);
-            }
-        }
+    tracing::debug!("try_send_json_request: op={} id={}", msg.op, msg.id);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    {
+        let mut p = session.pending.lock().await;
+        p.insert(msg.id, tx);
     }
 
-    let socket = socket_guard.as_mut().expect("上面已确保 socket 为 Some");
-
-    tracing::debug!(
-        "try_send_json_request: op={} id={}",
-        msg.op,
-        msg.id
-    );
-
-    socket
-        .send(Frame::Json(msg.clone()))
-        .await
-        .context("发送请求失败")?;
-
-    // 接收响应
-    let response = socket
-        .next()
-        .await
-        .context("接收响应失败")?
-        .context("响应帧为空")?;
-
-    match response {
-        Frame::Json(resp_msg) => {
-            if let Some(ref err) = resp_msg.err {
-                tracing::warn!(
-                    "server op_failed: op={} code={} msg={}",
-                    msg.op,
-                    err.code,
-                    err.message
-                );
-                Err(anyhow::anyhow!(
-                    "服务器错误：{} - {}",
-                    err.code,
-                    err.message
-                ))
-            } else {
-                Ok(resp_msg)
-            }
-        }
-        Frame::Raw { .. } => Err(anyhow::anyhow!("响应应为 JSON 帧")),
+    if let Err(e) = conn.sink.lock().await.send(Frame::Json(msg.clone())).await {
+        session.pending.lock().await.remove(&msg.id);
+        invalidate(session, &conn).await;
+        return Err(e).context("发送请求失败");
     }
+
+    let resp = match tokio::time::timeout(RESP_TIMEOUT, rx).await {
+        Ok(Ok(r)) => r,
+        Ok(Err(_)) => {
+            // oneshot 被 drop = reader 任务退出（连接已断）
+            invalidate(session, &conn).await;
+            return Err(anyhow::anyhow!("等待响应时连接已断开"));
+        }
+        Err(_) => {
+            // 超时：连接可能仍存活（server 慢）；无 30s 级 op，清连更稳
+            session.pending.lock().await.remove(&msg.id);
+            invalidate(session, &conn).await;
+            return Err(anyhow::anyhow!(
+                "等待响应超时（{}s）",
+                RESP_TIMEOUT.as_secs()
+            ));
+        }
+    };
+
+    if let Some(ref err) = resp.err {
+        tracing::warn!(
+            "server op_failed: op={} code={} msg={}",
+            msg.op,
+            err.code,
+            err.message
+        );
+        return Err(anyhow::anyhow!("服务器错误：{} - {}", err.code, err.message));
+    }
+    Ok(resp)
 }
 
 /// 发送 JSON 请求并接收响应。
 ///
-/// server 对无 PTY 的连接有 30s 空闲超时；共享 socket 空闲超时后可能已被
-/// server 断开（stale）—— 传输错时丢弃旧连接、重试一次（幂等请求场景
-/// 足够）。重试是安全的：`take()` 与重连都在 `try_send_json_request` 的
-/// 锁模型内，并发请求会等重连完成复用新连接。
+/// 传输错（发送失败/断连/超时）时 [`try_send_json_request`] 已清除死连接，
+/// 重试一次自动重连（幂等请求场景足够）。op_failed 是数据回包，不重连。
 pub async fn send_json_request(
     session: &GuiSession,
     op: String,
@@ -244,32 +393,17 @@ pub async fn send_json_request(
         err: None,
     };
 
-    tracing::debug!("send_json_request → op={} id={}", op, msg.id);
+    tracing::debug!("send_json_request → op={} id={}", msg.op, msg.id);
 
     match try_send_json_request(session, &msg).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             let msg_str = e.to_string();
-            tracing::warn!(
-                "send_json_request: op={} id={} err={:?} msg_str_prefix={:?}",
-                op,
-                msg.id,
-                e,
-                &msg_str[..msg_str.len().min(40)]
-            );
-            // 区分"服务器 op_failed"与传输错:server 把 op_failed 用合法的 JSON
-            // 帧回包(err.code+err.message 非空),`try_send_json_request` 一律映射
-            // 成 Err → 老逻辑把数据错当 socket 错,触发 socket 拆接 + 重连循环,
-            // 期间所有后续请求(包括 terminal 的 pty.write)都拿不到 socket → 终端
-            // 静默断连。op_failed 是数据回包,不重连;只有真传输错(发送/接收
-            // 失败、连接中断)才需要重建 socket 重试。
             if msg_str.starts_with("服务器错误") {
-                tracing::warn!("send_json_request: op_failed 不重连 op={}", op);
+                tracing::warn!("send_json_request: op_failed 不重连 op={op}");
                 return Err(e);
             }
-            tracing::warn!("send_json_request: 传输错,丢弃旧连接重试 op={}", op);
-            // 丢弃旧连接(可能已被 server 空闲超时断开)；下次 try_send 持锁重连
-            session.socket.lock().await.take();
+            tracing::warn!("send_json_request: 传输错，重试 op={op}：{msg_str}");
             try_send_json_request(session, &msg).await
         }
     }

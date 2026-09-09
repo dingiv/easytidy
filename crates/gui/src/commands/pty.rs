@@ -8,6 +8,7 @@
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use easytidy_protocol::{
     ops::{
         PtyClose, PtyExited, PtyList, PtyListResp, PtyOpen, PtyOpenResp, PtyResize, PtyTerminalInfo,
@@ -154,12 +155,29 @@ pub async fn pty_open(
                 Some(Ok(frame)) => match frame {
                     Frame::Raw {
                         stream_id: sid,
-                        data,
+                        data: first,
                     } => {
                         if sid == stream_id {
+                            // 合并输出洪流：vi/htop 等全屏应用一次重绘会产生
+                            // 大量小帧，逐帧 IPC（JSON 数字数组序列化膨胀 4-5x）
+                            // 会打爆 WebKitGTK 消息管道 → 终端输入卡死。合并
+                            // 窗口 8ms / 上限 256KB，只发一条事件。
+                            let mut merged = first;
+                            let deadline = std::time::Duration::from_millis(8);
+                            loop {
+                                if merged.len() >= 256 * 1024 {
+                                    break;
+                                }
+                                match tokio::time::timeout(deadline, stream.next()).await {
+                                    Ok(Some(Ok(Frame::Raw { stream_id: sid2, data: more }))) if sid2 == stream_id => {
+                                        merged.extend_from_slice(&more);
+                                    }
+                                    _ => break,
+                                }
+                            }
                             let event = PtyEvent {
                                 kind: "data".to_string(),
-                                data: Some(data),
+                                data: Some(base64::engine::general_purpose::STANDARD.encode(&merged)),
                                 code: None,
                                 cwd: None,
                             };

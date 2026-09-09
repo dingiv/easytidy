@@ -10,12 +10,26 @@ use futures::stream::SplitSink;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::net::UnixStream;
 use tokio_util::codec::Framed;
 
 use easytidy_core::podman::Podman;
-use easytidy_protocol::{Frame, FrameCodec};
+use easytidy_protocol::{Frame, FrameCodec, Message};
+
+/// 全局 AppHandle（lib.rs setup 时注入；后台任务如 socket reader 用它
+/// emit 前端事件——Tauri 2 无 AppHandle::global()）。
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// 注入全局 AppHandle（Tauri setup 钩子调用，幂等：已设则忽略）。
+pub fn set_app_handle(app: tauri::AppHandle) {
+    let _ = APP_HANDLE.set(app);
+}
+
+/// 取全局 AppHandle（setup 后恒有值）。
+pub fn app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.get().cloned()
+}
 
 /// GUI 应用模式（main.rs 传入）
 #[derive(Debug, Clone, PartialEq)]
@@ -49,18 +63,33 @@ pub enum ConnectionState {
     Connected,
 }
 
+/// 共享 socket 连接（读写拆分：写侧给请求方共享，读侧归 reader 任务独占）。
+///
+/// push-ready 模型（2026-09-03）：server 可主动推 Evt 帧（如 ui.edit）——
+/// 旧同步模型（发一帧收一帧）会在无请求在途时没人读 socket，事件滞留；
+/// 拆出 reader 任务后事件即时送达（Tauri emit），响应按 msg.id 路由到
+/// 各自的 oneshot（[`GuiSession::pending`]），与 pty.rs 专用连接同模式。
+pub struct SharedConn {
+    /// 写侧（Mutex 串行化帧写入；并发请求各自锁住发一帧即释放）
+    pub sink: tokio::sync::Mutex<SplitSink<Framed<UnixStream, FrameCodec>, Frame>>,
+}
+
 /// 单容器 GUI 会话（托管在 Tauri State 中）
 pub struct GuiSession {
     /// 容器名
     pub container_name: String,
-    /// Socket 会话（使用 tokio Mutex 因为需要 async）
-    pub socket: tokio::sync::Mutex<Option<Framed<UnixStream, FrameCodec>>>,
-    /// 连接状态机（与 socket Option 同步维护）
-    pub conn_state: std::sync::Mutex<ConnectionState>,
+    /// 共享 socket 连接（push-ready：Arc 供 reader/keepalive 任务持有；
+    /// Option = 未连接/已断开）
+    pub socket: Arc<tokio::sync::Mutex<Option<Arc<SharedConn>>>>,
+    /// 连接状态机（Arc：reader 任务断连时清除；与 socket 同步维护）
+    pub conn_state: Arc<std::sync::Mutex<ConnectionState>>,
     /// 握手返回的会话 ID（已连接后非空；server 每连接创建）
     pub session_id: std::sync::Mutex<Option<String>>,
-    /// 下一个消息 ID
-    pub next_msg_id: AtomicU64,
+    /// 下一个消息 ID（Arc：keepalive 任务持有克隆）
+    pub next_msg_id: Arc<AtomicU64>,
+    /// 待响应等待者：msg.id → oneshot（reader 任务按 id 路由响应；
+    /// Arc：命令任务与 reader 任务共享）
+    pub pending: Arc<tokio::sync::Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Message>>>>,
     /// 活动 PTY 流（stream_id -> 该 PTY 专用连接的写侧）
     pub active_ptys: Arc<tokio::sync::Mutex<HashMap<u32, PtySink>>>,
     /// root 会话写侧（每容器一个共享 root shell；经 podman exec 的 client
@@ -78,8 +107,9 @@ pub struct GuiSession {
 pub struct PtyEvent {
     /// 事件类型："data" / "exited" / "cwdChanged"
     pub kind: String,
-    /// 数据（kind="data" 时）
-    pub data: Option<Vec<u8>>,
+    /// 数据（kind="data" 时；base64 编码——JSON 数字数组体积膨胀 4-5 倍，
+    /// vi 等全屏重绘的输出洪流会打爆 WebKitGTK IPC 管道，曾致终端输入卡死）
+    pub data: Option<String>,
     /// 退出码（kind="exited" 时）
     pub code: Option<i32>,
     /// 工作目录（kind="cwdChanged" 时；server 主动推送的 TTY 事件）

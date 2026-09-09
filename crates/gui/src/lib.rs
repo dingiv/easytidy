@@ -50,10 +50,11 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
     let gui_session = match &mode {
         AppMode::Worker { name } => Some(state::GuiSession {
             container_name: name.clone(),
-            socket: tokio::sync::Mutex::new(None),
-            conn_state: std::sync::Mutex::new(state::ConnectionState::Unconnected),
+            socket: Arc::new(tokio::sync::Mutex::new(None)),
+            conn_state: Arc::new(std::sync::Mutex::new(state::ConnectionState::Unconnected)),
             session_id: std::sync::Mutex::new(None),
-            next_msg_id: AtomicU64::new(2), // 握手已用 1
+            next_msg_id: Arc::new(AtomicU64::new(2)), // 握手已用 1
+            pending: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             active_ptys: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             root_sink: Arc::new(tokio::sync::Mutex::new(None)),
             root_attach_lock: Arc::new(tokio::sync::Mutex::new(())),
@@ -63,6 +64,11 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        // 注入全局 AppHandle（后台任务 emit 前端事件用）
+        .setup(|app| {
+            state::set_app_handle(app.handle().clone());
+            Ok(())
+        })
         .manage(mode)
         .manage(state::PodmanState::new())
         .manage(gui_session)
@@ -109,6 +115,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::inspect_container,
             commands::containers::container_failure_info,
             commands::containers::open_container_window,
+            commands::containers::open_container_vscode,
+            commands::containers::open_container_terminal,
             commands::containers::container_shutdown,
             // 镜像管理
             commands::containers::images_list,
@@ -129,6 +137,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::passthrough::container_entry_icon,
             // 容器入口图标源持久化（跨会话：导出时写 config.icon，挂载时预填输入框）
             commands::passthrough::container_entry_icon_source,
+            commands::passthrough::container_entry_config,
+            commands::passthrough::container_set_entry_name,
             commands::passthrough::container_set_entry_icon,
             // 桌面快捷方式管理（纯宿主侧：扫描/移除/图标重编/预览）
             commands::desktop_icons::desktop_icons_scan,
@@ -211,6 +221,7 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             // 应用控制台（受管子进程 stdio 日志 / 进程状态，前端轮询）
             commands::passthrough::app_logs,
             commands::passthrough::app_ps,
+            commands::passthrough::app_kill,
             // 容器自启动（systemd user unit）
             commands::passthrough::passthrough_set_boot_mode,
             // 配置（容器内 server 配置读写）

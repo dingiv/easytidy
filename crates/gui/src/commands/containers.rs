@@ -339,9 +339,9 @@ pub fn env_copy_config(name: String) -> Result<ContainerConfig, String> {
         .ok_or_else(|| format!("容器配置不存在：{name}（未接管容器无注册配置，不可复制）"))
 }
 
-/// 模板展开已迁移到 conf YAML（`commands::config::conf_template_get`）：
-/// conf 模板 = 完整 ContainerConfig flatten + 可选 setup；创建表单预填直接
-/// 读 conf/<name>.yaml 并解析为 ContainerConfig。flutter 已退役。
+// 模板展开已迁移到 conf YAML（`commands::config::conf_template_get`）：
+// conf 模板 = 完整 ContainerConfig flatten + 可选 setup；创建表单预填直接
+// 读 conf/<name>.yaml 并解析为 ContainerConfig。flutter 已退役。
 
 /// 新建环境：统一创建入口，收完整 [`ContainerConfig`]（创建后启动并注册）。
 ///
@@ -403,8 +403,8 @@ pub async fn env_new(
 
     let config_file = try_log!(ConfigFile::default_instance(), "解析容器配置目录");
     // 容器入口图标：创建时尚未登记入口图标（图标源存容器内 config.json，见 passthrough
-    // 命令；由「导出」设置并登记），此处用内置品牌图标生成 .desktop（导出时重写为新图标）。
-    let entry_icon = desktop::ensure_container_entry_icon(&name);
+    // 命令；由「导出」设置并登记），此处用按名字生成的 identicon 兒底（导出时重写）。
+    let entry_icon = desktop::ensure_container_entry_icon(&name, &name);
     try_log!(config_file.register_container(config), "注册环境配置");
 
     // 生成桌面图标（辅助动作：失败不阻断创建，落日志即可）。新格式
@@ -565,6 +565,140 @@ pub fn open_container_window(name: String) -> Result<(), String> {
         .map_err(|e| format!("启动容器窗口失败：{}", e))?;
 
     info!("已启动容器窗口：{}", name);
+    Ok(())
+}
+
+/// 用 VS Code Dev Containers 附着到**运行中**的容器。
+///
+/// URI 格式（Remote-Containers 扩展解析）：
+///   `vscode-remote://attached-container+<HEX(容器名)><容器内目标路径>`
+/// 前提：VS Code 已装 Remote-Containers 扩展，且 `dev.containers.dockerPath` 指向
+/// podman（rootless podman 容器方可附着）。首次附着时 VS Code 会向容器安装
+/// vscode-server，并弹出一次性「信任容器」确认。
+#[tauri::command]
+pub fn open_container_vscode(name: String) -> Result<(), String> {
+    use std::process::Command;
+
+    // 1) 解析 VS Code CLI（优先 PATH，其次常见安装位置）
+    let code = find_executable("code")
+        .or_else(|| find_executable("code-insiders"))
+        .ok_or("未找到 `code` 命令（VS Code CLI，可用 `code` 命令时请确认已加入 PATH）")?;
+
+    // 2) 容器内默认工作目录 = 容器用户 HOME（printenv 探测；失败回落 /）
+    let workspace = Command::new("podman")
+        .args(["exec", &name, "printenv", "HOME"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                (!s.is_empty()).then_some(s)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "/".to_string());
+
+    // 3) 容器名 → 十六进制字符串
+    let hex: String = name
+        .as_bytes()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+
+    // 4) 组装 URI 并启动 VS Code（附着 + 自动安装 vscode-server）
+    let uri = format!("vscode-remote://attached-container+{}{}", hex, workspace);
+    Command::new(&code)
+        .arg("--folder-uri")
+        .arg(&uri)
+        .spawn()
+        .map_err(|e| format!("启动 VS Code 失败：{e}"))?;
+
+    info!("已用 VS Code 附着容器：{} → {}", name, uri);
+    Ok(())
+}
+
+/// 在 PATH 及常见安装位置查找可执行文件，返回首个存在且可执行者的绝对路径。
+fn find_executable(bin: &str) -> Option<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let is_exec = |p: &std::path::Path| -> bool {
+        p.is_file()
+            && p
+                .metadata()
+                .map(|md| md.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+    };
+    if let Ok(paths) = std::env::var("PATH") {
+        for dir in paths.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
+            let candidate = std::path::Path::new(dir).join(bin);
+            if is_exec(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    for p in ["/usr/bin", "/usr/local/bin", "/opt/vscode"] {
+        let candidate = std::path::Path::new(p).join(bin);
+        if is_exec(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// 用宿主终端打开容器交互式 shell。
+///
+/// 命令：`easytidy run --container <name>`（经 server PTY 转发，需 easytidy 在 PATH）。
+/// 不同终端模拟器命令传参方式不同，按检测到的二进制名分别处理。
+#[tauri::command]
+pub fn open_container_terminal(name: String) -> Result<(), String> {
+    use std::process::Command;
+
+    // 探测宿主终端模拟器（按优先级）
+    let candidates = [
+        "/usr/bin/alacritty",
+        "/usr/bin/kitty",
+        "/usr/bin/gnome-terminal",
+        "/usr/bin/konsole",
+        "/usr/bin/xfce4-terminal",
+        "/usr/bin/xterm",
+        "/usr/bin/terminal",
+        "/usr/bin/x-terminal-emulator",
+    ];
+    let term = candidates
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
+        .ok_or("未找到可用终端模拟器（alacritty/kitty/gnome-terminal/konsole/xfce4-terminal/xterm）")?;
+
+    // 要执行的命令：`easytidy run --container <name>`（交互式 shell）
+    let cmd_parts: Vec<String> =
+        vec!["easytidy".into(), "run".into(), "--container".into(), name.clone()];
+    let cmd_str = cmd_parts.join(" ");
+
+    // 按终端类型构造 argv
+    let term_name = term.rsplit('/').next().unwrap_or(term);
+    let args: Vec<String> = match term_name {
+        // 现代 gnome-terminal / alacritty(0.13+)：`-- cmd args...`
+        "gnome-terminal" | "alacritty" | "tilix" => {
+            let mut a = vec!["--".to_string()];
+            a.extend(cmd_parts);
+            a
+        }
+        // kitty：`kitty sh -c "cmd"`
+        "kitty" => vec!["sh".into(), "-c".into(), cmd_str],
+        // konsole / xfce4-terminal：`-e "cmd"`（单字符串）
+        "konsole" | "xfce4-terminal" => vec!["-e".to_string(), cmd_str],
+        // xterm 及其他回退：`-e cmd args...`
+        _ => vec!["-e".to_string(), cmd_str],
+    };
+
+    Command::new(term)
+        .args(&args)
+        .spawn()
+        .map_err(|e| format!("启动终端失败（{term_name}）：{e}"))?;
+    info!("已用 {} 打开容器终端：{}", term_name, name);
     Ok(())
 }
 

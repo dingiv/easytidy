@@ -5,12 +5,12 @@
   "identifier": "io.github.dingiv.easytidy",
   "build": {
     "beforeDevCommand": {
-      "script": "sh -c 'cargo build -p easytidy-server --target x86_64-unknown-linux-musl && cargo build -p easytidy-dock --target x86_64-unknown-linux-musl && pnpm dev'",
+      "script": "sh -c 'cargo build -p easytidy-server --target x86_64-unknown-linux-musl && cargo build -p easytidy-dock --target x86_64-unknown-linux-musl && cargo build -p easytidy --target x86_64-unknown-linux-musl && pnpm dev'",
       "cwd": "."
     },
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": {
-      "script": "sh -c 'cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl && cargo build -p easytidy-dock --release --target x86_64-unknown-linux-musl && pnpm build'",
+      "script": "sh -c 'cargo build -p easytidy-server --release --target x86_64-unknown-linux-musl && cargo build -p easytidy-dock --release --target x86_64-unknown-linux-musl && cargo build -p easytidy --release && cargo build -p easytidy --release --target x86_64-unknown-linux-musl && mkdir -p binaries && cp ../../target/release/easytidy binaries/easytidy-$TAURI_ENV_TARGET_TRIPLE && cp ../../target/x86_64-unknown-linux-musl/release/easytidy-server binaries/easytidy-server-$TAURI_ENV_TARGET_TRIPLE && cp ../../target/x86_64-unknown-linux-musl/release/easytidy-dock binaries/easytidy-dock-$TAURI_ENV_TARGET_TRIPLE && cp ../../target/x86_64-unknown-linux-musl/release/ets binaries/ets-$TAURI_ENV_TARGET_TRIPLE && pnpm build'",
       "cwd": "."
     },
     "frontendDist": "dist"
@@ -33,6 +33,11 @@
     "targets": [
       "deb",
       "rpm"
+    ],
+    "externalBin": [
+      "binaries/easytidy",
+      "binaries/easytidy-server",
+      "binaries/easytidy-dock"
     ],
     "icon": [
       "icons/32x32.png",

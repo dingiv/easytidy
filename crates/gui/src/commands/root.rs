@@ -17,6 +17,7 @@
 use futures::StreamExt;
 use std::time::Duration;
 
+use base64::Engine as _;
 use easytidy_protocol::rc::{RcListResp, SessionInfo};
 
 use crate::state::{GuiSession, PodmanState};
@@ -184,7 +185,7 @@ async fn open_root_session(
                     if !bytes.is_empty() {
                         let event = PtyEvent {
                             kind: "data".to_string(),
-                            data: Some(bytes.to_vec()),
+                            data: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
                             code: None,
                             cwd: None,
                         };
@@ -301,7 +302,7 @@ pub async fn root_terminal_attach(
             Some(s) => RootTarget::Attach { session_id: s.id },
             None => RootTarget::New,
         };
-        open_root_session(&p, &container_name, cols, rows, target, &sess, on_event).await
+        open_root_session(&p, &container_name, cols, rows, target, sess, on_event).await
     }
     .await;
     podman.return_podman(p).await;

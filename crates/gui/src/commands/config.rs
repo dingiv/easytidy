@@ -604,20 +604,16 @@ pub async fn list_host_path_suggestions(prefix: String) -> Result<Vec<HostEntry>
             let mut cursor = path.to_path_buf();
             let mut partial = String::new();
             let mut found_dir: Option<std::path::PathBuf> = None;
-            loop {
-                if let Some(parent) = cursor.parent() {
-                    if parent.is_dir() {
-                        partial = cursor
-                            .file_name()
-                            .map(|s| s.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        found_dir = Some(parent.to_path_buf());
-                        break;
-                    }
-                    cursor = parent.to_path_buf();
-                } else {
+            while let Some(parent) = cursor.parent() {
+                if parent.is_dir() {
+                    partial = cursor
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    found_dir = Some(parent.to_path_buf());
                     break;
                 }
+                cursor = parent.to_path_buf();
             }
             match found_dir {
                 Some(d) => (d, partial),

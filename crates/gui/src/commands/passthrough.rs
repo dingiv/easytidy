@@ -5,7 +5,7 @@ use tracing::{info, warn};
 use base64::Engine as _;
 
 use easytidy_protocol::ops::{
-    AppLogs, AppLogsResp, AppsPs, AppsPsResp, CfgGet, CfgGetResp, CfgSet, FsMkdir, FsWrite,
+    AppKill, AppLogs, AppLogsResp, AppsPs, AppsPsResp, CfgGet, CfgGetResp, CfgSet, FsMkdir, FsWrite,
     ManagedProcess, PassthroughList, PassthroughListResp, PassthroughSet, PtConfiguredApp,
 };
 
@@ -85,6 +85,27 @@ const EASYTIDY_BRAND_ICON: &[u8] = include_bytes!("../../icons/easytidy256x256.p
 // 供 state 枚举与 revoke 定位。
 // ============================================================================
 
+/// 验证 CLI 二进制支持 `open` 垫片子命令（`--help` 输出含 open）。
+///
+/// 历史呑痕：`~/.local/share/easytidy/bin/easytidy` 可能是旧版安装残留
+/// （无 `open` 子命令）——曾导致发布版桌面图标全废（点击报 unrecognized
+/// subcommand，且用户看不到）。导出前校验，陈旧二进制跳过。
+fn cli_supports_open(path: &str) -> bool {
+    std::process::Command::new(path)
+        .arg("--help")
+        .output()
+        .map(|out| {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // 子命令列表里含独立的 open 词（避免误匹配路径/参数里的 open 字样）
+            text.split_whitespace().any(|w| w == "open")
+        })
+        .unwrap_or(false)
+}
+
 /// 宿主 CLI 绝对路径（passthrough .desktop 与 GUI 入口 .desktop 的
 /// Exec/TryExec 用——所有桌面快捷方式统一指向 CLI 垫片 `easytidy open`）。
 ///
@@ -92,22 +113,35 @@ const EASYTIDY_BRAND_ICON: &[u8] = include_bytes!("../../icons/easytidy256x256.p
 /// ② 安装目录 ~/.local/share/easytidy/bin/easytidy（部署布局）；
 /// ③ PATH 中的 easytidy。宿主 PATH 未必有 easytidy（实测未安装），
 /// 必须给出绝对路径，否则桌面入口无法启动。
+/// 候选需通过 [`cli_supports_open`] 能力校验（旧版无 `open` 子命令的
+/// 二进制直接跳过，不再导出指向它的死图标）。
 pub(crate) fn cli_path() -> String {
+    let mut candidates: Vec<String> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
-            let sibling = parent.join("easytidy");
-            if sibling.exists() {
-                return sibling.to_string_lossy().into_owned();
-            }
+            candidates.push(parent.join("easytidy").to_string_lossy().into_owned());
         }
     }
     if let Some(data) = dirs::data_local_dir() {
-        let installed = data.join("easytidy/bin/easytidy");
-        if installed.exists() {
-            return installed.to_string_lossy().into_owned();
+        candidates.push(data.join("easytidy/bin/easytidy").to_string_lossy().into_owned());
+    }
+    candidates.push("easytidy".to_string());
+
+    // 逐个校验支持 open；全不合格则回退第一个存在/PATH 兜底（维持旧行为，
+    // 让错误在点击时暴露而不是导出时静默指向空）
+    let mut first_existing: Option<&String> = None;
+    for c in &candidates {
+        if c == "easytidy" || std::path::Path::new(c).exists() {
+            if first_existing.is_none() {
+                first_existing = Some(c);
+            }
+            if c == "easytidy" || cli_supports_open(c) {
+                return c.clone();
+            }
+            tracing::warn!("CLI 候选不支持 open 子命令（旧版安装残留？），跳过：{c}");
         }
     }
-    "easytidy".to_string()
+    first_existing.cloned().unwrap_or_else(|| "easytidy".to_string())
 }
 
 /// 获取 passthrough 状态（已导出 .desktop 全文 + 配置的应用条目 + 收藏）。
@@ -644,6 +678,29 @@ pub async fn app_logs(
     Ok(logs.stdio)
 }
 
+/// 终止托管进程（server `apps.kill`：SIGTERM）。进程不存在/已退出 → 报错。
+#[tauri::command]
+pub async fn app_kill(
+    session: tauri::State<'_, Option<GuiSession>>,
+    pid: u32,
+) -> Result<(), String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let resp = send_json_request(
+        sess,
+        "apps.kill".to_string(),
+        serde_json::to_value(AppKill { pid }).map_err(|e| e.to_string())?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Some(err) = resp.err {
+        return Err(format!("{} {}", err.code, err.message));
+    }
+    Ok(())
+}
+
 /// 列出 server 托管的进程（`apps.ps`：运行中 + 最近退出，带退出码与 stdio 长度）。
 ///
 /// 供前端判断某 pid 是否仍在运行/已退出/退出码——应用控制台据此显示状态
@@ -880,7 +937,7 @@ pub async fn passthrough_export(
 
     // 图标：两类应用均为**容器内**路径 → 导出时经 server 拷出到宿主缓存 →
     // Icon= 用宿主路径。custom 保留原始图标；扫描应用合成品牌化（边框+水印）；
-    // 拷出失败（容器未运行/文件缺失）时 custom 回退内置品牌图标
+    // 拷出失败（容器未运行/文件缺失）时 custom 回退按 app id 生成的 identicon
     let mut icon_attr = None;
     if app.desktop_file.starts_with("custom:") {
         if let Some(icon_path) = app.icon_path.as_ref() {
@@ -921,7 +978,7 @@ pub async fn passthrough_export(
             }
         }
         if icon_attr.is_none() {
-            icon_attr = easytidy_core::desktop::ensure_gui_icon();
+            icon_attr = easytidy_core::desktop::ensure_app_icon(&app.id);
         }
     } else if let Some(icon_path) = app.icon_path.as_ref() {
         if icon_path.starts_with('/') {
@@ -1031,19 +1088,20 @@ async fn fetch_or_host_read(sess: &GuiSession, path: &str) -> Result<Vec<u8>, St
     }
 }
 
-/// 登记容器内入口图标路径到 `config.json` 的 `entry_icon`（None = 清除）。
-async fn register_entry_icon_in_container(
+/// 容器内 config.json 键写入（server 维护；None/空串 → 写 Null 清除）。
+async fn container_config_set(
     sess: &GuiSession,
-    path: Option<&str>,
+    key: &str,
+    value: Option<&str>,
 ) -> Result<(), String> {
-    let value = path
+    let v = value
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|s| serde_json::Value::String(s.to_string()))
         .unwrap_or(serde_json::Value::Null);
     let set_req = CfgSet {
-        key: "entry_icon".to_string(),
-        value,
+        key: key.to_string(),
+        value: v,
     };
     let resp = send_json_request(
         sess,
@@ -1056,6 +1114,23 @@ async fn register_entry_icon_in_container(
         return Err(format!("{} {}", err.code, err.message));
     }
     Ok(())
+}
+
+/// 登记容器内入口图标路径到 `config.json` 的 `entry_icon`（None = 清除）。
+async fn register_entry_icon_in_container(
+    sess: &GuiSession,
+    path: Option<&str>,
+) -> Result<(), String> {
+    container_config_set(sess, "entry_icon", path).await
+}
+
+/// 登记容器导出显示名到 `config.json` 的 `entry_name`（None = 清除）。
+/// 与 entry_icon 同源：由 easytidy-server 维护，UI 进入时拉取预填。
+async fn register_entry_name_in_container(
+    sess: &GuiSession,
+    name: Option<&str>,
+) -> Result<(), String> {
+    container_config_set(sess, "entry_name", name).await
 }
 
 /// 导出本容器的 GUI 管理界面桌面快捷方式（菜单 + 桌面图标）。
@@ -1104,7 +1179,16 @@ pub async fn export_gui_shortcut(
                     register_entry_icon_in_container(sess, Some(&src)).await?;
                     easytidy_core::desktop::process_container_icon_bytes(&sess.container_name, &data)
                 }
-                None => easytidy_core::desktop::ensure_container_entry_icon(&sess.container_name),
+                None => {
+                    // 兒底种子 = 导出显示名（与 .desktop Name= 同源）：改名重导出
+                    // → 图标与桌面名字一起变；未填显示名用容器名
+                    let seed = display_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(&sess.container_name);
+                    easytidy_core::desktop::ensure_container_entry_icon(&sess.container_name, seed)
+                }
             }
         }
     };
@@ -1117,8 +1201,73 @@ pub async fn export_gui_shortcut(
         display_name.as_deref(),
     )
     .map_err(|e| e.to_string())?;
+    // 导出显示名持久化到容器 config.json（entry_name，server 维护；
+    // 与 entry_icon 同源，UI 下次进入拉取预填）。种子与 .desktop Name= 同源。
+    let effective_name = display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("easytidy {}", sess.container_name));
+    register_entry_name_in_container(sess, Some(&effective_name))
+        .await
+        .map_err(|e| e.to_string())?;
     info!("GUI 入口导出：{} → {:?}", sess.container_name, menu_path);
     Ok(menu_path.to_string_lossy().into_owned())
+}
+
+/// 读取容器入口导出配置（显示名 + 图标源，均存容器内 config.json、由
+/// server 维护）：UI 进入时拉取预填。server 不可达（容器未运行）→
+/// name = None、icon 回退宿主 ConfigFile.icon。
+#[tauri::command]
+pub async fn container_entry_config(
+    session: tauri::State<'_, Option<GuiSession>>,
+) -> Result<serde_json::Value, String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    let mut name: Option<String> = None;
+    let mut icon: Option<String> = host_entry_icon(&sess.container_name);
+    // server 侧优先（容器内 config.json 是主维护源）
+    if let Ok(resp) = send_json_request(
+        sess,
+        "config.get".to_string(),
+        serde_json::to_value(CfgGet).map_err(|e| e.to_string())?,
+    )
+    .await
+    {
+        if resp.err.is_none() {
+            let cfg: CfgGetResp = serde_json::from_value(resp.payload)
+                .map_err(|e| format!("解析 config.get 响应失败：{e}"))?;
+            name = cfg
+                .config
+                .get("entry_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Some(p) =
+                cfg.config.get("entry_icon").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            {
+                icon = Some(p);
+            }
+        }
+    }
+    Ok(serde_json::json!({ "name": name, "icon": icon }))
+}
+
+/// 设置容器导出显示名（同步到容器 config.json 的 entry_name，server 维护；
+/// None/空 = 清除）。UI 输入框变更时同步。
+#[tauri::command]
+pub async fn container_set_entry_name(
+    session: tauri::State<'_, Option<GuiSession>>,
+    name: Option<String>,
+) -> Result<(), String> {
+    let sess = session
+        .inner()
+        .as_ref()
+        .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
+    register_entry_name_in_container(sess, name.as_deref()).await
 }
 
 /// 容器入口当前图标源路径（UI 预览用）：主来源（宿主 ConfigFile.icon，宿主或容器
@@ -1134,8 +1283,11 @@ pub async fn container_entry_icon(
         .ok_or_else(|| "当前模式不是单容器模式".to_string())?;
     match host_entry_icon(&sess.container_name) {
         Some(p) => Ok(p),
-        None => easytidy_core::desktop::ensure_container_entry_icon(&sess.container_name)
-            .ok_or_else(|| "生成品牌图标失败".to_string()),
+        None => easytidy_core::desktop::ensure_container_entry_icon(
+            &sess.container_name,
+            &sess.container_name,
+        )
+        .ok_or_else(|| "生成品牌图标失败".to_string()),
     }
 }
 
