@@ -283,11 +283,7 @@ async fn bridge(framed: Framed<UnixStream, FrameCodec>) -> anyhow::Result<()> {
     let write_half = async {
         let mut stdin = tokio::io::stdin();
         let mut buf = [0u8; 4096];
-        loop {
-            let n = match stdin.read(&mut buf).await {
-                Ok(n) => n,
-                Err(_) => break,
-            };
+        while let Ok(n) = stdin.read(&mut buf).await {
             if n == 0 {
                 break;
             }

@@ -60,9 +60,35 @@ impl DaemonState {
 pub async fn run_daemon() -> anyhow::Result<()> {
     let state = Arc::new(DaemonState::new());
 
+    // 单实例互斥（flock）：对 `dock.sock.lock` 排它锁定，把「探活 → 清理
+    // stale socket → bind」临界区串行化。此前仅靠 connect 探测，探活与
+    // remove_file/bind 之间存在 TOCTOU 窗口：并发 bootstrap 时后启动者可能在
+    // 前一 daemon 刚 bind 完的瞬间 unlink 掉它正在监听的 socket 文件，使其
+    // 变成持有断链 inode 的孤儿 daemon。flock 在 daemon 存活期间一直持有
+    //（进程死亡自动释放），后到者拿不到锁直接退出。
+    use std::os::fd::AsRawFd;
+    let lock_path = format!("{DAEMON_SOCKET}.lock");
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("open daemon lock {lock_path} failed"))?;
+    let flock_rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if flock_rc != 0 {
+        // 拿不到锁 = 另一 daemon 正在启动或已在运行 → 本实例退出
+        info!(
+            "daemon startup lock held ({}), another daemon is starting/running, this instance exits",
+            lock_path
+        );
+        return Ok(());
+    }
+    // lock_file 故意不 drop：变量存活到 run_daemon 返回（= daemon 退出），锁随之释放
+    let _daemon_lock = lock_file;
+
     // 竞态防护：若已有活 daemon（socket 可连）→ 本实例直接退出（不 remove、
-    // 不 bind）。防 bootstrap 并发双 spawn（StrictMode 双 invoke / 用户快速
-    // 连点）时后启动者删掉先启动者正在用的 socket。
+    // 不 bind）。（flock 已串行化本临界区；connect 探测兜底「锁已释放但
+    // socket 仍可连」的不可能态，防御性保留）
     if tokio::net::UnixStream::connect(DAEMON_SOCKET).await.is_ok() {
         info!("daemon already running (socket connectable), this instance exits");
         return Ok(());
@@ -72,11 +98,11 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     if let Some(parent) = std::path::Path::new(DAEMON_SOCKET).parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
-    // 清理 stale socket（文件在但无 daemon 监听——上面 connect 已确认连不上）
+    // 清理 stale socket（文件在但无 daemon 监听）。flock 保证此刻没有其他
+    // daemon 处于启动临界区，unlink 的只可能是真 stale 文件。
     let _ = tokio::fs::remove_file(DAEMON_SOCKET).await;
 
-    // bind；AddrInUse = 另一 daemon 刚 bind 完（竞态输者）→ 退出而非 continue
-    //（否则 continue 会覆盖另一 daemon 的 socket）。
+    // bind；AddrInUse = 理论不可达（flock 已互斥 + stale 已清）——防御性退出
     let listener = match UnixListener::bind(DAEMON_SOCKET) {
         Ok(l) => l,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
