@@ -135,6 +135,14 @@ impl Podman {
     ///   `CONTAINERS_CONF`（`seccomp_profile=""`，见 [`fork_containers_conf`]）；
     ///   libseccomp 加回后移除该注入；
     /// - fork 二进制缺失或启动失败 → `Err`，由 [`connect`] 回退系统 socket。
+    /// libpod 直连复用的拉起入口（只需 socket 路径；二进制自行发现）。
+    pub(crate) fn ensure_fork_service_for(sock: &Path) -> Result<()> {
+        match Self::fork_bin() {
+            Some(bin) => Self::ensure_fork_service(&bin, sock),
+            None => Err(Error::Connect("easytidy fork podman 二进制未找到".to_string())),
+        }
+    }
+
     fn ensure_fork_service(bin: &Path, sock: &Path) -> Result<()> {
         if Self::socket_alive(sock) {
             return Ok(());
@@ -418,7 +426,7 @@ impl Podman {
         bins: &crate::ContainerBins,
         config: &ContainerConfig,
     ) -> Result<String> {
-        self.create_with_config_named(name, name, image, bins, config)
+        self.create_with_config_named(name, name, image, bins, config, false)
             .await
     }
 
@@ -429,6 +437,10 @@ impl Podman {
     ///
     /// 重建流程用：正式名被原容器占用，先以 `<name>_tmp` 创建（身份仍为
     /// 正式名），原容器删除后再改名。
+    ///
+    /// `fast=true`：附加 fork 扩展 `easytidy_fast=true`（跳过 RW 层全树 chown）。
+    /// **仅限快速重建**（commit 镜像源自同 uidmap 容器，同映射直通安全）；常规
+    /// create 一律 `false`——注册表镜像顶层归属与新容器映射不保证一致。
     pub async fn create_with_config_named(
         &self,
         name: &str,
@@ -436,6 +448,7 @@ impl Podman {
         image: &str,
         bins: &crate::ContainerBins,
         config: &ContainerConfig,
+        fast: bool,
     ) -> Result<String> {
         use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
@@ -735,7 +748,7 @@ impl Podman {
                 config.params.pid.as_deref(),
                 config.params.extra_opts.clone(),
             );
-            let id = libpod.create_container(container_name, body).await?;
+            let id = libpod.create_container(container_name, body, fast).await?;
             tracing::info!("容器 {container_name}（身份 {name}）创建成功（ID: {id}，keep-id）");
             return Ok(id);
         }
@@ -773,7 +786,7 @@ impl Podman {
             config.params.pid.as_deref(),
             config.params.extra_opts.clone(),
         );
-        let id = libpod.create_container(container_name, body).await?;
+        let id = libpod.create_container(container_name, body, fast).await?;
         tracing::info!("容器 {container_name}（身份 {name}）创建成功（ID: {id}，libpod）");
         Ok(id)
     }
@@ -1011,6 +1024,7 @@ impl Podman {
                 squash,
                 message,
                 &change_refs,
+                false,
             )
             .await?;
         tracing::info!("环境 {} 快照完成（squash={}）:{}", name, squash, image_ref);
@@ -1056,6 +1070,11 @@ impl Podman {
     /// （只写 upperdir 增量、复用 base 共享层，亚秒级且更省盘；无需像 squash
     /// 那样把全部层合并重写）。「快速」指 commit 速度，不是跳过安全流程。
     /// 这是**推荐**的常规重建路径。
+    ///
+    /// **fork 语义（魔改 podman，easytidy_fast 参数）**：commit 附加
+    /// `easytidy_fast=true`（跳 pause/unpause）、tmp 容器 create 附加
+    /// `easytidy_fast=true`（跳 RW 层全树 chown）。同映射直通前提：commit
+    /// 镜像源自同 uidmap 容器。系统 podman 会忽略该参数（慢但正确，优雅降级）。
     pub async fn rebuild_quick(
         &self,
         name: &str,
@@ -1123,7 +1142,12 @@ impl Podman {
         // 大镜像可达分钟级）；plain=只写 upperdir 增量（复用 base 共享层，亚秒级）。
         // 便于区分「重建」（squash）与「快速重建」（plain）到底走了哪条路径。
         let commit_kind = if squash { "squash" } else { "plain" };
-        tracing::info!("环境 {name} 重建 commit（{commit_kind}）开始 → {image_ref}");
+        // fast = fork 语义（魔改 podman 的 easytidy_fast 参数）：plain 快速重建
+        // 走同映射直通——commit 跳 pause/squash 残余慢操作、create 跳全树 chown。
+        // 前提成立：commit 镜像源自同 uidmap 容器，新容器期望形态 = 磁盘形态。
+        // fork 未接管时系统 podman IgnoreUnknownKeys 安全忽略（慢但正确）。
+        let fast = !squash;
+        tracing::info!("环境 {name} 重建 commit（{commit_kind}，fast={fast}）开始 → {image_ref}");
         let commit_started = std::time::Instant::now();
         if let Err(e) = libpod
             .commit(
@@ -1133,6 +1157,7 @@ impl Podman {
                 squash,
                 message,
                 &[],
+                fast,
             )
             .await
         {
@@ -1148,7 +1173,7 @@ impl Podman {
 
         // 3. 创建 tmp 容器（身份 = 正式名；失败 → 恢复原容器运行）
         let id = match self
-            .create_with_config_named(name, &tmp_name, &image_ref, bins, config)
+            .create_with_config_named(name, &tmp_name, &image_ref, bins, config, fast)
             .await
         {
             Ok(id) => id,

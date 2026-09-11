@@ -103,6 +103,10 @@ enum Commands {
         /// 容器名
         #[arg(long)]
         container: String,
+        /// 快速重建（普通 commit + fork easytidy_fast 语义，亚秒级；默认为
+        /// squash 全量重建）
+        #[arg(long)]
+        quick: bool,
     },
 
     /// 撤销 passthrough 导出（删除宿主导出的 .desktop；桌面右键 Remove 用）
@@ -342,8 +346,8 @@ async fn main() -> Result<()> {
                 Commands::Start { container } => cmd_start(podman, container).await,
                 Commands::Stop { container } => cmd_stop(podman, container).await,
                 Commands::Restart { container } => cmd_restart(podman, container).await,
-                Commands::Rebuild { container } => {
-                    cmd_rebuild(podman, container, cli.config_dir.clone()).await
+                Commands::Rebuild { container, quick } => {
+                    cmd_rebuild(podman, container, quick, cli.config_dir.clone()).await
                 }
                 Commands::Rm { container, force } => {
                     cmd_rm(podman, container, force, cli.config_dir.clone()).await
@@ -517,9 +521,10 @@ async fn cmd_create(
 async fn cmd_rebuild(
     podman: Podman,
     container: String,
+    quick: bool,
     config_dir: Option<PathBuf>,
 ) -> Result<()> {
-    info!("重建容器：{}", container);
+    info!("重建容器：{}（quick={quick}）", container);
 
     // 从 configfile 读取容器配置（--config-dir 覆盖）
     let config_file = config_file_for(&config_dir)?;
@@ -529,7 +534,11 @@ async fn cmd_rebuild(
 
     // 容器内二进制需 bind-mount 进重建后的容器（与 create 同源，统一走 core helper）
     let bins = easytidy_core::ContainerBins::resolve()?;
-    let new_id = podman.rebuild(&container, &config, &bins).await?;
+    let new_id = if quick {
+        podman.rebuild_quick(&container, &config, &bins).await?
+    } else {
+        podman.rebuild(&container, &config, &bins).await?
+    };
     println!("容器 {} 重建成功（新 ID: {}）", container, new_id);
 
     // 容器内准备（对齐 GUI：重建后重跑 fontconfig / useradd / 家目录补齐）：

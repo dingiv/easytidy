@@ -70,7 +70,15 @@ pub struct Libpod {
     api_version: String,
 }
 
+/// fork 优先的 podman socket 路径：easytidy fork service（$XDG_RUNTIME_DIR/
+/// easytidy/podman.sock，可拉起则拉起）→ 系统 podman.socket 回退。
+/// 与 bollard 封装（podman::Podman::connect）保持同一路径选择逻辑，
+/// 保证 rebuild/快照等 libpod 直连与 compat 调用落在同一个 engine 上。
 fn socket_path() -> Result<PathBuf> {
+    let fork_sock = crate::podman::Podman::fork_socket_path()?;
+    if fork_sock.exists() || crate::podman::Podman::ensure_fork_service_for(&fork_sock).is_ok() {
+        return Ok(fork_sock);
+    }
     let runtime = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
     Ok(PathBuf::from(runtime).join("podman/podman.sock"))
 }
@@ -115,7 +123,10 @@ impl Libpod {
 
     /// POST /v<version>/libpod/containers/create?name=<name>，body 为
     /// Docker-compat 形状 + libpod 扩展（namespaces.userns.nsmode）。返回容器 ID。
-    pub async fn create_container(&self, name: &str, body: Value) -> Result<String> {
+    ///
+    /// `fast=true` 时附加 fork 扩展 query 参数 `easytidy_fast=true`（跳过 RW 层
+    /// 创建的全树 chown；**仅在同映射直通安全时使用**，如快速重建的 commit 镜像）。
+    pub async fn create_container(&self, name: &str, body: Value, fast: bool) -> Result<String> {
         // 最终请求体落日志（pretty JSON；排障对照 libpod SpecGenerator 字段）
         tracing::info!(
             "libpod create 请求（容器 {name}）：\n{}",
@@ -125,10 +136,12 @@ impl Libpod {
         // 绝对 URI 占位主机名——连接层由 UnixConnector 替换为本机
         // $XDG_RUNTIME_DIR/podman/podman.sock 的 unix domain socket
         // （同 podman CLI 自身与 bollard 的传输方式），零网络流量。
+        let fast_param = if fast { "&easytidy_fast=true" } else { "" };
         let uri: hyper::Uri = format!(
-            "http://podman/v{}/libpod/containers/create?name={}",
+            "http://podman/v{}/libpod/containers/create?name={}{}",
             self.api_version,
-            urlencoding(name)
+            urlencoding(name),
+            fast_param
         )
         .parse()
         .map_err(|e| Error::Connect(format!("URI 解析失败：{e}")))?;
@@ -201,6 +214,7 @@ impl Libpod {
         squash: bool,
         message: &str,
         changes: &[&str],
+        fast: bool,
     ) -> Result<String> {
         let mut query = format!(
             "container={}&repo={}&squash={squash}&message={}",
@@ -215,6 +229,11 @@ impl Libpod {
         for c in changes {
             query.push_str("&changes=");
             query.push_str(&urlencoding(c));
+        }
+        // easytidy fork 扩展：跳过 commit 的 pause/unpause 与 squash 残余慢操作
+        // （fork 专属参数；系统 podman IgnoreUnknownKeys 安全忽略，行为不变）
+        if fast {
+            query.push_str("&easytidy_fast=true");
         }
         let uri: hyper::Uri = format!("http://podman/v{}/libpod/commit?{query}", self.api_version)
             .parse()
