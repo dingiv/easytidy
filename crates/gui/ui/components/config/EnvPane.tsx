@@ -25,7 +25,7 @@ import type { ServerEnvItem } from '../../types';
 
 interface EnvPaneProps {
   env: string[];
-  /** GUI/GPU 透传开启时引擎将隐式注入的 env（只读展示；gui/gpu 开启时由
+  /** GUI/GPU 直通开启时引擎将隐式注入的 env（只读展示；gui 双开关/gpu 开启时由
    *  passthrough_preview 计算） */
   readonlyEnv?: string[];
   /** 容器内 server 运行时注入的 env（server.env；只读；仅单容器且容器运行时可查） */

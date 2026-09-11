@@ -7,25 +7,25 @@
 //!
 //! 铁律：不调用任何 podman CLI（见 docs/08-requirements.md L2）。
 
-use std::path::PathBuf;
 use crate::error::{Error, Result};
+use std::path::PathBuf;
 
 /// 宿主导出 .desktop 的 Exec 前缀（passthrough 机制）
 pub const EXEC_PREFIX: &str = "easytidy --container";
 
 pub mod appdata;
-pub mod configfile;
 pub mod conf_template;
-pub mod guilock;
+pub mod configfile;
 pub mod desktop;
-pub mod icon;
-pub mod passthrough;
-pub mod error;
 pub mod env;
+pub mod error;
 pub mod events;
 pub mod flavor;
+pub mod guilock;
+pub mod icon;
 pub mod libpod;
 pub mod models;
+pub mod passthrough;
 pub mod pathvars;
 pub mod podman;
 pub mod storage_health;
@@ -134,16 +134,20 @@ pub fn server_binary_path() -> Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-server"));
     }
-    candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
-        let tried = candidates
-            .iter()
-            .map(|p| format!("  {}", p.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Error::Connect(format!(
-            "server 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装 easytidy-server"
-        ))
-    })
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .ok_or_else(|| {
+            let tried = candidates
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Error::Connect(format!(
+                "server 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装 easytidy-server"
+            ))
+        })
 }
 
 /// 解析 dock 二进制路径（宿主侧）。
@@ -160,16 +164,20 @@ pub fn dock_binary_path() -> Result<PathBuf> {
     if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
         candidates.push(PathBuf::from(xdg).join("easytidy/bin/easytidy-dock"));
     }
-    candidates.iter().find(|p| p.exists()).cloned().ok_or_else(|| {
-        let tried = candidates
-            .iter()
-            .map(|p| format!("  {}", p.display()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        Error::Connect(format!(
-            "easytidy-dock 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
-        ))
-    })
+    candidates
+        .iter()
+        .find(|p| p.exists())
+        .cloned()
+        .ok_or_else(|| {
+            let tried = candidates
+                .iter()
+                .map(|p| format!("  {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Error::Connect(format!(
+                "easytidy-dock 二进制不存在（已尝试：\n{tried}）\n请确保已随安装包安装"
+            ))
+        })
 }
 
 /// `ets` 二进制位置（容器内 easytidy-server 命令行客户端，musl 静态）。
@@ -356,7 +364,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_RUNTIME_DIR", tmp.path());
         let dir = socket_dir_for("chrome").unwrap();
-        assert!(dir.ends_with("easytidy/chrome"), "应为 $XDG_RUNTIME_DIR/easytidy/chrome：{dir:?}");
+        assert!(
+            dir.ends_with("easytidy/chrome"),
+            "应为 $XDG_RUNTIME_DIR/easytidy/chrome：{dir:?}"
+        );
         if let Some(val) = original {
             std::env::set_var("XDG_RUNTIME_DIR", val);
         } else {
@@ -402,14 +413,21 @@ mod tests {
         std::env::set_var("XDG_RUNTIME_DIR", tmp.path());
 
         let base = tmp.path().join("easytidy");
-        let dirs = vec![base.join("chrome-a1b2c3d4"), base.join("chrome"), base.join("chrome-ff001122")];
+        let dirs = vec![
+            base.join("chrome-a1b2c3d4"),
+            base.join("chrome"),
+            base.join("chrome-ff001122"),
+        ];
         for d in &dirs {
             std::fs::create_dir_all(d).unwrap();
         }
         assert_eq!(resolve_socket_dirs("chrome").len(), 3);
 
         remove_socket_dirs("chrome").unwrap();
-        assert!(dirs.iter().all(|d| !d.exists()), "所有代的 socket 目录都应被清理");
+        assert!(
+            dirs.iter().all(|d| !d.exists()),
+            "所有代的 socket 目录都应被清理"
+        );
 
         if let Some(val) = original {
             std::env::set_var("XDG_RUNTIME_DIR", val);

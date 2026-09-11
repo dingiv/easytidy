@@ -42,7 +42,10 @@ impl Service<hyper::Uri> for UnixConnector {
     type Response = TokioIo<tokio::net::UnixStream>;
     type Error = std::io::Error;
     type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>,
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>>
+                + Send,
+        >,
     >;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
@@ -104,7 +107,10 @@ impl Libpod {
             .to_string();
         tracing::debug!("podman ApiVersion：{api_version}");
 
-        Ok(Self { client, api_version })
+        Ok(Self {
+            client,
+            api_version,
+        })
     }
 
     /// POST /v<version>/libpod/containers/create?name=<name>，body 为
@@ -129,9 +135,9 @@ impl Libpod {
 
         let req = hyper::Request::post(uri)
             .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(serde_json::to_vec(&body).map_err(|e| {
-                Error::Config(format!("序列化 libpod create body 失败：{e}"))
-            })?)))
+            .body(Full::new(Bytes::from(serde_json::to_vec(&body).map_err(
+                |e| Error::Config(format!("序列化 libpod create body 失败：{e}")),
+            )?)))
             .map_err(|e| Error::Connect(format!("构造请求失败：{e}")))?;
 
         let resp = self
@@ -210,12 +216,9 @@ impl Libpod {
             query.push_str("&changes=");
             query.push_str(&urlencoding(c));
         }
-        let uri: hyper::Uri = format!(
-            "http://podman/v{}/libpod/commit?{query}",
-            self.api_version
-        )
-        .parse()
-        .map_err(|e| Error::Connect(format!("URI 解析失败：{e}")))?;
+        let uri: hyper::Uri = format!("http://podman/v{}/libpod/commit?{query}", self.api_version)
+            .parse()
+            .map_err(|e| Error::Connect(format!("URI 解析失败：{e}")))?;
 
         let req = hyper::Request::post(uri)
             .header("content-type", "application/x-www-form-urlencoded")
@@ -325,15 +328,15 @@ pub fn keep_id_create_body(
     let podman_mounts: Vec<Value> = mounts
         .iter()
         .map(|m| {
-            let typ = m.get("Type").and_then(|v| v.as_str()).unwrap_or("bind").to_lowercase();
+            let typ = m
+                .get("Type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("bind")
+                .to_lowercase();
             let source = m.get("Source").cloned().unwrap_or(Value::Null);
             let target = m.get("Target").cloned().unwrap_or(Value::Null);
             let ro = m.get("ReadOnly").and_then(|v| v.as_bool()).unwrap_or(false);
-            let options = if ro {
-                json!(["ro"])
-            } else {
-                json!([])
-            };
+            let options = if ro { json!(["ro"]) } else { json!([]) };
             json!({
                 "type": typ,
                 "source": source,

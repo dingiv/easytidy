@@ -40,8 +40,7 @@ pub fn app_data_dir() -> Result<PathBuf> {
 /// 图标缓存目录（`~/.easytidy/icons`，不存在则创建）
 pub fn icons_dir() -> Result<PathBuf> {
     let dir = app_data_dir()?.join("icons");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| Error::Config(format!("创建图标目录失败：{e}")))?;
+    std::fs::create_dir_all(&dir).map_err(|e| Error::Config(format!("创建图标目录失败：{e}")))?;
     Ok(dir)
 }
 
@@ -148,7 +147,11 @@ pub fn migrate_legacy_configs() {
             if std::fs::write(&new, &bytes).is_ok() {
                 tracing::info!("迁移旧配置：{} → {}", legacy.display(), new.display());
             } else {
-                tracing::warn!("迁移旧配置失败（写入 {} 失败），旧文件保留：{}", new.display(), legacy.display());
+                tracing::warn!(
+                    "迁移旧配置失败（写入 {} 失败），旧文件保留：{}",
+                    new.display(),
+                    legacy.display()
+                );
             }
         } else {
             tracing::warn!("迁移旧配置失败（读取 {} 失败）", legacy.display());
@@ -166,7 +169,11 @@ pub fn migrate_legacy_configs() {
                 let dst = new_flavors.join(entry.file_name());
                 if let Ok(bytes) = std::fs::read(&src) {
                     if let Err(e) = std::fs::write(&dst, &bytes) {
-                        tracing::warn!("迁移 flavor 失败（{} → {}）：{e}", src.display(), dst.display());
+                        tracing::warn!(
+                            "迁移 flavor 失败（{} → {}）：{e}",
+                            src.display(),
+                            dst.display()
+                        );
                     }
                 }
             }
@@ -193,7 +200,9 @@ mod tests {
         let dir = containers_dir().unwrap();
         assert_eq!(
             dir,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data").join("containers"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("data")
+                .join("containers"),
             "containers_dir 应为源码树 data/containers（实际：{}）",
             dir.display()
         );

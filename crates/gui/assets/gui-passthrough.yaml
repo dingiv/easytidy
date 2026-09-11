@@ -1,9 +1,17 @@
-# GUI 透传规则 —— gui: true 时引擎按宿主实时环境注入的 mounts + env。
+# GUI 直通规则 —— 按宿主实时环境注入的 mounts + env。
 #
 # 这是「内容」而非「代码」：映射表 / XDG_DATA_DIRS 值 / keep-id 意图都在这里，
 # 改规则不用改 Rust。core 经 FileLoader 的 ASSETS_DIR namespace 加载：
 #   dev  = crates/gui/assets/gui-passthrough.yaml（源码树，本文件）
 #   prod = ~/.easytidy/assets/gui-passthrough.yaml（数据目录，首跑从内嵌默认播种、可定制）
+#
+# 结构：三段。
+#   shared   —— 共享基建：gui_x11 或 gui_wayland 任一半开启即注入
+#              （keep-id / 字体图标 / XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）
+#   x11      —— X11 应用半（gui_x11=true）：DISPLAY + /tmp/.X11-unix
+#              （XAUTHORITY 稳定路径由 core 恒注入，本文件仅文档用途）
+#   wayland  —— Wayland 应用半（gui_wayland=true）：WAYLAND_DISPLAY
+#              （Wayland socket 本身在 $XDG_RUNTIME_DIR，经 shared 挂载接入）
 #
 # 占位符（宿主侧变量，host_path / container_path / env 值统一按宿主 env 展开）：
 #   ${HOME} ${USER} ${UID} ${GID}            宿主用户
@@ -14,10 +22,6 @@
 #
 # 设计意图：YAML 只存静态意图（映射规则），宿主耦合的运行时值（DISPLAY /
 # XDG_RUNTIME_DIR）留到创建时实时探测注入——避免硬编 session 特有的值。
-# XAUTHORITY 注入**稳定间接路径** /run/easytidy/xauthority（真实 auth 文件含随机
-# 后缀且随会话轮换；server 启动探到后维护软链指向真实文件，周期重探重链，
-# 见 crates/server/src/setup.rs ensure_xauthority / xauthority_watch_task）。
-# 稳定路径进容器 spec Env → 容器内所有进程（含 podman exec / ets）拿到同一值。
 #
 # 注：
 # - XDG_DATA_DIRS 必须**追加**系统默认、不能纯覆盖：gdk-pixbuf 经
@@ -27,45 +31,56 @@
 #   （server 启动时写）+ XDG_DATA_DIRS 接入；不能覆盖容器自身 /usr/share/{fonts,icons}
 #   （dpkg postinst 会写这两个目录，只读挂载导致安装失败，实测）。
 
-env:
-  # 显示相关（session 耦合，宿主探测；未设则跳过）
-  - DISPLAY=${DISPLAY}
-  - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}
-  - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
-  # XAUTHORITY 稳定间接路径（/run/easytidy = server socket 目录，bind-mount rw；
-  # 真实 auth 文件由容器内 server 探到后维护软链，见上方注）。
-  # 注：core 创建时会无条件注入此值（单一真相源，见 env/gui.rs），本行仅文档用途。
-  - XAUTHORITY=/run/easytidy/xauthority
-  # 系统默认 XDG_DATA_DIRS（不能纯覆盖——见上方注）
-  - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
+# ── 共享基建（任一半开启即注入）─────────────────────────────────────────────────
+shared:
+  env:
+    # $XDG_RUNTIME_DIR（Wayland socket / dbus / XAUTHORITY 真实文件所在；未设则跳过）
+    - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
+    # 系统默认 XDG_DATA_DIRS（不能纯覆盖——见上方注）
+    - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
+  mounts:
+    # 宿主 $XDG_RUNTIME_DIR（未设则跳过）
+    - host_path: ${XDG_RUNTIME_DIR}
+      container_path: ${XDG_RUNTIME_DIR}
+      read_only: false
+    # 系统字体/图标（只读；宿主路径须存在）
+    - host_path: /usr/share/fonts
+      container_path: /mnt/host/fonts
+      read_only: true
+      require_exists: true
+    - host_path: /usr/share/icons
+      container_path: /mnt/host/icons
+      read_only: true
+      require_exists: true
+    # 用户级字体/图标（只读；宿主路径须存在）
+    - host_path: ${HOME}/.local/share/fonts
+      container_path: /mnt/host/.local/share/fonts
+      read_only: true
+      require_exists: true
+    - host_path: ${HOME}/.local/share/icons
+      container_path: /mnt/host/.local/share/icons
+      read_only: true
+      require_exists: true
+  # 任一半 GUI 直通恒开 keep-id（GUI 应用需以宿主用户身份读写宿主挂载目录）
+  keep_id: true
 
-mounts:
-  # X11 socket（恒注入；Wayland 会话下兜底兼容 X11 应用）
-  - host_path: /tmp/.X11-unix
-    container_path: /tmp/.X11-unix
-    read_only: false
-  # 宿主 $XDG_RUNTIME_DIR（Wayland socket / dbus / XAUTHORITY；未设则跳过）
-  - host_path: ${XDG_RUNTIME_DIR}
-    container_path: ${XDG_RUNTIME_DIR}
-    read_only: false
-  # 系统字体/图标（只读；宿主路径须存在）
-  - host_path: /usr/share/fonts
-    container_path: /mnt/host/fonts
-    read_only: true
-    require_exists: true
-  - host_path: /usr/share/icons
-    container_path: /mnt/host/icons
-    read_only: true
-    require_exists: true
-  # 用户级字体/图标（只读；宿主路径须存在）
-  - host_path: ${HOME}/.local/share/fonts
-    container_path: /mnt/host/.local/share/fonts
-    read_only: true
-    require_exists: true
-  - host_path: ${HOME}/.local/share/icons
-    container_path: /mnt/host/.local/share/icons
-    read_only: true
-    require_exists: true
+# ── X11 应用半（gui_x11=true）────────────────────────────────────────────────────
+x11:
+  env:
+    # X11 显示（session 耦合，宿主探测；未设则跳过）
+    - DISPLAY=${DISPLAY}
+    # XAUTHORITY 稳定间接路径（/run/easytidy = server socket 目录，bind-mount rw；
+    # 真实 auth 文件由容器内 server 探到后维护软链，见上方注）。
+    # 注：core 创建时仅 X11 半无条件注入此值（单一真相源，见 env/gui.rs），本行仅文档用途。
+    - XAUTHORITY=/run/easytidy/xauthority
+  mounts:
+    # X11 socket（恒注入）
+    - host_path: /tmp/.X11-unix
+      container_path: /tmp/.X11-unix
+      read_only: false
 
-# gui=true 恒开 keep-id（GUI 应用需以宿主用户身份读写宿主挂载目录）
-keep_id: true
+# ── Wayland 应用半（gui_wayland=true）────────────────────────────────────────────
+wayland:
+  env:
+    # Wayland 显示名（socket 在 $XDG_RUNTIME_DIR/<此值>，经 shared 挂载接入）
+    - WAYLAND_DISPLAY=${WAYLAND_DISPLAY}

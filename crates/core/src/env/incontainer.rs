@@ -106,9 +106,17 @@ pub fn self_uid_gid() -> (u32, u32) {
     let mut gid = 0u32;
     for line in status.lines() {
         if let Some(v) = line.strip_prefix("Uid:") {
-            uid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            uid = v
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
         } else if let Some(v) = line.strip_prefix("Gid:") {
-            gid = v.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+            gid = v
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
         }
     }
     (uid, gid)
@@ -526,7 +534,9 @@ mod tests {
     fn test_probe_xauthority_xauth_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         write_auth(tmp.path(), "xauth_abc123");
-        assert!(probe_xauthority(tmp.path()).unwrap().ends_with("xauth_abc123"));
+        assert!(probe_xauthority(tmp.path())
+            .unwrap()
+            .ends_with("xauth_abc123"));
     }
 
     #[test]

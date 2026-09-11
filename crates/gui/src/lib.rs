@@ -123,6 +123,8 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::containers::image_pull,
             commands::containers::image_remove,
             commands::containers::images_used_by,
+            commands::containers::rebuild_images_scan,
+            commands::containers::rebuild_images_cleanup,
             // 环境（env）语义
             commands::containers::env_list,
             commands::containers::env_copy_config,

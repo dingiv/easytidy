@@ -7,9 +7,9 @@
 //! - passthrough 应用 .desktop 导出（容器内 GUI 应用 → 宿主启动器）
 //! - 桌面快捷方式扫描/移除/图标重编（纯宿主侧）
 
-use std::path::{Path, PathBuf};
-use std::fs;
 use crate::error::{Error, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 /// 清理 .desktop INI 值（`Key=value` 单行结构专用）：换行 / 控制字符会让
 /// 一行断裂成多行 → 破坏 INI 解析。换行替换为空格、控制字符丢弃、连续空白
@@ -108,8 +108,7 @@ pub fn host_user_resource_dirs() -> Vec<XdgUserDir> {
         ("VIDEO", "Videos"),
     ];
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
-    DIRS
-        .into_iter()
+    DIRS.into_iter()
         .map(|(xdg_key, folder)| {
             let host_path = resolve_host_resource_dir(xdg_user_dir(xdg_key), &home, folder);
             let host_path_str = host_path.to_string_lossy().into_owned();
@@ -133,11 +132,10 @@ pub fn host_user_resource_dirs() -> Vec<XdgUserDir> {
 fn home_expr(path: &Path, home: &Path) -> String {
     let home_norm = home.to_string_lossy().trim_end_matches('/').to_string();
     let path_norm = path.to_string_lossy().into_owned();
-    let is_under = path_norm.starts_with(&home_norm)
-        && {
-            let rest = &path_norm[home_norm.len()..];
-            rest.is_empty() || rest.starts_with('/')
-        };
+    let is_under = path_norm.starts_with(&home_norm) && {
+        let rest = &path_norm[home_norm.len()..];
+        rest.is_empty() || rest.starts_with('/')
+    };
     if is_under {
         let rel = &path_norm[home_norm.len()..];
         // rel 形如 "" / "/Videos" / "/视频"
@@ -219,7 +217,11 @@ mod resource_dir_tests {
     fn real_subdir_is_respected() {
         let home = PathBuf::from("/home/div");
         assert_eq!(
-            resolve_host_resource_dir(Some(PathBuf::from("/home/div/Downloads")), &home, "Downloads"),
+            resolve_host_resource_dir(
+                Some(PathBuf::from("/home/div/Downloads")),
+                &home,
+                "Downloads"
+            ),
             PathBuf::from("/home/div/Downloads")
         );
     }
@@ -251,8 +253,14 @@ mod resource_dir_tests {
     #[test]
     fn home_expr_under_home() {
         let home = PathBuf::from("/home/div");
-        assert_eq!(home_expr(&PathBuf::from("/home/div/Videos"), &home), "${HOME}/Videos");
-        assert_eq!(home_expr(&PathBuf::from("/home/div/视频"), &home), "${HOME}/视频");
+        assert_eq!(
+            home_expr(&PathBuf::from("/home/div/Videos"), &home),
+            "${HOME}/Videos"
+        );
+        assert_eq!(
+            home_expr(&PathBuf::from("/home/div/视频"), &home),
+            "${HOME}/视频"
+        );
     }
 
     #[test]
@@ -267,7 +275,10 @@ mod resource_dir_tests {
     fn home_expr_prefix_not_misread() {
         // /home/divx 不应被 /home/div 前缀误吞（ends_with 边界）
         let home = PathBuf::from("/home/div");
-        assert_eq!(home_expr(&PathBuf::from("/home/divx/Videos"), &home), "/home/divx/Videos");
+        assert_eq!(
+            home_expr(&PathBuf::from("/home/divx/Videos"), &home),
+            "/home/divx/Videos"
+        );
     }
 }
 
@@ -321,9 +332,13 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| app_name.clone());
     let comment = sanitize_ini_value(spec.comment.as_deref().unwrap_or("easytidy passthrough"));
-    let categories = sanitize_ini_value(spec.categories.as_deref().unwrap_or("Application;Utility;"));
+    let categories =
+        sanitize_ini_value(spec.categories.as_deref().unwrap_or("Application;Utility;"));
     let icon = spec.icon.as_ref().map(|i| sanitize_ini_value(i));
-    let wm = spec.startup_wm_class.as_ref().map(|w| sanitize_ini_value(w));
+    let wm = spec
+        .startup_wm_class
+        .as_ref()
+        .map(|w| sanitize_ini_value(w));
     let desktop_file = sanitize_ini_value(&spec.desktop_file);
 
     let mut content = format!(
@@ -360,11 +375,7 @@ fn generate_passthrough_content(spec: &PassthroughSpec) -> String {
          [Desktop Action Remove]\n\
          Name=Remove {display} from system\n\
          Exec={} unexport --container {} --app-id {}\n",
-        spec.container,
-        spec.cli_path,
-        spec.cli_path,
-        spec.container,
-        spec.app_id,
+        spec.container, spec.cli_path, spec.cli_path, spec.container, spec.app_id,
     ));
     content.push_str(&format!(
         "X-easytidy-pt=1\n\
@@ -423,7 +434,13 @@ pub fn ensure_app_icon(app_id: &str) -> Option<String> {
     let dir = crate::appdata::icons_dir().ok()?;
     let safe: String = app_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let path = dir.join(format!("identicon-{safe}.png"));
     // 同应用 id 路径固定 → 每次覆盖写（理由同容器入口兒底）
@@ -555,7 +572,13 @@ pub fn write_gui_entry(
 fn passthrough_file_name(container: &str, app_id: &str) -> String {
     let safe: String = app_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     format!("easytidy-pt-{container}-{safe}.desktop")
 }
@@ -702,9 +725,8 @@ pub fn remove_passthrough(container: &str, app_id: &str) -> Result<PathBuf> {
             continue;
         }
         // 按 app_id（X-easytidy-app-id）匹配
-        let matched = parse_pt_value(&content, container, "X-easytidy-app-id=")
-            .as_deref()
-            == Some(app_id);
+        let matched =
+            parse_pt_value(&content, container, "X-easytidy-app-id=").as_deref() == Some(app_id);
         if matched {
             std::fs::remove_file(&path)
                 .map_err(|e| Error::Config(format!("删除 .desktop 失败：{e}")))?;
@@ -783,30 +805,35 @@ pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for f in rd.flatten() {
             let file_name = f.file_name();
-            let name = match file_name.to_str() { Some(s) => s, None => continue };
+            let name = match file_name.to_str() {
+                Some(s) => s,
+                None => continue,
+            };
             if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
                 continue;
             }
-            let Ok(content) = fs::read_to_string(f.path()) else { continue };
+            let Ok(content) = fs::read_to_string(f.path()) else {
+                continue;
+            };
 
-            let is_pt = content
-                .lines()
-                .any(|l| l.trim() == "X-easytidy-pt=1")
+            let is_pt = content.lines().any(|l| l.trim() == "X-easytidy-pt=1")
                 || name.starts_with("easytidy-pt-");
 
             // 容器名：X- 标记优先；文件名回退（仅新格式 easytidy-gui-<c> / easytidy-pt-<c>-<id>）
             let stem = name
                 .trim_start_matches("easytidy-")
                 .trim_end_matches(".desktop");
-            let container = desktop_field(&content, "X-easytidy-container=").or_else(|| {
-                if let Some(c) = stem.strip_prefix("gui-") {
-                    Some(c.to_string())
-                } else if let Some(rest) = stem.strip_prefix("pt-") {
-                    rest.split('-').next().map(String::from)
-                } else {
-                    None
-                }
-            }).unwrap_or_default();
+            let container = desktop_field(&content, "X-easytidy-container=")
+                .or_else(|| {
+                    if let Some(c) = stem.strip_prefix("gui-") {
+                        Some(c.to_string())
+                    } else if let Some(rest) = stem.strip_prefix("pt-") {
+                        rest.split('-').next().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_default();
             if container.is_empty() {
                 continue; // 无标记且非已知命名 → 非 easytidy 生成的入口
             }
@@ -820,18 +847,19 @@ pub fn scan_desktop_icons() -> Result<Vec<DesktopIconEntry>> {
                 ("entry", container.clone(), None)
             };
 
-            let entry = entries.entry(identity.clone()).or_insert_with(|| DesktopIconEntry {
-                identity,
-                kind: kind.to_string(),
-                container: container.clone(),
-                title: desktop_field(&content, "Name=")
-                    .unwrap_or_else(|| name.to_string()),
-                icon: desktop_field(&content, "Icon=").unwrap_or_default(),
-                app_id: entry_app_id,
-                app_file: desktop_field(&content, "X-easytidy-app="),
-                menu_path: None,
-                desktop_path: None,
-            });
+            let entry = entries
+                .entry(identity.clone())
+                .or_insert_with(|| DesktopIconEntry {
+                    identity,
+                    kind: kind.to_string(),
+                    container: container.clone(),
+                    title: desktop_field(&content, "Name=").unwrap_or_else(|| name.to_string()),
+                    icon: desktop_field(&content, "Icon=").unwrap_or_default(),
+                    app_id: entry_app_id,
+                    app_file: desktop_field(&content, "X-easytidy-app="),
+                    menu_path: None,
+                    desktop_path: None,
+                });
             if is_desktop {
                 entry.desktop_path = Some(f.path().to_string_lossy().into_owned());
             } else {
@@ -934,8 +962,8 @@ pub fn reedit_desktop_icon(
     app_id: Option<&str>,
     source: &str,
 ) -> Result<String> {
-    let data = fs::read(source)
-        .map_err(|e| Error::Config(format!("读取图片失败（{source}）：{e}")))?;
+    let data =
+        fs::read(source).map_err(|e| Error::Config(format!("读取图片失败（{source}）：{e}")))?;
     let composed = crate::icon::compose_app_icon(&data, EASYTIDY_ICON_PNG)
         .map_err(|e| Error::Config(format!("图标加工失败：{e}")))?;
 
@@ -950,7 +978,13 @@ pub fn reedit_desktop_icon(
             let id = app_id.ok_or_else(|| Error::Config("应用 id 缺失".to_string()))?;
             let safe: String = id
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
                 .collect();
             dir.join(format!("easytidy-pt-{container}-{safe}.png"))
         }
@@ -963,7 +997,10 @@ pub fn reedit_desktop_icon(
         "entry" => update_entry_icons(container, &icon)?,
         _ => update_pt_icons(container, app_id, &icon)?,
     }
-    tracing::info!("桌面快捷方式图标重编：{kind} {container} {:?} → {icon}", app_id);
+    tracing::info!(
+        "桌面快捷方式图标重编：{kind} {container} {:?} → {icon}",
+        app_id
+    );
     Ok(icon)
 }
 
@@ -980,13 +1017,16 @@ fn update_entry_icons(container: &str, icon: &str) -> Result<()> {
     for dir in dirs {
         let p = dir.join(format!("easytidy-gui-{container}.desktop"));
         if let Ok(content) = fs::read_to_string(&p) {
-            fs::write(&p, replace_icon_line(&content, icon))
-                .map_err(|e| Error::Config(format!("更新 .desktop 失败（{}）：{e}", p.display())))?;
+            fs::write(&p, replace_icon_line(&content, icon)).map_err(|e| {
+                Error::Config(format!("更新 .desktop 失败（{}）：{e}", p.display()))
+            })?;
             touched += 1;
         }
     }
     if touched == 0 {
-        return Err(Error::Config(format!("未找到容器入口 .desktop：{container}")));
+        return Err(Error::Config(format!(
+            "未找到容器入口 .desktop：{container}"
+        )));
     }
     Ok(())
 }
@@ -1005,11 +1045,15 @@ fn update_pt_icons(container: &str, app_id: Option<&str>, icon: &str) -> Result<
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for f in rd.flatten() {
             let file_name = f.file_name();
-            let Some(name) = file_name.to_str() else { continue };
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
             if !name.starts_with("easytidy-") || !name.ends_with(".desktop") {
                 continue;
             }
-            let Ok(content) = fs::read_to_string(f.path()) else { continue };
+            let Ok(content) = fs::read_to_string(f.path()) else {
+                continue;
+            };
             if !content.lines().any(|l| l.trim() == "X-easytidy-pt=1") {
                 continue;
             }
@@ -1017,15 +1061,18 @@ fn update_pt_icons(container: &str, app_id: Option<&str>, icon: &str) -> Result<
                 continue;
             }
             let matched = match app_id {
-                Some(id) => parse_pt_value(&content, container, "X-easytidy-app-id=")
-                    .or_else(|| parse_pt_value(&content, container, "X-easytidy-app="))
-                    .as_deref()
-                    == Some(id),
+                Some(id) => {
+                    parse_pt_value(&content, container, "X-easytidy-app-id=")
+                        .or_else(|| parse_pt_value(&content, container, "X-easytidy-app="))
+                        .as_deref()
+                        == Some(id)
+                }
                 None => false,
             };
             if matched {
-                fs::write(f.path(), replace_icon_line(&content, icon))
-                    .map_err(|e| Error::Config(format!("更新 .desktop 失败（{}）：{e}", f.path().display())))?;
+                fs::write(f.path(), replace_icon_line(&content, icon)).map_err(|e| {
+                    Error::Config(format!("更新 .desktop 失败（{}）：{e}", f.path().display()))
+                })?;
                 touched += 1;
             }
         }
@@ -1058,7 +1105,10 @@ mod tests {
         assert_eq!(sanitize_ini_value("\n\n"), "");
         // 正常值不变
         assert_eq!(sanitize_ini_value("Google Chrome"), "Google Chrome");
-        assert_eq!(sanitize_ini_value("Application;Utility;"), "Application;Utility;");
+        assert_eq!(
+            sanitize_ini_value("Application;Utility;"),
+            "Application;Utility;"
+        );
     }
 
     #[test]
@@ -1099,8 +1149,12 @@ mod tests {
     #[test]
     fn test_display_name_override_and_fallback() {
         // 容器入口：指定显示名 → Name= 用指定值；未指定 → easytidy <容器名>
-        let content =
-            generate_gui_entry_content("chrome", "/usr/bin/easytidy", None, Some("我的 Chrome 容器"));
+        let content = generate_gui_entry_content(
+            "chrome",
+            "/usr/bin/easytidy",
+            None,
+            Some("我的 Chrome 容器"),
+        );
         assert!(content.lines().any(|l| l == "Name=我的 Chrome 容器"));
         let content = generate_gui_entry_content("chrome", "/usr/bin/easytidy", None, None);
         assert!(content.lines().any(|l| l == "Name=easytidy chrome"));
@@ -1125,7 +1179,9 @@ mod tests {
         let content = generate_passthrough_content(&spec);
         assert!(content.lines().any(|l| l == "Name=我的浏览器"));
         assert!(!content.lines().any(|l| l == "Name=Google Chrome"));
-        assert!(content.lines().any(|l| l == "Name=Remove 我的浏览器 from system"));
+        assert!(content
+            .lines()
+            .any(|l| l == "Name=Remove 我的浏览器 from system"));
     }
 
     #[test]
@@ -1135,8 +1191,11 @@ mod tests {
         // 2×2 红色源图（内存生成，不依赖外部资源）
         let img = RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
         let mut bytes = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-            .unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
         let tmp = TempDir::new().unwrap();
         let src = tmp.path().join("src.png");
         fs::write(&src, &bytes).unwrap();
@@ -1158,7 +1217,10 @@ mod tests {
     fn test_process_container_icon_none_on_missing() {
         assert_eq!(process_container_icon("x", None), None);
         assert_eq!(process_container_icon("x", Some("")), None);
-        assert_eq!(process_container_icon("x", Some("/nonexistent/icon.png")), None);
+        assert_eq!(
+            process_container_icon("x", Some("/nonexistent/icon.png")),
+            None
+        );
     }
 
     #[test]
@@ -1179,14 +1241,18 @@ mod tests {
         let content = generate_passthrough_content(&spec);
 
         // 薄指针：Exec 只含 launch --id <id> --container，不嵌命令行
-        assert!(content.contains("Exec=/usr/bin/easytidy launch --id pt-abcdef123456 --container chrome"));
-        assert!(!content.lines().any(|l| l.starts_with("Exec=") && l.contains("google-chrome")));
+        assert!(content
+            .contains("Exec=/usr/bin/easytidy launch --id pt-abcdef123456 --container chrome"));
+        assert!(!content
+            .lines()
+            .any(|l| l.starts_with("Exec=") && l.contains("google-chrome")));
         // Remove action 的 unexport 行按 app-id
-        assert!(content.contains("Exec=/usr/bin/easytidy unexport --container chrome --app-id pt-abcdef123456"));
+        assert!(content.contains(
+            "Exec=/usr/bin/easytidy unexport --container chrome --app-id pt-abcdef123456"
+        ));
         // 标记：id + 旧格式 app 并存（列表匹配用）
         assert!(content.contains("X-easytidy-pt=1"));
         assert!(content.contains("X-easytidy-app-id=pt-abcdef123456"));
         assert!(content.contains("X-easytidy-app=/usr/share/applications/google-chrome.desktop"));
     }
-
 }

@@ -132,11 +132,12 @@ impl Flavor {
 
     /// 展开为容器配置（模板 → 实例快照）。
     ///
-    /// 基座（`params`）整体继承（含 `entry_args`——曾在此处丢失）；GUI 透传
-    /// （gui = true）按 [`gui_passthrough`](crate::gui_passthrough) 规则追加推导
-    /// 产物（显示 env + X11/XDG_RUNTIME_DIR/字体图标挂载 + 恒开 keep-id）。具体
-    /// 映射表外置到资源文件 `ASSETS_DIR::gui-passthrough.yaml`（dev 源码树 /
-    /// prod 数据目录），见 [`crate::gui_passthrough`] 模块文档与 docs/11。
+    /// 基座（`params`）整体继承（含 `entry_args`——曾在此处丢失）；GUI 直通
+    /// （`gui_x11`/`gui_wayland` 任一开启）按 [`gui_passthrough`](crate::gui_passthrough)
+    /// 规则追加推导产物（shared 基建 + 各半显示 env + X11 socket/XDG_RUNTIME_DIR/
+    /// 字体图标挂载 + 恒开 keep-id）。具体映射表外置到资源文件
+    /// `ASSETS_DIR::gui-passthrough.yaml`（dev 源码树 / prod 数据目录），见
+    /// [`crate::gui_passthrough`] 模块文档与 docs/11。
     ///
     /// 模板仅作**创建期预填**：展开为实例快照，容器创建后与模板彻底解耦
     /// （无血缘字段、无同步、无漂移检测）。
@@ -166,7 +167,8 @@ const PRESET_FLAVORS: &[(&str, &str)] = &[
 # 使用：easytidy flavor apply chrome（或主 GUI Flavor 面板「创建容器」）
 name = "chrome"
 image = "docker.io/library/ubuntu:24.04"
-gui = true
+gui_x11 = true
+gui_wayland = true
 setup = [
     "apt-get update -qq && apt-get install -y -qq curl gpg",
     "curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg",
@@ -181,7 +183,8 @@ entry = "google-chrome-stable"
         r#"# Firefox 快速拉起：debian 底座（firefox-esr 为 deb 原生包，无 snap 问题）
 name = "firefox"
 image = "docker.io/library/debian:bookworm"
-gui = true
+gui_x11 = true
+gui_wayland = true
 setup = ["apt-get update -qq && apt-get install -y -qq firefox-esr"]
 entry = "firefox-esr"
 "#,
@@ -191,7 +194,8 @@ entry = "firefox-esr"
         r#"# VS Code 快速拉起：GUI 底座 + 微软官方源安装
 name = "code"
 image = "docker.io/library/ubuntu:24.04"
-gui = true
+gui_x11 = true
+gui_wayland = true
 setup = [
     "apt-get update -qq && apt-get install -y -qq curl gpg",
     "curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft.gpg",
@@ -211,9 +215,8 @@ pub fn ensure_presets() {
     let _ = std::fs::create_dir_all(&dir);
     for (name, content) in PRESET_FLAVORS {
         let path = dir.join(format!("{name}.toml"));
-        if !path.exists()
-            && std::fs::write(&path, content).is_ok() {
-                tracing::info!("预设 flavor 已写入：{path:?}");
-            }
+        if !path.exists() && std::fs::write(&path, content).is_ok() {
+            tracing::info!("预设 flavor 已写入：{path:?}");
+        }
     }
 }

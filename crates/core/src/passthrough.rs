@@ -11,11 +11,11 @@
 //! （宿主一次性 CLI 连接断开即杀 PTY 会话，实测；server spawn 的子进程
 //! 独立于连接存活）。
 
+use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::ops::{
     AppLaunchApp, AppLaunchAppResp, AppLogs, AppLogsResp, AppsLaunch, AppsLaunchItem,
     AppsLaunchResp, AppsLaunchResult, AppsPsResp, ManagedProcess,
 };
-use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::{Frame, Handshake, Message, MsgKind, PROTOCOL_VERSION};
 use futures::{SinkExt, StreamExt};
 use serde_json::json;
@@ -138,18 +138,17 @@ pub async fn launch_apps(
 /// 按引用拉起应用（apps.launch_app：server 查应用登记表/自定义应用解析
 /// exec 并自行 spawn——调用方只传 id 或名称）。连接重试 2s 窗口容忍
 /// server 就绪延迟。
-pub async fn launch_app_by_ref(
-    container: &str,
-    id_or_name: &str,
-) -> Result<AppLaunchAppResp> {
+pub async fn launch_app_by_ref(container: &str, id_or_name: &str) -> Result<AppLaunchAppResp> {
     let mut framed = connect_apps(container).await?;
 
     let launch = Frame::Json(Message {
         id: 2,
         kind: MsgKind::Req,
         op: "apps.launch_app".to_string(),
-        payload: serde_json::to_value(AppLaunchApp { id_or_name: id_or_name.to_string() })
-            .unwrap_or_default(),
+        payload: serde_json::to_value(AppLaunchApp {
+            id_or_name: id_or_name.to_string(),
+        })
+        .unwrap_or_default(),
         err: None,
     });
     if framed.send(launch).await.is_err() {

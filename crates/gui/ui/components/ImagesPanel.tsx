@@ -8,8 +8,8 @@ import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../lib/errors';
 import { App as AntApp, Button, Input, Modal, Table, Tag } from 'antd';
-import { CloudDownloadOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
-import type { ImageSummary } from '../types';
+import { CloudDownloadOutlined, ClearOutlined, DeleteOutlined, ReloadOutlined } from '@ant-design/icons';
+import type { ImageSummary, RebuildCleanupResult, RebuildScanResult } from '../types';
 
 /** 字节 → 人类可读 */
 function fmtSize(bytes: number): string {
@@ -39,6 +39,11 @@ export function ImagesPanel() {
   // 批量管理：选中镜像的 rowKey（短 ID）集合；刷新后失效，清空
   const [selectedKeys, setSelectedKeys] = useState<React.Key[]>([]);
   const [batchRemoving, setBatchRemoving] = useState(false);
+  // 智能清理（rebuild 冗余镜像）：扫描中 / 预览结果 / 确认弹窗 / 执行中
+  const [scanning, setScanning] = useState(false);
+  const [scanResult, setScanResult] = useState<RebuildScanResult | null>(null);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupRunning, setCleanupRunning] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -229,6 +234,53 @@ export function ImagesPanel() {
     });
   };
 
+  /** 智能清理：扫描 rebuild 冗余镜像（每容器名留最新、跳过在用）→ 预览 Modal */
+  const handleSmartCleanup = async () => {
+    setScanning(true);
+    try {
+      const result = await invoke<RebuildScanResult>('rebuild_images_scan');
+      setScanResult(result);
+      setCleanupOpen(true);
+    } catch (err: any) {
+      message.error(errMsg(err, '智能清理扫描失败'));
+      console.error('rebuild_images_scan failed:', err);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  /** 确认删除预览中的冗余 rebuild 镜像（后端删除前会复查冗余 + 占用） */
+  const handleConfirmCleanup = async () => {
+    if (!scanResult) return;
+    const tags = scanResult.candidates.map((c) => c.tag);
+    if (tags.length === 0) {
+      setCleanupOpen(false);
+      return;
+    }
+    setCleanupRunning(true);
+    try {
+      const res = await invoke<RebuildCleanupResult>('rebuild_images_cleanup', { images: tags });
+      setCleanupOpen(false);
+      if (res.failures.length > 0) {
+        modal.error({
+          title: `智能清理完成：删除 ${res.deleted.length}，跳过 ${res.skipped.length}，失败 ${res.failures.length}`,
+          width: 620,
+          content: <pre className="error-detail">{res.failures.join('\n\n')}</pre>,
+          okText: '知道了',
+        });
+      } else {
+        const skipMsg = res.skipped.length > 0 ? `；跳过 ${res.skipped.length} 个（复查后已不冗余/在用）` : '';
+        message.success(`已删除 ${res.deleted.length} 个冗余 rebuild 镜像，释放约 ${fmtSize(res.freed)}${skipMsg}`);
+      }
+      await load();
+    } catch (err: any) {
+      message.error(errMsg(err, '智能清理失败'));
+      console.error('rebuild_images_cleanup failed:', err);
+    } finally {
+      setCleanupRunning(false);
+    }
+  };
+
   return (
     <div className="images-panel">
       <div className="panel-header">
@@ -241,6 +293,14 @@ export function ImagesPanel() {
           )}
           <Button icon={<ReloadOutlined />} onClick={load} loading={loading}>
             刷新
+          </Button>
+          <Button
+            icon={<ClearOutlined />}
+            loading={scanning}
+            onClick={handleSmartCleanup}
+            title="扫描并清理冗余 rebuild 镜像（每个容器名只留时间戳最新的一个）"
+          >
+            智能清理
           </Button>
           <Button type="primary" icon={<CloudDownloadOutlined />} onClick={() => setPullOpen(true)}>
             拉取镜像
@@ -306,6 +366,49 @@ export function ImagesPanel() {
           onPressEnter={handlePull}
           autoFocus
         />
+      </Modal>
+
+      <Modal
+        title="智能清理 rebuild 镜像"
+        open={cleanupOpen}
+        onCancel={() => !cleanupRunning && setCleanupOpen(false)}
+        onOk={handleConfirmCleanup}
+        okText={scanResult && scanResult.candidates.length > 0 ? `删除 ${scanResult.candidates.length} 个` : '关闭'}
+        okButtonProps={{ danger: true, disabled: !scanResult || scanResult.candidates.length === 0 }}
+        cancelText="取消"
+        confirmLoading={cleanupRunning}
+        width={640}
+      >
+        {scanResult && scanResult.candidates.length === 0 && (
+          <p className="dialog-hint">
+            没有可清理的冗余 rebuild 镜像（每个容器名都只保留了时间戳最新的一个）。
+          </p>
+        )}
+        {scanResult && scanResult.candidates.length > 0 && (
+          <div>
+            <p>
+              将删除 <b>{scanResult.candidates.length}</b> 个冗余 rebuild 镜像，共约{' '}
+              <b>{fmtSize(scanResult.total_candidate_size)}</b>（每个容器名只保留时间戳最新的一个；正被容器使用的会自动跳过）。
+            </p>
+            <div style={{ maxHeight: 220, overflow: 'auto', margin: '8px 0' }}>
+              {scanResult.candidates.map((c) => (
+                <div
+                  key={c.id}
+                  style={{ display: 'flex', justifyContent: 'space-between', padding: '2px 0', gap: 12 }}
+                >
+                  <span style={{ wordBreak: 'break-all' }}>{c.tag}</span>
+                  <span style={{ color: '#999', flexShrink: 0 }}>{fmtSize(c.size)}</span>
+                </div>
+              ))}
+            </div>
+            {scanResult.skipped_in_use.length > 0 && (
+              <p style={{ color: '#999', marginBottom: 0 }}>
+                {scanResult.skipped_in_use.length} 个冗余镜像正被容器使用，将跳过：
+                {scanResult.skipped_in_use.map((c) => c.tag).join('、')}
+              </p>
+            )}
+          </div>
+        )}
       </Modal>
     </div>
   );

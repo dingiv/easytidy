@@ -139,7 +139,8 @@ fn generate_icon_image(seed: &str) -> image::RgbaImage {
         }
     }
 
-    let mut img = image::RgbaImage::from_pixel(GEN_SIZE, GEN_SIZE, image::Rgba([bg[0], bg[1], bg[2], 255]));
+    let mut img =
+        image::RgbaImage::from_pixel(GEN_SIZE, GEN_SIZE, image::Rgba([bg[0], bg[1], bg[2], 255]));
     let cell = (GEN_SIZE - 2 * GEN_MARGIN) / GEN_GRID as u32; // 44，整除无累计误差
     for (row, cell_row) in cells.iter().enumerate() {
         for (col, &on) in cell_row.iter().enumerate() {
@@ -187,7 +188,9 @@ fn load_icon_to_image(bytes: &[u8]) -> Result<image::DynamicImage> {
         return image::load_from_memory(&png)
             .map_err(|e| Error::Config(format!("XPM 转 PNG 后解析失败：{e}")));
     }
-    Err(Error::Config("无法解析图标（支持 PNG/JPEG/BMP/ICO/TIFF/XPM）".to_string()))
+    Err(Error::Config(
+        "无法解析图标（支持 PNG/JPEG/BMP/ICO/TIFF/XPM）".to_string(),
+    ))
 }
 
 pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
@@ -211,9 +214,12 @@ pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
     for py in 0..CONTENT {
         for px in 0..CONTENT {
             let d = rounded_rect_sdf(
-                px as f32, py as f32,
-                content_center, content_center,
-                content_center, content_center,
+                px as f32,
+                py as f32,
+                content_center,
+                content_center,
+                content_center,
+                content_center,
                 INNER_RADIUS,
             );
             let a = (0.5 - d).clamp(0.0, 1.0);
@@ -236,9 +242,12 @@ pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
         for x in 0..SIZE {
             // 外圆角矩形覆盖度 × 内孔未覆盖度 = 边框像素(外角/内沿均抗锯齿)
             let d_out = rounded_rect_sdf(
-                x as f32, y as f32,
-                center, center,
-                center, center,
+                x as f32,
+                y as f32,
+                center,
+                center,
+                center,
+                center,
                 CORNER_RADIUS,
             );
             let a_out = (0.5 - d_out).clamp(0.0, 1.0);
@@ -246,9 +255,12 @@ pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
                 continue;
             }
             let d_in = rounded_rect_sdf(
-                x as f32, y as f32,
-                inner_center, inner_center,
-                inner_half, inner_half,
+                x as f32,
+                y as f32,
+                inner_center,
+                inner_center,
+                inner_half,
+                inner_half,
                 INNER_RADIUS,
             );
             let a_in = (0.5 - d_in).clamp(0.0, 1.0); // 内孔覆盖度
@@ -279,7 +291,12 @@ pub fn compose_app_icon(base: &[u8], watermark: &[u8]) -> Result<Vec<u8>> {
         WATERMARK,
         image::imageops::FilterType::Lanczos3,
     );
-    image::imageops::overlay(&mut canvas, &wm, (SIZE - WATERMARK) as i64, (SIZE - WATERMARK) as i64);
+    image::imageops::overlay(
+        &mut canvas,
+        &wm,
+        (SIZE - WATERMARK) as i64,
+        (SIZE - WATERMARK) as i64,
+    );
 
     // 编码 PNG
     let mut out = Vec::new();
@@ -386,7 +403,9 @@ fn decode_xpm_to_png(data: &[u8]) -> Result<Vec<u8>> {
     if h.len() < 4 {
         return Err(Error::Config("XPM header 无效".to_string()));
     }
-    let width: u32 = h[0].parse().map_err(|_| Error::Config("XPM width 无效".to_string()))?;
+    let width: u32 = h[0]
+        .parse()
+        .map_err(|_| Error::Config("XPM width 无效".to_string()))?;
     let height: u32 = h[1]
         .parse()
         .map_err(|_| Error::Config("XPM height 无效".to_string()))?;
@@ -568,7 +587,11 @@ mod tests {
         // 圆角:外角透明 + 内孔角部由边框渐变填充(内容裁圆角) + 中心内容不透明
         assert_eq!(img.get_pixel(0, 0)[3], 0, "左上角应为透明(外圆角)");
         assert_eq!(img.get_pixel(255, 0)[3], 0, "右上角应为透明(外圆角)");
-        assert_eq!(img.get_pixel(24, 24)[3], 255, "内容区角部应为边框渐变(内圆角)");
+        assert_eq!(
+            img.get_pixel(24, 24)[3],
+            255,
+            "内容区角部应为边框渐变(内圆角)"
+        );
         assert_eq!(img.get_pixel(127, 127)[3], 255, "中心应为不透明(内容区)");
     }
 
@@ -621,7 +644,7 @@ mod tests {
         use image::{GenericImageView, Rgba};
         let img = image::load_from_memory(&png).expect("not a valid png");
         assert_eq!((img.width(), img.height()), (2, 2));
-        assert_eq!(img.get_pixel(0, 0), Rgba([0, 0, 0, 0]));           // "  " 透明
+        assert_eq!(img.get_pixel(0, 0), Rgba([0, 0, 0, 0])); // "  " 透明
         assert_eq!(img.get_pixel(1, 0), Rgba([0x49, 0x85, 0xB7, 255])); // ". " 蓝
         assert_eq!(img.get_pixel(0, 1), Rgba([0x49, 0x85, 0xB7, 255]));
         assert_eq!(img.get_pixel(1, 1), Rgba([0x49, 0x85, 0xB7, 255]));
@@ -663,8 +686,17 @@ mod tests {
                 }
             }
         }
-        assert!(opaque > 0, "转换后全透明——颜色表未解析（colortype 前缀 bug）");
-        eprintln!("real xpm ok: {} → {}x{} ({} 非透明像素)", path.display(), img.width(), img.height(), opaque);
+        assert!(
+            opaque > 0,
+            "转换后全透明——颜色表未解析（colortype 前缀 bug）"
+        );
+        eprintln!(
+            "real xpm ok: {} → {}x{} ({} 非透明像素)",
+            path.display(),
+            img.width(),
+            img.height(),
+            opaque
+        );
     }
 
     fn find_a_xpm() -> Option<std::path::PathBuf> {
@@ -686,7 +718,11 @@ mod tests {
             None
         }
         // 只查几个已知可能有 XPM 的目录，限深 4，找到即停（快、可预测）
-        for root in ["/usr/share/pixmaps", "/usr/share/ghostscript", "/usr/share/icons"] {
+        for root in [
+            "/usr/share/pixmaps",
+            "/usr/share/ghostscript",
+            "/usr/share/icons",
+        ] {
             if let Some(f) = search(std::path::Path::new(root), 4) {
                 return Some(f);
             }

@@ -1,6 +1,6 @@
 # 容器存储性能问题：三道路决策与方案（设计）
 
-> 状态：三道路决策稿（2026-09-07）。§0.2 为道路总览；§0.3-§8 是道路二的设计稿；§9 是道路三的初步拆解。
+> 状态：三道路决策稿（2026-09-07）；§0.15 补充 fuse-overlayfs 下 commit 期属主翻译实测（2026-09-11）。§0.2 为道路总览；§0.3-§8 是道路二的设计稿；§9 是道路三的初步拆解。
 > 背景：rootless podman + native overlay + keep-id 场景，**首次从镜像建容器**触发
 > `storage-chown-by-maps` 逐文件递归 chown，~2s/GB（20GB 镜像 ≈ 44s）。
 > 当前状态：已在**本机**手工配置 `~/.config/containers/storage.conf`（fuse-overlayfs），
@@ -55,6 +55,40 @@
      字段语义随版本漂移，无 API 保障）；**安全等价做法 = 预热（prewarm）**：
      commit 后立即后台跑一次 `podman create --userns keep-id <新镜像> /true && rm`，
      44s 由 podman 自己记录，之后的重建 create 秒开。
+
+## 0.15 commit 期属主翻译：fuse-overlayfs 把成本从 create 搬到了 commit（2026-09-11 实测）
+
+配了 fuse-overlayfs（mount_program）后，create 期的全层扫描消失（0.09s），但
+**commit 一个 keep-id 容器时出现逐文件 fchownat**——镜像 18G 时耗时可达 ~50s。
+第二轮归因实验（alpine 小规模 + strace -f -e trace=fchownat，podman 5.4.2 / fuse-overlayfs 1.13-dev）：
+
+1. **触发条件 = keep-id 容器的首次 commit**：
+   - keep-id 容器（仅写 50 个文件的小 diff）首次 commit：**568 次 fchownat，
+     覆盖整个容器根文件系统**（/bin、/usr/bin、/sbin、/etc…，不只是 diff）；
+     wall 1.03s（其中 ~0.3s 为 tar/hash 固定开销）。
+   - **同一容器无改动再次 commit：0 次 fchownat**（状态已持久化，与 create 期
+     缓存同形态——首次翻在后，后续免）。
+   - **非 keep-id 的普通 rootless 容器首次 commit：0 次 fchownat**。
+2. **chown 是物理落盘的属主翻译**：容器可写层磁盘文件以 subuid 形态写入
+   （容器 root → 宿主 100000），commit 产物层的 diff 文件被改写为宿主侧
+   `1000:1000` 形态（镜像 unmapped 视图）——即 commit 时把"容器映射视图→
+   镜像原始属主"逐文件翻译并固化。与 PR #734（commit 层 uidmap 元数据丢失）
+   是同一根因的 commit 侧出口：映射元数据不随层走，只能靠用户态逐文件对账。
+3. **成本与 diff 大小无关，与整个根文件系统文件数线性相关**：
+   - 568 文件 → ~0.7s chown 部分（~400µs/文件，含 FUSE 穿越开销）
+   - 20,568 文件 → 7.64s，20,547 次 fchownat（~350µs/文件）
+   - 外推：18G 桌面环境（~15万文件）≈ 50s；100 万文件 ≈ 6min。
+4. **与 0.1 的 create 期扫描合并看**：fuse-overlayfs 只是换了成本出口——
+   create 期扫描（0）+ commit 期翻译（新增）；native overlay 则相反。
+   **rebuild 循环（commit→create→用→再 commit）每次都新建容器，首次 commit
+   必付全树翻译**，与道路一"每次重建都慢"的结论在 fuse-overlayfs 下依然成立。
+
+缓解方向（未实施）：
+- **同类 prewarm 思路不适用**（翻译发生在 commit 期，无法提前后台化——
+  commit 本身就是用户操作）。
+- 可评估：commit 前后走同容器复用（避免每轮新建 keep-id 容器）；
+  或控制容器内文件数（大数据外置 volume）；
+  或道路三（自研引擎层不再依赖 uidmap 对账）。
 
 ## 0.2 三道路决策（2026-09-07）
 

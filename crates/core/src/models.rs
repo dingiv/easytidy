@@ -33,6 +33,45 @@ pub struct ImageSummary {
     pub created: i64,
 }
 
+/// rebuild 冗余镜像条目（智能清理候选）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebuildImageEntry {
+    /// 镜像 ID（短）
+    pub id: String,
+    /// 完整 repo:tag（如 `localhost/easytidy-rebuild:chrome-20260910090430946`）
+    pub tag: String,
+    /// tag 中解析出的容器名（分组键；同容器名只留最新）
+    pub container_name: String,
+    /// 展开后大小（字节）
+    pub size: u64,
+    /// 创建时间（unix 秒）
+    pub created: i64,
+}
+
+/// rebuild 镜像智能清理扫描结果（预览）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebuildScanResult {
+    /// 将删除的冗余镜像（非在用）
+    pub candidates: Vec<RebuildImageEntry>,
+    /// 冗余但被容器引用、跳过的镜像
+    pub skipped_in_use: Vec<RebuildImageEntry>,
+    /// 将删除镜像的总大小（字节）
+    pub total_candidate_size: u64,
+}
+
+/// rebuild 镜像智能清理执行结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RebuildCleanupResult {
+    /// 已删除镜像的 tag
+    pub deleted: Vec<String>,
+    /// 复查后跳过（仍冗余但在用 / 已不冗余）的 tag
+    pub skipped: Vec<String>,
+    /// 删除失败的 `tag: 原因`
+    pub failures: Vec<String>,
+    /// 释放的空间（字节）
+    pub freed: u64,
+}
+
 /// 下层引擎信息（podman `/info` 只读快照；GUI「环境信息」界面 / 存储健康检测共用）。
 ///
 /// 字段均可为空——podman 不同版本对 `/info` 的填充程度不一，缺字段时前端显示「-」。
@@ -174,7 +213,7 @@ pub struct ContainerParams {
     pub network: NetworkConfig,
     /// 用户命名空间 keep-id：开启时宿主登录 uid ↔ 容器同 uid 锁死
     /// （podman `userns.keep-id`，docs/12）。与 GUI 透传的关系：
-    /// `gui=true` 的 flavor 展开时强制开启。
+    /// `gui_x11`/`gui_wayland` 任一开启的 flavor 展开时强制开启。
     /// 旧字段名 `user_home`（用户一致性映射）经自定义 Deserialize 自动迁移。
     pub keep_id: bool,
     /// 显式 UID 重映射（podman `--uidmap` 列表）。非空时与 `keep_id` 互斥——
@@ -190,16 +229,22 @@ pub struct ContainerParams {
     /// 容器内用户名（可选；设置后创建/重建时经宿主 root exec 幂等 useradd
     /// 建号，否则容器仅按 uid/gid 运行、可能无 passwd 条目）
     pub user_name: Option<String>,
-    /// GUI 透传（意图字段）：展开/重建时自动注入宿主显示环境
-    /// （DISPLAY/WAYLAND_DISPLAY/XDG_RUNTIME_DIR/XDG_DATA_DIRS）+ X11/Wayland
-    /// socket、$XDG_RUNTIME_DIR、字体图标只读挂载，并强制 keep_id。存意图，按宿主
-    /// 实时探测注入（见 `inject_gui_passthrough`）。旧配置缺省 false。
-    pub gui: bool,
+    /// GUI 直通——**X11 应用半**（意图字段）。开启时展开/重建注入：
+    /// `DISPLAY` env + `/tmp/.X11-unix` 挂载 + `XAUTHORITY` 稳定路径（server 维护软链）。
+    /// 与 gui_wayland 独立；任一半开启则共享基建（keep_id / 字体图标 /
+    /// XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）随之开启（见 `inject_gui_passthrough`）。
+    pub gui_x11: bool,
+    /// GUI 直通——**Wayland 应用半**（意图字段）。开启时注入 `WAYLAND_DISPLAY` env
+    /// （Wayland socket 本身在 $XDG_RUNTIME_DIR，经共享挂载接入）。
+    pub gui_wayland: bool,
     /// NVIDIA GPU 透传（意图字段）。开启时展开/重建注入：
-    /// - `NVIDIA_VISIBLE_DEVICES=all` + `NVIDIA_DRIVER_CAPABILITIES=all` env
+    /// - `NVIDIA_DRIVER_CAPABILITIES=all` env（**不注** `NVIDIA_VISIBLE_DEVICES`——
+    ///   GPU 设备经 CDI `nvidia.com/gpu=all` 注入，该 legacy env 与 nvidia hook 的
+    ///   `void` 冲突，2026-09-10 去掉）
     /// - `nvidia.com/gpu=all` CDI 设备节点
     ///
-    /// 需宿主已装 NVIDIA Container Toolkit 并生成 CDI spec。
+    /// 需宿主已装 NVIDIA 驱动 + NVIDIA Container Toolkit 并生成 CDI spec
+    /// （create 前经 `detect_nvidia_gpu` 预检，未就绪报可读错误）。
     /// 旧版本单字段 `gpu: "nvidia..."` 经自定义 Deserialize 自动迁移。
     pub gpu_nvidia: bool,
     /// AMD GPU 透传（意图字段）。开启时 create 期探测宿主 AMD 裸设备注入
@@ -220,6 +265,14 @@ pub struct ContainerParams {
     pub pid: Option<String>,
 }
 
+impl ContainerParams {
+    /// 任一半 GUI 直通开启（共享基建 keep_id / 字体图标 / XDG_DATA_DIRS /
+    /// $XDG_RUNTIME_DIR 挂载随之开启，见 `inject_gui_passthrough`）。
+    pub fn gui_enabled(&self) -> bool {
+        self.gui_x11 || self.gui_wayland
+    }
+}
+
 impl Default for ContainerParams {
     /// 与 serde 默认保持一致：`keep_id` 默认 true；用户/设备字段缺省 None/空。
     fn default() -> Self {
@@ -235,7 +288,8 @@ impl Default for ContainerParams {
             user_uid: None,
             user_gid: None,
             user_name: None,
-            gui: false,
+            gui_x11: false,
+            gui_wayland: false,
             gpu_nvidia: false,
             gpu_amd: false,
             devices: Vec::new(),
@@ -271,7 +325,12 @@ impl Serialize for ContainerParams {
         if self.user_name.is_some() {
             st.serialize_field("user_name", &self.user_name)?;
         }
-        st.serialize_field("gui", &self.gui)?;
+        if self.gui_x11 {
+            st.serialize_field("gui_x11", &self.gui_x11)?;
+        }
+        if self.gui_wayland {
+            st.serialize_field("gui_wayland", &self.gui_wayland)?;
+        }
         if self.gpu_nvidia {
             st.serialize_field("gpu_nvidia", &self.gpu_nvidia)?;
         }
@@ -315,7 +374,8 @@ impl<'de> Deserialize<'de> for ContainerParams {
                     user_uid: bool,
                     user_gid: bool,
                     user_name: bool,
-                    gui: bool,
+                    gui_x11: bool,
+                    gui_wayland: bool,
                     gpu_nvidia: bool,
                     gpu_amd: bool,
                     devices: bool,
@@ -336,7 +396,8 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 let mut user_uid: Option<Option<u32>> = None;
                 let mut user_gid: Option<Option<u32>> = None;
                 let mut user_name: Option<Option<String>> = None;
-                let mut gui: Option<bool> = None;
+                let mut gui_x11: Option<bool> = None;
+                let mut gui_wayland: Option<bool> = None;
                 let mut gpu_nvidia: Option<bool> = None;
                 let mut gpu_amd: Option<bool> = None;
                 let mut devices: Option<Vec<String>> = None;
@@ -422,12 +483,19 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             user_name = Some(map.next_value()?);
                             seen.user_name = true;
                         }
-                        "gui" => {
-                            if seen.gui {
-                                return Err(de::Error::duplicate_field("gui"));
+                        "gui_x11" => {
+                            if seen.gui_x11 {
+                                return Err(de::Error::duplicate_field("gui_x11"));
                             }
-                            gui = Some(map.next_value()?);
-                            seen.gui = true;
+                            gui_x11 = Some(map.next_value()?);
+                            seen.gui_x11 = true;
+                        }
+                        "gui_wayland" => {
+                            if seen.gui_wayland {
+                                return Err(de::Error::duplicate_field("gui_wayland"));
+                            }
+                            gui_wayland = Some(map.next_value()?);
+                            seen.gui_wayland = true;
                         }
                         "gpu_nvidia" => {
                             if seen.gpu_nvidia {
@@ -476,22 +544,57 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 let image = image.ok_or_else(|| de::Error::missing_field("image"))?;
                 let mut p = ContainerParams::default();
                 p.image = image;
-                if let Some(v) = entry { p.entry = v; }
-                if let Some(v) = entry_args { p.entry_args = v; }
-                if let Some(v) = mounts { p.mounts = v; }
-                if let Some(v) = network { p.network = v; }
-                if let Some(v) = keep_id { p.keep_id = v; }
-                if let Some(v) = uidmaps { p.uidmaps = v; }
-                if let Some(v) = gidmaps { p.gidmaps = v; }
-                if let Some(v) = user_uid { p.user_uid = v; }
-                if let Some(v) = user_gid { p.user_gid = v; }
-                if let Some(v) = user_name { p.user_name = v; }
-                if let Some(v) = gui { p.gui = v; }
-                if let Some(v) = gpu_nvidia { p.gpu_nvidia = v; }
-                if let Some(v) = gpu_amd { p.gpu_amd = v; }
-                if let Some(v) = devices { p.devices = v; }
-                if let Some(v) = extra_opts { p.extra_opts = v; }
-                if let Some(v) = pid { p.pid = v; }
+                if let Some(v) = entry {
+                    p.entry = v;
+                }
+                if let Some(v) = entry_args {
+                    p.entry_args = v;
+                }
+                if let Some(v) = mounts {
+                    p.mounts = v;
+                }
+                if let Some(v) = network {
+                    p.network = v;
+                }
+                if let Some(v) = keep_id {
+                    p.keep_id = v;
+                }
+                if let Some(v) = uidmaps {
+                    p.uidmaps = v;
+                }
+                if let Some(v) = gidmaps {
+                    p.gidmaps = v;
+                }
+                if let Some(v) = user_uid {
+                    p.user_uid = v;
+                }
+                if let Some(v) = user_gid {
+                    p.user_gid = v;
+                }
+                if let Some(v) = user_name {
+                    p.user_name = v;
+                }
+                if let Some(v) = gui_x11 {
+                    p.gui_x11 = v;
+                }
+                if let Some(v) = gui_wayland {
+                    p.gui_wayland = v;
+                }
+                if let Some(v) = gpu_nvidia {
+                    p.gpu_nvidia = v;
+                }
+                if let Some(v) = gpu_amd {
+                    p.gpu_amd = v;
+                }
+                if let Some(v) = devices {
+                    p.devices = v;
+                }
+                if let Some(v) = extra_opts {
+                    p.extra_opts = v;
+                }
+                if let Some(v) = pid {
+                    p.pid = v;
+                }
 
                 Ok(p)
             }
@@ -608,7 +711,8 @@ persistent = true
         assert_eq!(config.params.image, "alpine:latest");
         assert_eq!(config.params.entry.as_deref(), Some("/bin/sh"));
         // 设备/安全/PID/GUI/GPU 新字段：旧配置无 → 缺省（None/空/false）
-        assert!(!config.params.gui);
+        assert!(!config.params.gui_x11);
+        assert!(!config.params.gui_wayland);
         assert!(!config.params.gpu_nvidia);
         assert!(!config.params.gpu_amd);
         assert!(config.params.devices.is_empty());
@@ -622,7 +726,8 @@ persistent = true
         let toml_str = r#"
 name = "chrome"
 image = "ubuntu:24.04"
-gui = true
+gui_x11 = true
+gui_wayland = true
 gpu_nvidia = true
 devices = ["/dev/uinput:/dev/uinput"]
 extra_opts = ["label=disable", "apparmor=unconfined"]
@@ -631,20 +736,28 @@ silent_boot = false
 persistent = true
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.params.gui);
+        assert!(config.params.gui_x11);
+        assert!(config.params.gui_wayland);
         assert!(config.params.gpu_nvidia);
         assert!(!config.params.gpu_amd);
-        assert_eq!(config.params.devices, vec!["/dev/uinput:/dev/uinput".to_string()]);
+        assert_eq!(
+            config.params.devices,
+            vec!["/dev/uinput:/dev/uinput".to_string()]
+        );
         assert_eq!(
             config.params.extra_opts,
-            vec!["label=disable".to_string(), "apparmor=unconfined".to_string()]
+            vec![
+                "label=disable".to_string(),
+                "apparmor=unconfined".to_string()
+            ]
         );
         assert_eq!(config.params.pid.as_deref(), Some("host"));
 
         // 序列化形状：pid None 时省略；gpu_* true 时写出；devices/security 始终保留
         let v = serde_json::to_value(&config).unwrap();
         assert_eq!(v["gpu_nvidia"], true);
-        assert_eq!(v["gui"], true);
+        assert_eq!(v["gui_x11"], true);
+        assert_eq!(v["gui_wayland"], true);
         assert_eq!(v["pid"], "host");
         assert_eq!(v["devices"][0], "/dev/uinput:/dev/uinput");
         assert_eq!(v["extra_opts"][1], "apparmor=unconfined");
@@ -664,7 +777,10 @@ persistent = true
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.params.extra_opts,
-            vec!["label=disable".to_string(), "apparmor=unconfined".to_string()]
+            vec![
+                "label=disable".to_string(),
+                "apparmor=unconfined".to_string()
+            ]
         );
 
         // round-trip 只写新字段名（旧名不再写出，避免下一轮污染）
@@ -806,11 +922,15 @@ user_name = "tidy"
                 user_uid: Some(1000),
                 user_gid: Some(1000),
                 user_name: Some("tidy".to_string()),
-                gui: true,
+                gui_x11: true,
+                gui_wayland: true,
                 gpu_nvidia: true,
                 gpu_amd: false,
                 devices: vec!["/dev/uinput:/dev/uinput".to_string()],
-                extra_opts: vec!["label=disable".to_string(), "apparmor=unconfined".to_string()],
+                extra_opts: vec![
+                    "label=disable".to_string(),
+                    "apparmor=unconfined".to_string(),
+                ],
                 pid: Some("host".to_string()),
             },
             env: vec!["DISPLAY=:0".to_string()],
@@ -842,7 +962,11 @@ pub enum EngineEvent {
     /// 容器启动（start）
     ContainerStarted { container_id: String, name: String },
     /// 容器停止（die - podman 用 "died"）
-    ContainerDied { container_id: String, name: String, exit_code: i64 },
+    ContainerDied {
+        container_id: String,
+        name: String,
+        exit_code: i64,
+    },
     /// 容器删除（die）
     ContainerRemoved { container_id: String, name: String },
 }

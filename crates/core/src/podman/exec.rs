@@ -93,9 +93,7 @@ impl Podman {
                             bollard::container::LogOutput::StdOut { message }
                             | bollard::container::LogOutput::StdErr { message }
                             | bollard::container::LogOutput::Console { message }
-                            | bollard::container::LogOutput::StdIn { message } => {
-                                message.to_vec()
-                            }
+                            | bollard::container::LogOutput::StdIn { message } => message.to_vec(),
                         }),
                         Err(e) => Err(Error::Api(e)),
                     })
@@ -174,9 +172,7 @@ impl Podman {
                             bollard::container::LogOutput::StdOut { message }
                             | bollard::container::LogOutput::StdErr { message }
                             | bollard::container::LogOutput::Console { message }
-                            | bollard::container::LogOutput::StdIn { message } => {
-                                message.to_vec()
-                            }
+                            | bollard::container::LogOutput::StdIn { message } => message.to_vec(),
                         }),
                         Err(e) => Err(Error::Api(e)),
                     })
@@ -188,7 +184,9 @@ impl Podman {
                 })
             }
             // detach: false 请求不会返回 Detached
-            StartExecResults::Detached => Err(Error::Connect("exec 意外进入 detach 模式".to_string())),
+            StartExecResults::Detached => {
+                Err(Error::Connect("exec 意外进入 detach 模式".to_string()))
+            }
         }
     }
 
@@ -234,7 +232,12 @@ impl Podman {
     /// bollard 已按 `LogOutput` 变体完成 multiplex 头 demux，无需手写解析。
     ///
     /// 容器必须 running（未启动时 podman 拒绝 exec，返回 Api 错误）。
-    pub async fn exec_oneshot(&self, container: &str, user: &str, cmd: Vec<String>) -> Result<ExecOnce> {
+    pub async fn exec_oneshot(
+        &self,
+        container: &str,
+        user: &str,
+        cmd: Vec<String>,
+    ) -> Result<ExecOnce> {
         let exec = self
             .docker
             .create_exec::<String>(
@@ -259,7 +262,14 @@ impl Podman {
         let mut stderr = String::new();
         if let StartExecResults::Attached { output, .. } = self
             .docker
-            .start_exec(&exec.id, Some(StartExecOptions { detach: false, tty: false, output_capacity: None }))
+            .start_exec(
+                &exec.id,
+                Some(StartExecOptions {
+                    detach: false,
+                    tty: false,
+                    output_capacity: None,
+                }),
+            )
             .await
             .map_err(Error::Api)?
         {
@@ -268,8 +278,12 @@ impl Podman {
             while let Some(item) = stream.next().await {
                 match item {
                     Ok(log) => match log {
-                        bollard::container::LogOutput::StdOut { message } => stdout.push_str(&String::from_utf8_lossy(&message)),
-                        bollard::container::LogOutput::StdErr { message } => stderr.push_str(&String::from_utf8_lossy(&message)),
+                        bollard::container::LogOutput::StdOut { message } => {
+                            stdout.push_str(&String::from_utf8_lossy(&message))
+                        }
+                        bollard::container::LogOutput::StdErr { message } => {
+                            stderr.push_str(&String::from_utf8_lossy(&message))
+                        }
                         _ => {}
                     },
                     Err(e) => return Err(Error::Api(e)),
@@ -277,7 +291,11 @@ impl Podman {
             }
         }
         let code = self.wait_exec_code(&exec.id).await?;
-        Ok(ExecOnce { code, stdout, stderr })
+        Ok(ExecOnce {
+            code,
+            stdout,
+            stderr,
+        })
     }
 
     /// 等待 exec 退出码（流结束后状态落盘可能短暂延迟，短暂重试）。

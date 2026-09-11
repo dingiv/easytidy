@@ -16,7 +16,7 @@ import type { ConfTemplate, ContainerConfig } from '../types';
 import { BLANK_CONTAINER_CONFIG, ContainerConfigEditor } from './config/ContainerConfigEditor';
 
 /** 空白 conf 模板（新建表单初始值；keep_id 默认 true 与 Rust 共享基座对齐。
- *  gui/gpu 透传意图在 BLANK_CONTAINER_CONFIG 共享基座内，随 spread 带出） */
+ *  gui 双开关 / gpu 直通意图在 BLANK_CONTAINER_CONFIG 共享基座内，随 spread 带出） */
 function emptyConfTemplate(): ConfTemplate {
   return {
     ...BLANK_CONTAINER_CONFIG,
@@ -42,13 +42,14 @@ function TemplateEditorPaneInner({ initial, onSaved, onCancel }: TemplateEditorP
   const [saving, setSaving] = useState(false);
 
   /** 编辑器 onChange：ContainerConfig 载荷 → ConfTemplate；
-   *  加载 YAML/示例若缺 gui/gpu_nvidia/gpu_amd/setup（它们不在 ContainerConfig 五
-   *  section 里），保留现值 */
+   *  加载 YAML/示例若缺 gui_x11/gui_wayland/gpu_nvidia/gpu_amd/setup（它们不在
+   *  ContainerConfig 五 section 里），保留现值 */
   const handleChange = (next: ContainerConfig) => {
     const t = next as ConfTemplate;
     setConfig((prev) => ({
       ...t,
-      gui: t.gui ?? prev.gui,
+      gui_x11: t.gui_x11 ?? prev.gui_x11,
+      gui_wayland: t.gui_wayland ?? prev.gui_wayland,
       gpu_nvidia: t.gpu_nvidia ?? prev.gpu_nvidia,
       gpu_amd: t.gpu_amd ?? prev.gpu_amd,
       setup: t.setup ?? prev.setup,

@@ -38,7 +38,7 @@ const DIR_LABELS: Record<string, string> = {
 
 interface MountsPaneProps {
   mounts: MountConfig[];
-  /** GUI 透传开启时引擎将隐式注入的挂载（只读展示；模板编辑器 gui=true 时由
+  /** GUI 直通开启时引擎将隐式注入的挂载（只读展示；gui_x11/gui_wayland 任一开启时由
    *  passthrough_preview 计算） */
   readonlyMounts?: MountConfig[];
   onAdd(m: MountConfig): void;

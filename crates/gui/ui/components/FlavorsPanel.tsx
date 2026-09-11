@@ -264,7 +264,8 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                 <div className="flavor-main">
                   <div className="flavor-title">
                     <span className="flavor-name">{id}</span>
-                    {t.gui && <Tag color="blue">GUI 透传</Tag>}
+                    {t.gui_x11 && <Tag color="blue">X11 直通</Tag>}
+                    {t.gui_wayland && <Tag color="geekblue">Wayland 直通</Tag>}
                     {t.setup.length > 0 && <Tag color="purple">setup ×{t.setup.length}</Tag>}
                     {t.mounts.length > 0 && (
                       <Tag>mounts ×{t.mounts.length}</Tag>

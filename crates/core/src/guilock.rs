@@ -17,8 +17,7 @@ use crate::error::{Error, Result};
 fn runtime_dir() -> Result<PathBuf> {
     let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
     let dir = PathBuf::from(runtime_dir).join("easytidy");
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| Error::Config(format!("创建运行目录失败：{e}")))?;
+    std::fs::create_dir_all(&dir).map_err(|e| Error::Config(format!("创建运行目录失败：{e}")))?;
     Ok(dir)
 }
 

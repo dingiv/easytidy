@@ -296,8 +296,9 @@ pub fn conf_template_expand(name: String, container_name: String) -> Result<Cont
 /// 隐式注入什么：
 /// - gui：X11/Wayland socket、$XDG_RUNTIME_DIR、字体图标挂载 +
 ///   DISPLAY/WAYLAND/XDG_RUNTIME_DIR/XDG_DATA_DIRS env
-/// - gpu：NVIDIA_VISIBLE_DEVICES/NVIDIA_DRIVER_CAPABILITIES env（设备节点经
-///   `nvidia.com/gpu=<值>` CDI 引用，由 `params.gpu` 驱动）
+/// - gpu：NVIDIA_DRIVER_CAPABILITIES env（设备节点经 `nvidia.com/gpu=<值>` CDI
+///   引用，由 `params.gpu_nvidia` 驱动；不注 NVIDIA_VISIBLE_DEVICES——与 nvidia
+///   hook 的 void 冲突，GPU 走 CDI 设备节点）
 ///
 /// 返回的是**增量**：配置里已声明的同 destination 挂载 / 同 key 环境变量不重复出现
 /// （与两个 inject 函数的幂等去重一致——显式写的优先，引擎不再覆盖）。
@@ -732,13 +733,13 @@ mod tests {
 
     /// 透传预览的增量语义（确定性，不依赖宿主 DISPLAY 等）：
     /// - 已声明的挂载（同 container_path）→ 引擎幂等去重，预览不再重复
-    /// - 未声明的 → 引擎注入（gui 开时 /tmp/.X11-unix 恒注入），预览应含
+    /// - 未声明的 → 引擎注入（gui_x11 开时 /tmp/.X11-unix 恒注入），预览应含
     /// - gpu_nvidia → NVIDIA_* env 增量（宿主无关）；gpu_amd → 无 env 注入
     #[test]
     fn test_passthrough_preview_delta() {
-        // gui 开 + 已声明 /tmp/.X11-unix → 不应出现在注入增量
+        // gui_x11 开 + 已声明 /tmp/.X11-unix → 不应出现在注入增量
         let declared: ContainerConfig = serde_json::from_value(serde_json::json!({
-            "name": "t", "image": "alpine", "gui": true,
+            "name": "t", "image": "alpine", "gui_x11": true,
             "mounts": [{"host_path":"/tmp/.X11-unix","container_path":"/tmp/.X11-unix","read_only":false}],
             "network": {"mode":"host","ports":[]},
             "silent_boot": false, "persistent": true
@@ -751,9 +752,9 @@ mod tests {
             p.mounts
         );
 
-        // gui 开 + 未声明 → 引擎恒注入 /tmp/.X11-unix，预览应含
+        // gui_x11 开 + 未声明 → 引擎恒注入 /tmp/.X11-unix，预览应含
         let bare: ContainerConfig = serde_json::from_value(serde_json::json!({
-            "name": "t2", "image": "alpine", "gui": true,
+            "name": "t2", "image": "alpine", "gui_x11": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
             "silent_boot": false, "persistent": true
         }))
@@ -773,19 +774,20 @@ mod tests {
         }))
         .unwrap();
         let p3 = passthrough_preview(gpu_cfg).unwrap();
-        assert!(p3.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+        // 只注 NVIDIA_DRIVER_CAPABILITIES（NVIDIA_VISIBLE_DEVICES 不注——GPU 走 CDI）
         assert!(p3.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
+        assert!(!p3.env.iter().any(|e| e.starts_with("NVIDIA_VISIBLE_DEVICES=")));
 
-        // gui + gpu_nvidia 同开 → 两类注入都在（mounts 来自 gui，NVIDIA env 来自 gpu_nvidia）
+        // gui_x11 + gpu_nvidia 同开 → 两类注入都在（mounts 来自 gui_x11，NVIDIA env 来自 gpu_nvidia）
         let both: ContainerConfig = serde_json::from_value(serde_json::json!({
-            "name": "t4", "image": "alpine", "gui": true, "gpu_nvidia": true,
+            "name": "t4", "image": "alpine", "gui_x11": true, "gpu_nvidia": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
             "silent_boot": false, "persistent": true
         }))
         .unwrap();
         let p4 = passthrough_preview(both).unwrap();
         assert!(p4.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"));
-        assert!(p4.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+        assert!(p4.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
     }
 
     #[test]

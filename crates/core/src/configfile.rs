@@ -105,8 +105,9 @@ impl ConfigFile {
     pub fn unregister_container(&self, name: &str) -> Result<()> {
         let path = self.path_for(name);
         if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| Error::Config(format!("删除容器配置失败（{}）：{e}", path.display())))?;
+            std::fs::remove_file(&path).map_err(|e| {
+                Error::Config(format!("删除容器配置失败（{}）：{e}", path.display()))
+            })?;
             tracing::info!("容器配置已删除：{}", path.display());
         }
         Ok(())
@@ -129,7 +130,9 @@ impl ConfigFile {
             match std::fs::read_to_string(&p) {
                 Ok(content) => match toml::from_str::<ContainerConfig>(&content) {
                     Ok(cfg) => out.push(cfg),
-                    Err(e) => tracing::warn!("容器配置文件解析失败，已跳过（{}）：{e}", p.display()),
+                    Err(e) => {
+                        tracing::warn!("容器配置文件解析失败，已跳过（{}）：{e}", p.display())
+                    }
                 },
                 Err(e) => tracing::warn!("读取容器配置失败，已跳过（{}）：{e}", p.display()),
             }
@@ -187,9 +190,7 @@ impl ConfigFile {
             let from_display = old.display().to_string();
             let to_display = archived.display().to_string();
             match std::fs::rename(old, archived) {
-                Ok(()) => tracing::info!(
-                    "旧单文件注册表已归档：{from_display} → {to_display}"
-                ),
+                Ok(()) => tracing::info!("旧单文件注册表已归档：{from_display} → {to_display}"),
                 Err(e) => tracing::warn!("归档旧注册表失败（不影响新配置）：{e}"),
             }
         }
@@ -227,7 +228,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let cf = ConfigFile::with_base_dir(tmp.path().to_path_buf());
 
-        cf.register_container(sample("c1", "alpine:latest")).unwrap();
+        cf.register_container(sample("c1", "alpine:latest"))
+            .unwrap();
         let loaded = cf.get_container("c1").unwrap().expect("应能读回");
         assert_eq!(loaded.name, "c1");
         assert_eq!(loaded.params.image, "alpine:latest");
@@ -307,7 +309,7 @@ persistent = false
         assert!(cf.get_container("legacy_b").unwrap().unwrap().silent_boot);
     }
 
-        /// 造一个旧单文件注册表（供 migrate_from_legacy 测试用）。
+    /// 造一个旧单文件注册表（供 migrate_from_legacy 测试用）。
     fn write_legacy(tmp: &TempDir, body: &str) -> std::path::PathBuf {
         let legacy_dir = tmp.path().to_path_buf();
         fs::create_dir_all(&legacy_dir).unwrap();
@@ -414,7 +416,10 @@ gpu = "all"
         )
         .unwrap();
         let cf = ConfigFile::with_base_dir(base);
-        let loaded = cf.get_container("old").unwrap().expect("应能解析旧字段文件");
+        let loaded = cf
+            .get_container("old")
+            .unwrap()
+            .expect("应能解析旧字段文件");
         assert_eq!(loaded.params.image, "alpine:latest");
         assert!(!loaded.params.gpu_nvidia, "旧 gpu 字段不映射到 gpu_nvidia");
     }

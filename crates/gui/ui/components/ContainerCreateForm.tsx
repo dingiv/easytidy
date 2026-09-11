@@ -61,7 +61,7 @@ function ContainerCreateFormInner({
     if (!resolvedName) return; // 展开结果含容器名，无名称时无意义
     try {
       // conf_template_expand 直接返回已注入宿主 env 的 ContainerConfig：
-      // gui=true 时按宿主实时 DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR 注入。
+      // gui_x11/gui_wayland 开启时按宿主实时 DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR 注入。
       // 模板仅作创建期预填，容器创建后与模板解耦。省去前端再展开 / 拼装。
       const expanded = await invoke<ContainerConfig>('conf_template_expand', {
         name,

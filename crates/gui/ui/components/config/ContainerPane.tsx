@@ -23,8 +23,10 @@ interface ContainerPaneProps {
   onIconChange(v: string | null): void;
   onSilentBootChange(v: boolean): void;
   onPersistentChange(v: boolean): void;
-  /** GUI 透传开关（实例一等项；存意图，展开/重建时按宿主实时注入） */
-  onGuiChange(v: boolean): void;
+  /** GUI 直通 X11 半开关（存意图，展开/重建时按宿主实时注入 DISPLAY + X11 socket + XAUTHORITY） */
+  onGuiX11Change(v: boolean): void;
+  /** GUI 直通 Wayland 半开关（存意图，展开/重建时注入 WAYLAND_DISPLAY；socket 经 $XDG_RUNTIME_DIR） */
+  onGuiWaylandChange(v: boolean): void;
   /** NVIDIA GPU 透传开关（注入 NVIDIA_* env + nvidia.com/gpu=all CDI） */
   onGpuNvidiaChange(v: boolean): void;
   /** AMD GPU 透传开关（探测注入 /dev/kfd + AMD render 节点；ROCm 容器内自检） */
@@ -33,7 +35,8 @@ interface ContainerPaneProps {
 
 export function ContainerPane({
   edit, mode, nameLocked = false, onNameChange, onImageChange,
-  onIconChange, onSilentBootChange, onPersistentChange, onGuiChange,
+  onIconChange, onSilentBootChange, onPersistentChange,
+  onGuiX11Change, onGuiWaylandChange,
   onGpuNvidiaChange, onGpuAmdChange,
 }: ContainerPaneProps) {
   const { message } = AntApp.useApp();
@@ -142,18 +145,37 @@ export function ContainerPane({
         </Space>
       </div>
       <div className="config-field">
-        <label>GUI 透传</label>
+        <label>GUI 直通 · X11</label>
         <Space>
           <Switch
-            checked={!!edit.gui}
-            onChange={onGuiChange}
+            checked={!!edit.gui_x11}
+            onChange={onGuiX11Change}
             checkedChildren="开"
             unCheckedChildren="关"
           />
           <Typography.Text type="secondary">
-            展开/重建时按宿主实时 env 注入 DISPLAY/WAYLAND/XDG_RUNTIME_DIR + X11/Wayland/字体图标挂载
+            按宿主实时 env 注入 DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径（X11 应用）
           </Typography.Text>
         </Space>
+      </div>
+      <div className="config-field">
+        <label>GUI 直通 · Wayland</label>
+        <Space>
+          <Switch
+            checked={!!edit.gui_wayland}
+            onChange={onGuiWaylandChange}
+            checkedChildren="开"
+            unCheckedChildren="关"
+          />
+          <Typography.Text type="secondary">
+            按宿主实时 env 注入 WAYLAND_DISPLAY（socket 经 $XDG_RUNTIME_DIR 挂载；Wayland 原生应用）
+          </Typography.Text>
+        </Space>
+      </div>
+      <div className="config-field">
+        <Typography.Text type="secondary">
+          GUI 直通任一半开启时共享基建随之注入：keep_id + 字体/图标挂载 + XDG_DATA_DIRS + $XDG_RUNTIME_DIR 挂载
+        </Typography.Text>
       </div>
       <div className="config-field">
         <label>NVIDIA GPU 透传</label>
@@ -165,8 +187,7 @@ export function ContainerPane({
             unCheckedChildren="关"
           />
           <Typography.Text type="secondary">
-            注入 NVIDIA_VISIBLE_DEVICES / NVIDIA_DRIVER_CAPABILITIES env + nvidia.com/gpu=all CDI
-            设备节点（见「环境变量」页只读项）
+            注入 NVIDIA_DRIVER_CAPABILITIES env + nvidia.com/gpu=all CDI 设备节点（见「环境变量」页只读项）
           </Typography.Text>
         </Space>
       </div>

@@ -64,7 +64,8 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   user_uid: null,
   user_gid: null,
   user_name: null,
-  gui: false,
+  gui_x11: false,
+  gui_wayland: false,
   gpu_nvidia: false,
   gpu_amd: false,
 };
@@ -103,7 +104,7 @@ export function ContainerConfigEditor({
   const [examples, setExamples] = useState<ExampleConf[]>([]);
   const [exampleSel, setExampleSel] = useState<string | undefined>(undefined);
   const [busy, setBusy] = useState(false);
-  // GUI + GPU 透传注入预览（gui / gpu_nvidia / gpu_amd 任一开启时由
+  // GUI + GPU 直通注入预览（gui_x11 / gui_wayland / gpu_nvidia / gpu_amd 任一开启时由
   // passthrough_preview 计算；null = 未开启/未算出）
   const [preview, setPreview] = useState<PassthroughPreview | null>(null);
   // 服务器运行时注入的 env（server.env：XAUTHORITY 探测 / XDG_DATA_DIRS 修正）
@@ -116,12 +117,12 @@ export function ContainerConfigEditor({
       .catch((err) => console.error('conf_examples failed:', err));
   }, []);
 
-  // 透传预览：value.gui / value.gpu_nvidia / value.gpu_amd 任一开启时按当前
+  // 直通预览：value.gui_x11 / value.gui_wayland / value.gpu_nvidia / value.gpu_amd 任一开启时按当前
   // mounts/env 计算引擎将隐式注入的增量（防抖 200ms 合并连击；mounts/env/gui/gpu
-  // 变化 → 增量随之变化，需重算）。gui/gpu_* 是 ContainerConfig 一等字段，随
+  // 变化 → 增量随之变化，需重算）。gui 双开关/gpu_* 是 ContainerConfig 一等字段，随
   // value 传入，故预览入参只传 config。
   useEffect(() => {
-    if (!value.gui && !value.gpu_nvidia && !value.gpu_amd) {
+    if (!value.gui_x11 && !value.gui_wayland && !value.gpu_nvidia && !value.gpu_amd) {
       setPreview(null);
       return;
     }
@@ -140,9 +141,9 @@ export function ContainerConfigEditor({
       cancelled = true;
       clearTimeout(t);
     };
-    // 增量取决于 gui/gpu_* 开关与用户声明的 mounts/env
+    // 增量取决于 gui 双开关/gpu_* 开关与用户声明的 mounts/env
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value.gui, value.gpu_nvidia, value.gpu_amd, value.mounts, value.env]);
+  }, [value.gui_x11, value.gui_wayland, value.gpu_nvidia, value.gpu_amd, value.mounts, value.env]);
 
   // 服务器运行时注入的 env（server.env）：仅 edit 模式（单容器 GUI、容器在运行）
   // 可查——create/模板模式无容器。effective 变化（容器启动/重启/刷新）触发重查。
@@ -284,7 +285,8 @@ export function ContainerConfigEditor({
           onIconChange={(icon) => update({ icon })}
           onSilentBootChange={(silent_boot) => update({ silent_boot })}
           onPersistentChange={(persistent) => update({ persistent })}
-          onGuiChange={(gui) => update({ gui })}
+          onGuiX11Change={(gui_x11) => update({ gui_x11 })}
+          onGuiWaylandChange={(gui_wayland) => update({ gui_wayland })}
           onGpuNvidiaChange={(gpu_nvidia) => update({ gpu_nvidia })}
           onGpuAmdChange={(gpu_amd) => update({ gpu_amd })}
         />

@@ -10,14 +10,40 @@
 //!
 //! 铁律：零 podman CLI 调用（见 docs/08-requirements.md L2）。
 
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use bollard::Docker;
 use crate::error::{Error, Result};
 use crate::models::{
-    ContainerConfig, ContainerConfigView, ContainerParams, ContainerSummary, MountConfig,
-    NetworkConfig, NetworkMode, PortMapping,
+    ContainerConfig, ContainerConfigView, ContainerParams, ContainerSummary, ImageSummary,
+    MountConfig, NetworkConfig, NetworkMode, PortMapping, RebuildImageEntry,
 };
+use bollard::Docker;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+/// easytidy fork podman service 专用 containers.conf（[`Podman::ensure_fork_service`]
+/// 以 `CONTAINERS_CONF` 注入给子进程）。
+///
+/// **目前唯一内容是 `seccomp_profile = ""`**：fork 暂未编入 libseccomp，默认
+/// profile（/usr/share/containers/seccomp.json）会触发 "seccomp not enabled in
+/// this build" 导致 create 全挂。libseccomp 加回后应移除此注入，让 fork 直接用
+/// 用户默认配置。
+///
+/// 文件落在 app data 目录（`~/.local/share/easytidy/podman-containers.conf`），
+/// 已存在则直接复用。
+fn fork_containers_conf() -> Result<std::path::PathBuf> {
+    let path = crate::appdata::app_data_dir()?.join("podman-containers.conf");
+    if !path.exists() {
+        std::fs::write(
+            &path,
+            r#"# easytidy fork podman engine 专用配置（自动生成）
+# 注：libseccomp 编入 fork 后本文件与 CONTAINERS_CONF 注入一并移除
+[containers]
+seccomp_profile = "unconfined"
+"#,
+        )
+        .map_err(|e| Error::Connect(format!("写入 fork containers.conf 失败：{e}")))?;
+    }
+    Ok(path)
+}
 
 /// 宿主侧 exec（PTY 会话 + 非 tty 一次性；见 exec.rs）
 pub mod exec;
@@ -60,26 +86,112 @@ impl Podman {
     /// prepare 另建 /usr/local/bin/ets 软链使其上 PATH）。
     pub const ETS_TARGET: &str = "/run/easytidy-bin/ets";
 
-    /// 连接到 rootless podman socket 并协商 API 版本。
+    /// easytidy 专用 podman engine socket 路径：`$XDG_RUNTIME_DIR/easytidy/podman.sock`。
     ///
-    /// 路径规则：$XDG_RUNTIME_DIR/podman/podman.sock（缺失则 Error::NoXdgRuntime）。
-    /// 连接后调用 `ping()` 验证并协商版本（Docker-v29 教训：永不硬编码 API 版本）。
-    pub async fn connect() -> Result<Self> {
-        let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-            .map_err(|_| Error::NoXdgRuntime)?;
+    /// 与 `$XDG_RUNTIME_DIR/easytidy/<name>` 容器 socket 目录同级（文件 vs 目录不
+    /// 冲突）。由本模块 [`ensure_fork_service`] 拉起的魔改 podman（easytidy fork）
+    /// 监听此路径；与系统 podman.socket（`$XDG_RUNTIME_DIR/podman/podman.sock`）
+    /// 完全独立，互不干扰。
+    /// 环境变量 `EASYTIDY_PODMAN_SOCK` 可覆盖（测试用）。
+    pub fn fork_socket_path() -> Result<PathBuf> {
+        if let Ok(p) = std::env::var("EASYTIDY_PODMAN_SOCK") {
+            if !p.is_empty() {
+                return Ok(PathBuf::from(p));
+            }
+        }
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
+        Ok(PathBuf::from(runtime_dir)
+            .join("easytidy")
+            .join("podman.sock"))
+    }
 
-        let socket_path = PathBuf::from(runtime_dir)
-            .join("podman/podman.sock");
+    /// 魔改 podman 二进制的发现路径。
+    ///
+    /// 优先级：环境变量 `EASYTIDY_PODMAN_BIN` > `~/.local/lib/easytidy/podman`。
+    /// 找不到返回 `None`（调用方回退系统 podman socket）。
+    fn fork_bin() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("EASYTIDY_PODMAN_BIN") {
+            if !p.is_empty() {
+                let path = PathBuf::from(p);
+                return path.exists().then_some(path);
+            }
+        }
+        let home = dirs::home_dir()?;
+        let path = home.join(".local/lib/easytidy/podman");
+        path.exists().then_some(path)
+    }
 
-        if !socket_path.exists() {
-            return Err(Error::Connect(format!(
-                "podman socket 不存在：{}（请启用 podman.socket user unit）",
-                socket_path.display()
-            )));
+    /// 探测 unix socket 是否有服务监听（connect 即断）。
+    fn socket_alive(path: &Path) -> bool {
+        std::os::unix::net::UnixStream::connect(path).is_ok()
+    }
+
+    /// 确保 easytidy fork podman service 在跑：socket 可连即返回；否则 setsid
+    /// 拉起 `<fork-bin> system service --time=0 unix://<sock>` 后等 socket
+    /// 出现（最长 5s）。
+    ///
+    /// - 服务随本进程脱离终端（setsid）存活，GUI/CLI 退出不杀服务；
+    /// - **seccomp 规避**：fork 暂未编入 libseccomp，service 启动时注入专用
+    ///   `CONTAINERS_CONF`（`seccomp_profile=""`，见 [`fork_containers_conf`]）；
+    ///   libseccomp 加回后移除该注入；
+    /// - fork 二进制缺失或启动失败 → `Err`，由 [`connect`] 回退系统 socket。
+    fn ensure_fork_service(bin: &Path, sock: &Path) -> Result<()> {
+        if Self::socket_alive(sock) {
+            return Ok(());
         }
 
+        if let Some(parent) = sock.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| Error::Connect(format!("创建 engine socket 目录失败：{e}")))?;
+        }
+        // stale socket（文件在但无监听）→ 先移除，否则 podman bind 失败
+        if sock.exists() {
+            let _ = std::fs::remove_file(sock);
+        }
+
+        let conf = fork_containers_conf()?;
+        let sock_str = sock
+            .to_str()
+            .ok_or_else(|| Error::Connect("engine socket 路径非法 UTF-8".to_string()))?;
+        std::process::Command::new("setsid")
+            .arg(bin)
+            .args(["system", "service", "--time=0"])
+            .arg(format!("unix://{sock_str}"))
+            .env("CONTAINERS_CONF", &conf)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| Error::Connect(format!("拉起 easytidy podman service 失败：{e}")))?;
+
+        // 等 socket 出现并可连（最长 5s）
+        for _ in 0..50 {
+            if Self::socket_alive(sock) {
+                tracing::info!("easytidy podman service 已就绪：{}", sock.display());
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Err(Error::Connect(format!(
+            "easytidy podman service 启动超时（socket 未就绪）：{}",
+            sock.display()
+        )))
+    }
+
+    /// 连接到 easytidy fork podman socket（优先）或系统 podman socket（回退）并
+    /// 协商 API 版本。
+    ///
+    /// 顺序：
+    /// 1. fork socket（`$XDG_RUNTIME_DIR/easytidy/podman.sock`）——存在/可拉起则用；
+    /// 2. 系统 rootless socket（`$XDG_RUNTIME_DIR/podman/podman.sock`）——fork 未
+    ///    安装或启动失败时的回退，保持原有行为。
+    /// 连接后调用 ping 协商版本（Docker-v29 教训：永不硬编码 API 版本）。
+    pub async fn connect() -> Result<Self> {
+        let socket_path = Self::connect_fork_or_system_socket()?;
+
         // bollard 的 UnixStream 需要明确路径字符串
-        let socket_str = socket_path.to_str()
+        let socket_str = socket_path
+            .to_str()
             .ok_or_else(|| Error::Connect("socket 路径非法 UTF-8".to_string()))?;
 
         // 使用 bollard 的 connect_with_unix 方法
@@ -94,17 +206,49 @@ impl Podman {
         Ok(client)
     }
 
+    /// 决定连接哪个 socket：优先 fork（可自动拉起），失败回退系统。
+    fn connect_fork_or_system_socket() -> Result<PathBuf> {
+        let fork_sock = Self::fork_socket_path()?;
+        if Self::socket_alive(&fork_sock) {
+            return Ok(fork_sock);
+        }
+        if let Some(bin) = Self::fork_bin() {
+            match Self::ensure_fork_service(&bin, &fork_sock) {
+                Ok(()) => return Ok(fork_sock),
+                Err(e) => {
+                    tracing::warn!("easytidy podman service 拉起失败，回退系统 podman socket：{e}")
+                }
+            }
+        }
+
+        // 回退：系统 rootless podman socket（原有行为）
+        let runtime_dir = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
+        let system_sock = PathBuf::from(runtime_dir).join("podman/podman.sock");
+        if !system_sock.exists() {
+            return Err(Error::Connect(format!(
+                "podman socket 不存在：{}（请启用 podman.socket user unit）",
+                system_sock.display()
+            )));
+        }
+        Ok(system_sock)
+    }
+
     /// 协商 API 版本（ping podman 并获取服务器版本）。
     ///
     /// bollard 默认使用最新 API 版本；某些 podman 版本可能不支持。
     /// 此方法验证连接并可选地降级到特定版本（失败时 pin ClientVersion）。
     async fn negotiate_version(&mut self) -> Result<()> {
-        let version = self.docker.version().await
+        let version = self
+            .docker
+            .version()
+            .await
             .map_err(|e| Error::Connect(format!("版本协商失败：{e}")))?;
 
-        tracing::debug!("podman 版本：API={}, OS={}",
+        tracing::debug!(
+            "podman 版本：API={}, OS={}",
             version.api_version.unwrap_or_default(),
-            version.os.unwrap_or_default());
+            version.os.unwrap_or_default()
+        );
 
         // TODO: 如果 API 版本过老，可以在这里降级
         // 目前 bollard 0.18 支持 Docker API 1.43+，对应 podman 5.2+
@@ -134,14 +278,18 @@ impl Podman {
     }
 
     /// 从 bollard ContainerSummary 映射为我们的模型。
-    fn map_container_summary(&self, c: bollard::models::ContainerSummary) -> Option<ContainerSummary> {
+    fn map_container_summary(
+        &self,
+        c: bollard::models::ContainerSummary,
+    ) -> Option<ContainerSummary> {
         let name = c.names?.first()?.trim_start_matches('/').to_string();
         let id = c.id?;
         let image = c.image.unwrap_or_default();
         let status = c.state.unwrap_or_else(|| "unknown".to_string());
 
         // 按标签判定是否为 easytidy 管理
-        let managed = c.labels
+        let managed = c
+            .labels
             .as_ref()
             .and_then(|labels| labels.get("manager"))
             .map(|v| v == "easytidy")
@@ -202,11 +350,10 @@ impl Podman {
     /// 探测宿主 overlay 挂载方式（读 storage.conf；文件缺失/未配 = None = native）
     fn detect_overlay_mount_program() -> Option<String> {
         let path = Self::storage_conf_path()?;
-        let content = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| {
-                tracing::warn!("读 storage.conf 失败（按 native 处理）：{e}");
-                String::new()
-            });
+        let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+            tracing::warn!("读 storage.conf 失败（按 native 处理）：{e}");
+            String::new()
+        });
         Self::parse_overlay_mount_program(&content)
     }
 
@@ -271,7 +418,8 @@ impl Podman {
         bins: &crate::ContainerBins,
         config: &ContainerConfig,
     ) -> Result<String> {
-        self.create_with_config_named(name, name, image, bins, config).await
+        self.create_with_config_named(name, name, image, bins, config)
+            .await
     }
 
     /// 同 [`Self::create_with_config`]，但「正式身份名」（`name`）与「podman
@@ -309,7 +457,8 @@ impl Podman {
         // 先于容器存在，按容器名寻址——纯 name 不依赖 config，避免 config 漂移分叉）
         let socket_host_dir = crate::socket_dir_for(name)?;
 
-        tokio::fs::create_dir_all(&socket_host_dir).await
+        tokio::fs::create_dir_all(&socket_host_dir)
+            .await
             .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
 
         // 构建标签
@@ -426,7 +575,11 @@ impl Podman {
                     let mut exposed = HashMap::new();
                     let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
                     for p in &config.params.network.ports {
-                        let protocol = if p.protocol.is_empty() { "tcp" } else { p.protocol.as_str() };
+                        let protocol = if p.protocol.is_empty() {
+                            "tcp"
+                        } else {
+                            p.protocol.as_str()
+                        };
                         if p.container_port == 0 || p.host_port == 0 {
                             return Err(Error::Config(format!(
                                 "端口映射无效（{}:{} -> {}:{}）：端口不能为 0",
@@ -471,7 +624,12 @@ impl Podman {
             .filter(|e| !e.trim().is_empty())
         {
             let mut entry_cmd = entry.trim().to_string();
-            for arg in config.params.entry_args.iter().filter(|a| !a.trim().is_empty()) {
+            for arg in config
+                .params
+                .entry_args
+                .iter()
+                .filter(|a| !a.trim().is_empty())
+            {
                 entry_cmd.push(' ');
                 entry_cmd.push_str(arg.trim());
             }
@@ -512,6 +670,34 @@ impl Podman {
             Vec::new()
         };
 
+        // NVIDIA GPU 直通预检（create 期，与 AMD 同款）：easytidy 走 CDI
+        // `nvidia.com/gpu=all` 注入设备节点，需宿主 NVIDIA 驱动（/dev/nvidia<N>
+        // 设备节点）+ nvidia-container-toolkit 生成的 CDI spec（nvidia.yaml）就绪。
+        // gpu_nvidia 开但未就绪 → 直接报可读错误（避免静默无 GPU 或 podman
+        // `unresolvable CDI devices nvidia.com/gpu=all` 玄学报错）；安装/生成 CDI
+        // 属宿主 root 操作，由用户执行（同 AMD kfd 预检哲学，不代跑）。
+        if config.params.gpu_nvidia {
+            match crate::env::host::detect_nvidia_gpu() {
+                crate::env::host::NvidiaGpuReadiness::Ready => {}
+                crate::env::host::NvidiaGpuReadiness::NoGpu => {
+                    return Err(Error::Config(format!(
+                        "容器 {name} 开启了 NVIDIA GPU 直通（gpu_nvidia），但宿主未探测到 \
+                         GPU 设备节点（/dev 下无 nvidia<数字>）——请先安装并加载 NVIDIA \
+                         驱动（宿主 nvidia-smi 应能列出 GPU）"
+                    )));
+                }
+                crate::env::host::NvidiaGpuReadiness::MissingCdiSpec => {
+                    return Err(Error::Config(format!(
+                        "容器 {name} 开启了 NVIDIA GPU 直通（gpu_nvidia），宿主有 NVIDIA GPU，\
+                         但 nvidia-container-toolkit 的 CDI spec 缺失（/etc/cdi 与 \
+                         /var/run/cdi 均无 nvidia.yaml）——请安装 toolkit（如 \
+                         `sudo apt install nvidia-container-toolkit`）并生成 CDI spec \
+                         （`sudo nvidia-ctk cdi generate`）"
+                    )));
+                }
+            }
+        }
+
         // keep-id → 必须走 libpod 端点（Docker compat 端点不支持 userns.keep-id，
         // 实测；见 libpod.rs）。keep-id 使容器内 uid 1000 = 宿主当前登录用户：
         // 宿主 home 读写 / /run/user/1000（显示 socket）自然可达（GUI 窗口可用）。
@@ -521,8 +707,10 @@ impl Podman {
             let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
                 .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
             let port_bindings_json = match &host_config.port_bindings {
-                Some(pb) => Some(serde_json::to_value(pb)
-                    .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?),
+                Some(pb) => Some(
+                    serde_json::to_value(pb)
+                        .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?,
+                ),
                 None => None,
             };
             let body = crate::libpod::keep_id_create_body(
@@ -548,9 +736,7 @@ impl Podman {
                 config.params.extra_opts.clone(),
             );
             let id = libpod.create_container(container_name, body).await?;
-            tracing::info!(
-                "容器 {container_name}（身份 {name}）创建成功（ID: {id}，keep-id）"
-            );
+            tracing::info!("容器 {container_name}（身份 {name}）创建成功（ID: {id}，keep-id）");
             return Ok(id);
         }
         // 非 keep-id 路径同样走 libpod 端点创建（仅支持 podman；
@@ -558,8 +744,10 @@ impl Podman {
         let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
             .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
         let port_bindings_json = match &host_config.port_bindings {
-            Some(pb) => Some(serde_json::to_value(pb)
-                .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?),
+            Some(pb) => Some(
+                serde_json::to_value(pb)
+                    .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?,
+            ),
             None => None,
         };
         let libpod = crate::libpod::Libpod::new().await?;
@@ -586,9 +774,7 @@ impl Podman {
             config.params.extra_opts.clone(),
         );
         let id = libpod.create_container(container_name, body).await?;
-        tracing::info!(
-            "容器 {container_name}（身份 {name}）创建成功（ID: {id}，libpod）"
-        );
+        tracing::info!("容器 {container_name}（身份 {name}）创建成功（ID: {id}，libpod）");
         Ok(id)
     }
 
@@ -731,8 +917,8 @@ impl Podman {
             tracing::warn!("探测容器清理失败（忽略）：{e}");
         }
 
-        let passwd = read
-            .map_err(|e| Error::Connect(format!("读取镜像 {image} 的 /etc/passwd 失败：{e}")))?;
+        let passwd =
+            read.map_err(|e| Error::Connect(format!("读取镜像 {image} 的 /etc/passwd 失败：{e}")))?;
         crate::pathvars::store_image_passwd(image, passwd.clone());
         Ok(passwd)
     }
@@ -818,7 +1004,14 @@ impl Podman {
             "easytidy snapshot via commit"
         };
         libpod
-            .commit(name, &snap_repo, snap_tag.as_deref(), squash, message, &change_refs)
+            .commit(
+                name,
+                &snap_repo,
+                snap_tag.as_deref(),
+                squash,
+                message,
+                &change_refs,
+            )
             .await?;
         tracing::info!("环境 {} 快照完成（squash={}）:{}", name, squash, image_ref);
         Ok(image_ref)
@@ -831,21 +1024,13 @@ impl Podman {
     /// key 仍存在但 value 清空（podman 设计上不允许从 image 删 label key）。
     async fn build_label_clear_changes(&self, name: &str) -> Vec<String> {
         let labels = match self.docker.inspect_container(name, None).await {
-            Ok(detail) => detail
-                .config
-                .and_then(|c| c.labels)
-                .unwrap_or_default(),
+            Ok(detail) => detail.config.and_then(|c| c.labels).unwrap_or_default(),
             Err(e) => {
-                tracing::warn!(
-                    "快照时读取容器 labels 失败（labels 会原样保留在快照镜像）：{e}"
-                );
+                tracing::warn!("快照时读取容器 labels 失败（labels 会原样保留在快照镜像）：{e}");
                 return Vec::new();
             }
         };
-        labels
-            .into_keys()
-            .map(|k| format!("LABEL={k}="))
-            .collect()
+        labels.into_keys().map(|k| format!("LABEL={k}=")).collect()
     }
 
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
@@ -938,12 +1123,17 @@ impl Podman {
         // 大镜像可达分钟级）；plain=只写 upperdir 增量（复用 base 共享层，亚秒级）。
         // 便于区分「重建」（squash）与「快速重建」（plain）到底走了哪条路径。
         let commit_kind = if squash { "squash" } else { "plain" };
-        tracing::info!(
-            "环境 {name} 重建 commit（{commit_kind}）开始 → {image_ref}"
-        );
+        tracing::info!("环境 {name} 重建 commit（{commit_kind}）开始 → {image_ref}");
         let commit_started = std::time::Instant::now();
         if let Err(e) = libpod
-            .commit(name, "localhost/easytidy-rebuild", Some(&tag), squash, message, &[])
+            .commit(
+                name,
+                "localhost/easytidy-rebuild",
+                Some(&tag),
+                squash,
+                message,
+                &[],
+            )
             .await
         {
             self.restore_original(name).await;
@@ -1122,7 +1312,6 @@ impl Podman {
         Ok(())
     }
 
-
     /// 检查容器当前生效的 mounts 与网络配置（GUI "当前生效" 状态）。
     ///
     /// 数据来源（等价 `podman inspect`）：
@@ -1197,7 +1386,10 @@ impl Podman {
         let user = info.config.as_ref().and_then(|c| c.user.clone());
 
         // userns 模式（keep-id 容器实际可能回显 "private"/None——语义以 keep_id + docs/12 为准）
-        let userns_mode = info.host_config.as_ref().and_then(|h| h.userns_mode.clone());
+        let userns_mode = info
+            .host_config
+            .as_ref()
+            .and_then(|h| h.userns_mode.clone());
 
         Ok(ContainerConfigView {
             mounts,
@@ -1230,7 +1422,12 @@ impl Podman {
         use bollard::container::RenameContainerOptions;
 
         self.docker
-            .rename_container(old, RenameContainerOptions { name: new.to_string() })
+            .rename_container(
+                old,
+                RenameContainerOptions {
+                    name: new.to_string(),
+                },
+            )
             .await
             .map_err(|e| Error::Connect(format!("重命名容器失败（{old} → {new}）：{e}")))?;
         Ok(())
@@ -1368,7 +1565,8 @@ impl Podman {
         let Some(dir) = sock.parent() else {
             return Err(Error::Connect("socket 路径无父目录".to_string()));
         };
-        tokio::fs::create_dir_all(dir).await
+        tokio::fs::create_dir_all(dir)
+            .await
             .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
         Ok(())
     }
@@ -1383,7 +1581,9 @@ impl Podman {
         // bind-mount 源目录须已存在：开机后重建（见 ensure_socket_dir）
         self.ensure_socket_dir(name_or_id).await?;
 
-        self.docker.start_container(name_or_id, None::<StartContainerOptions<String>>).await
+        self.docker
+            .start_container(name_or_id, None::<StartContainerOptions<String>>)
+            .await
             .map_err(|e| Error::Connect(format!("启动容器失败：{e}")))?;
 
         tracing::info!("容器 {} 启动成功", name_or_id);
@@ -1395,11 +1595,11 @@ impl Podman {
         use bollard::container::StopContainerOptions;
 
         // 默认 10 秒超时
-        let opts = StopContainerOptions {
-            t: 10,
-        };
+        let opts = StopContainerOptions { t: 10 };
 
-        self.docker.stop_container(name_or_id, Some(opts)).await
+        self.docker
+            .stop_container(name_or_id, Some(opts))
+            .await
             .map_err(|e| Error::Connect(format!("停止容器失败：{e}")))?;
 
         tracing::info!("容器 {} 停止成功", name_or_id);
@@ -1417,11 +1617,11 @@ impl Podman {
         self.ensure_socket_dir(name_or_id).await?;
 
         // 默认 10 秒超时
-        let opts = RestartContainerOptions {
-            t: 10,
-        };
+        let opts = RestartContainerOptions { t: 10 };
 
-        self.docker.restart_container(name_or_id, Some(opts)).await
+        self.docker
+            .restart_container(name_or_id, Some(opts))
+            .await
             .map_err(|e| Error::Connect(format!("重启容器失败：{e}")))?;
 
         tracing::info!("容器 {} 重启成功", name_or_id);
@@ -1511,8 +1711,8 @@ impl Podman {
                 }),
                 None,
             )
-        .await
-        .map_err(Error::Api)?;
+            .await
+            .map_err(Error::Api)?;
         tracing::info!("镜像已删除：{name}");
         Ok(())
     }
@@ -1557,10 +1757,8 @@ impl Podman {
             .map_err(Error::Api)?;
 
         // 3. 按 ImageID 命中收集容器名。
-        let mut result: std::collections::HashMap<String, Vec<String>> = images
-            .iter()
-            .map(|i| (i.clone(), Vec::new()))
-            .collect();
+        let mut result: std::collections::HashMap<String, Vec<String>> =
+            images.iter().map(|i| (i.clone(), Vec::new())).collect();
         for c in containers {
             let image_id = norm(c.image_id.unwrap_or_default());
             if image_id.is_empty() {
@@ -1631,7 +1829,8 @@ fn parse_passwd_from_tar(buf: &[u8]) -> Result<String> {
         .entries()
         .map_err(|e| Error::Config(format!("解析 passwd tar 失败：{e}")))?
     {
-        let mut entry = entry.map_err(|e| Error::Config(format!("解析 passwd tar 条目失败：{e}")))?;
+        let mut entry =
+            entry.map_err(|e| Error::Config(format!("解析 passwd tar 条目失败：{e}")))?;
         let name = entry
             .path()
             .map_err(|e| Error::Config(format!("tar 条目路径非法：{e}")))?
@@ -1642,7 +1841,8 @@ fn parse_passwd_from_tar(buf: &[u8]) -> Result<String> {
             entry
                 .read_to_end(&mut content)
                 .map_err(|e| Error::Config(format!("读 passwd 内容失败：{e}")))?;
-            return String::from_utf8(content).map_err(|e| Error::Config(format!("passwd 非 UTF-8：{e}")));
+            return String::from_utf8(content)
+                .map_err(|e| Error::Config(format!("passwd 非 UTF-8：{e}")));
         }
     }
     Err(Error::Config(
@@ -1663,7 +1863,8 @@ fn resolve_container_user(
         .or_else(|| host.map(|h| h.uid))
         .ok_or_else(|| {
             Error::Config(
-                "无法确定容器默认用户：未配置 user_uid 且宿主用户探测失败（host_user() = None）".to_string(),
+                "无法确定容器默认用户：未配置 user_uid 且宿主用户探测失败（host_user() = None）"
+                    .to_string(),
             )
         })?;
     let gid = params
@@ -1671,7 +1872,8 @@ fn resolve_container_user(
         .or_else(|| host.map(|h| h.gid))
         .ok_or_else(|| {
             Error::Config(
-                "无法确定容器默认用户：未配置 user_gid 且宿主用户探测失败（host_user() = None）".to_string(),
+                "无法确定容器默认用户：未配置 user_gid 且宿主用户探测失败（host_user() = None）"
+                    .to_string(),
             )
         })?;
     Ok((uid, gid))
@@ -1742,6 +1944,76 @@ fn is_valid_image_name_component(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
 }
 
+/// rebuild 镜像仓库（rebuild / 快速重建的 commit 产物统一 commit 到此，见
+/// [`Self::rebuild_image_tag`]）。智能清理只处理此仓库的镜像，不碰 snapshot /
+/// 基础镜像。
+pub const REBUILD_IMAGE_REPO: &str = "localhost/easytidy-rebuild";
+
+/// 解析 rebuild 镜像 ref（`{容器名}-{17位时间戳}`）→ (容器名, 时间戳)。
+///
+/// 时间戳为 `rebuild_image_tag` 生成的 `%Y%m%d%H%M%S%3f`（17 位纯数字）。取**最后一个**
+/// 后跟恰好 17 位数字的 `-` 作分隔（容器名本身可含 `-`，但时间戳恒为末尾 17 位）。
+fn parse_rebuild_ref(refname: &str) -> Option<(String, String)> {
+    let mut best: Option<(String, String)> = None;
+    for (i, c) in refname.char_indices() {
+        if c != '-' {
+            continue;
+        }
+        let rest = &refname[i + 1..];
+        if rest.len() == 17 && rest.bytes().all(|b| b.is_ascii_digit()) {
+            best = Some((refname[..i].to_string(), rest.to_string()));
+        }
+    }
+    best
+}
+
+/// 取 rebuild tag 的时间戳（末尾 17 位）作排序键（固定宽度数字串，字典序=时间序；
+/// 含毫秒，避免 `created` 秒级并列）。
+fn tag_timestamp(tag: &str) -> &str {
+    tag.rsplit('-').next().unwrap_or("")
+}
+
+/// 计算 rebuild 冗余镜像（纯函数，单测入口）。
+///
+/// 规则：只处理 [`REBUILD_IMAGE_REPO`] 仓库的镜像（rebuild 产物）；按容器名分组，
+/// 每组保留时间戳最新的一个（当前容器在用 / 最近备份），其余为冗余（可删）。容器已删
+/// 除的孤儿镜像同样只留最新（备份）。**不判断占用**（由调用方经 `images_used_by`
+/// 复查）——本函数只产出「非最新」的候选。
+pub fn plan_rebuild_cleanup(images: &[ImageSummary]) -> Vec<RebuildImageEntry> {
+    use std::collections::HashMap;
+    let prefix = format!("{REBUILD_IMAGE_REPO}:");
+    let mut groups: HashMap<String, Vec<RebuildImageEntry>> = HashMap::new();
+    for img in images {
+        let Some(tag) = img.repo_tags.iter().find(|t| t.starts_with(&prefix)) else {
+            continue;
+        };
+        let Some(refname) = tag.split_once(':').map(|(_, r)| r) else {
+            continue;
+        };
+        let Some((name, _ts)) = parse_rebuild_ref(refname) else {
+            continue;
+        };
+        groups
+            .entry(name.clone())
+            .or_default()
+            .push(RebuildImageEntry {
+                id: img.id.clone(),
+                tag: tag.clone(),
+                container_name: name,
+                size: img.size,
+                created: img.created,
+            });
+    }
+    // 每组按 tag 时间戳降序，留最新，其余冗余。
+    let mut redundant: Vec<RebuildImageEntry> = Vec::new();
+    for entries in groups.into_values() {
+        let mut sorted = entries;
+        sorted.sort_by(|a, b| tag_timestamp(&b.tag).cmp(tag_timestamp(&a.tag)));
+        redundant.extend(sorted.into_iter().skip(1));
+    }
+    redundant
+}
+
 /// 映射 bollard `SystemInfo`（`/info` 响应）→ [`EngineInfo`]（纯函数，单测入口）。
 ///
 /// rootless 判定：`SecurityOptions` 含 `name=rootless`（podman 5.x 实测：
@@ -1791,6 +2063,96 @@ mod tests {
         }
     }
 
+    /// 构造 rebuild 镜像摘要（`localhost/easytidy-rebuild:{name}-{ts}`）。
+    fn rebuild_img(name: &str, ts: &str, id: &str, size: u64) -> ImageSummary {
+        ImageSummary {
+            id: id.to_string(),
+            repo_tags: vec![format!("{REBUILD_IMAGE_REPO}:{name}-{ts}")],
+            size,
+            created: 0,
+        }
+    }
+
+    #[test]
+    fn test_parse_rebuild_ref_basic() {
+        assert_eq!(
+            parse_rebuild_ref("chrome-20260910090430946"),
+            Some(("chrome".to_string(), "20260910090430946".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_rebuild_ref_name_with_dashes() {
+        // 容器名含 `-`：取最后一个后跟 17 位数字的 `-` 作分隔
+        assert_eq!(
+            parse_rebuild_ref("my-container-20260910090430946"),
+            Some(("my-container".to_string(), "20260910090430946".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_rebuild_ref_rejects_non_17digit() {
+        // 时间戳非 17 位 → 不识别
+        assert_eq!(parse_rebuild_ref("chrome-202609100904"), None);
+        assert_eq!(parse_rebuild_ref("chrome"), None);
+    }
+
+    #[test]
+    fn test_plan_rebuild_cleanup_keeps_latest_per_container() {
+        let images = vec![
+            // gui_container 两个 rebuild 镜像 → 只留最新（150430435），冗余 = 150017361
+            rebuild_img("gui_container", "20260910150017361", "aaa", 6_900_000_000),
+            rebuild_img("gui_container", "20260910150430435", "bbb", 6_900_000_000),
+            // chrome 唯一 → 无冗余
+            rebuild_img("chrome", "20260910090430946", "ccc", 2_270_000_000),
+            // 非 rebuild 镜像（基础镜像 / snapshot）→ 忽略
+            ImageSummary {
+                id: "ddd".into(),
+                repo_tags: vec!["docker.io/library/ubuntu:24.04".into()],
+                size: 323_000_000,
+                created: 0,
+            },
+            ImageSummary {
+                id: "eee".into(),
+                repo_tags: vec!["easytidy/snapshot/chrome-20260910-1953".into()],
+                size: 100_000,
+                created: 0,
+            },
+        ];
+        let redundant = plan_rebuild_cleanup(&images);
+        assert_eq!(
+            redundant.len(),
+            1,
+            "仅 gui_container 的旧镜像冗余：{:?}",
+            redundant
+        );
+        assert_eq!(redundant[0].id, "aaa");
+        assert_eq!(redundant[0].container_name, "gui_container");
+    }
+
+    #[test]
+    fn test_plan_rebuild_cleanup_no_rebuild_images() {
+        let images = vec![ImageSummary {
+            id: "x".into(),
+            repo_tags: vec!["docker.io/library/alpine:latest".into()],
+            size: 100,
+            created: 0,
+        }];
+        assert!(plan_rebuild_cleanup(&images).is_empty());
+    }
+
+    #[test]
+    fn test_plan_rebuild_cleanup_dangling_no_repo() {
+        // 悬空 rebuild 镜像（repo_tags 为空）→ 无法识别容器名，忽略（不产生冗余）
+        let images = vec![ImageSummary {
+            id: "y".into(),
+            repo_tags: vec![],
+            size: 100,
+            created: 0,
+        }];
+        assert!(plan_rebuild_cleanup(&images).is_empty());
+    }
+
     #[test]
     fn test_resolve_container_user_config_wins() {
         // 配置值优先于宿主值
@@ -1799,14 +2161,20 @@ mod tests {
             user_gid: Some(1002),
             ..Default::default()
         };
-        assert_eq!(resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(), (1001, 1002));
+        assert_eq!(
+            resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(),
+            (1001, 1002)
+        );
     }
 
     #[test]
     fn test_resolve_container_user_host_fallback() {
         // 缺省 → 宿主登录 uid/gid
         let params = ContainerParams::default();
-        assert_eq!(resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(), (1000, 1000));
+        assert_eq!(
+            resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(),
+            (1000, 1000)
+        );
     }
 
     #[test]
@@ -1816,7 +2184,10 @@ mod tests {
             user_uid: Some(1001),
             ..Default::default()
         };
-        assert_eq!(resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(), (1001, 1000));
+        assert_eq!(
+            resolve_container_user(&params, Some(&host(1000, 1000))).unwrap(),
+            (1001, 1000)
+        );
     }
 
     #[test]
@@ -1905,7 +2276,7 @@ mod tests {
         // 忽略（socket 实测）。
         let bindings = serde_json::json!({
             "80/tcp": [
-                { "HostIp": null, "HostPort": "18080" }
+                { "HostIp": "", "HostPort": "18080" }
             ]
         });
         let body = crate::libpod::keep_id_create_body(
@@ -1986,7 +2357,13 @@ mod tests {
         assert_eq!(body["devices"][0]["path"], "nvidia.com/gpu=all");
 
         // 裸设备直通
-        let body = make(to_vec(&["/dev/uinput:/dev/uinput"]), false, Vec::new(), None, Vec::new());
+        let body = make(
+            to_vec(&["/dev/uinput:/dev/uinput"]),
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
         assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
 
         // gpu_nvidia + 裸设备共存
@@ -2008,7 +2385,10 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert_eq!(body["devices"][0]["path"], "/dev/dri/renderD129:/dev/dri/renderD129");
+        assert_eq!(
+            body["devices"][0]["path"],
+            "/dev/dri/renderD129:/dev/dri/renderD129"
+        );
 
         // 双开 → 裸设备(uinput) + nvidia CDI + amd 裸设备按序落
         let body = make(
@@ -2019,7 +2399,10 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(body["devices"][0]["path"], "/dev/uinput:/dev/uinput");
-        assert_eq!(body["devices"][1]["path"], "/dev/dri/renderD129:/dev/dri/renderD129");
+        assert_eq!(
+            body["devices"][1]["path"],
+            "/dev/dri/renderD129:/dev/dri/renderD129"
+        );
         assert_eq!(body["devices"][2]["path"], "nvidia.com/gpu=all");
 
         // AMD 裸设备与用户手动设备串相同 → 去重只落一次
@@ -2031,7 +2414,10 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(body["devices"].as_array().unwrap().len(), 1);
-        assert_eq!(body["devices"][0]["path"], "/dev/dri/renderD129:/dev/dri/renderD129");
+        assert_eq!(
+            body["devices"][0]["path"],
+            "/dev/dri/renderD129:/dev/dri/renderD129"
+        );
 
         // pid = host → pidns.nsmode = host 且 init 禁用（catatonit 无法进 host PID ns）
         let body = make(Vec::new(), false, Vec::new(), Some("host"), Vec::new());
@@ -2057,7 +2443,13 @@ mod tests {
         assert_eq!(body["seccomp_profile_path"], "unconfined");
 
         // 未知 key 忽略，无 '=' 的串忽略（不 panic、不产生字段）
-        let body = make(Vec::new(), false, Vec::new(), None, to_vec(&["mask=/foo", "nonsense"]));
+        let body = make(
+            Vec::new(),
+            false,
+            Vec::new(),
+            None,
+            to_vec(&["mask=/foo", "nonsense"]),
+        );
         assert!(body.get("apparmor_profile").is_none());
         assert!(body.get("selinux_opts").is_none());
     }
@@ -2068,20 +2460,33 @@ mod tests {
         // 映射非空 → 写 libpod 顶层 uidmappings/gidmappings（API 形状
         // {containerID, hostID, size}），**不**写 keep-id userns，即便 keep_id=true。
         use crate::models::IdMapping;
-        let m = IdMapping { container_id: 0, host_id: 1000, length: 1 };
+        let m = IdMapping {
+            container_id: 0,
+            host_id: 1000,
+            length: 1,
+        };
         let base = |keep_id: bool, uidmaps: Vec<IdMapping>, gidmaps: Vec<IdMapping>| {
             crate::libpod::keep_id_create_body(
-                "c1", "c1", "alpine:latest", vec!["/bin/sh".into()], Vec::new(),
-                std::collections::HashMap::new(), Vec::new(), None, None, None, None,
+                "c1",
+                "c1",
+                "alpine:latest",
+                vec!["/bin/sh".into()],
+                Vec::new(),
+                std::collections::HashMap::new(),
+                Vec::new(),
+                None,
+                None,
+                None,
+                None,
                 Some("1000:1000"),
                 keep_id,
                 uidmaps,
                 gidmaps,
-                Vec::new(),  // devices
-                false,       // gpu_nvidia
-                Vec::new(),  // amd
-                None,        // pid
-                Vec::new(),  // extra_opts
+                Vec::new(), // devices
+                false,      // gpu_nvidia
+                Vec::new(), // amd
+                None,       // pid
+                Vec::new(), // extra_opts
             )
         };
 
@@ -2091,7 +2496,10 @@ mod tests {
         assert_eq!(body["uidmappings"][0]["hostID"], 1000);
         assert_eq!(body["uidmappings"][0]["size"], 1);
         assert_eq!(body["gidmappings"][0]["hostID"], 1000);
-        assert!(body.get("userns").is_none(), "显式映射非空时不应写 keep-id userns");
+        assert!(
+            body.get("userns").is_none(),
+            "显式映射非空时不应写 keep-id userns"
+        );
 
         // 2) 映射空 + keep_id=true → keep-id userns，无 uidmappings
         let body = base(true, Vec::new(), Vec::new());
@@ -2195,7 +2603,10 @@ mod tests {
         ];
         Podman::dedup_mounts(&mut mounts);
         assert_eq!(mounts.len(), 2, "重复 container_path 应被丢弃");
-        assert_eq!(mounts[0].host_path, "/data/b", "保留最后出现的（用户手动项优先）");
+        assert_eq!(
+            mounts[0].host_path, "/data/b",
+            "保留最后出现的（用户手动项优先）"
+        );
         assert_eq!(mounts[1].host_path, "/data/c");
     }
 
@@ -2255,7 +2666,10 @@ mod tests {
         ];
         Podman::dedup_mounts(&mut mounts);
         assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].host_path, "/data/b", "保留最后出现的（用户手动项优先）");
+        assert_eq!(
+            mounts[0].host_path, "/data/b",
+            "保留最后出现的（用户手动项优先）"
+        );
     }
 
     /// snapshot_name 解析（name:version → (name, Some(version))）：
@@ -2263,7 +2677,10 @@ mod tests {
     #[test]
     fn test_parse_snapshot_ref() {
         // 纯 name：tag=None
-        assert_eq!(super::parse_snapshot_ref("myimage"), ("myimage".into(), None));
+        assert_eq!(
+            super::parse_snapshot_ref("myimage"),
+            ("myimage".into(), None)
+        );
         assert_eq!(
             super::parse_snapshot_ref("desk_pilot.v9"),
             ("desk_pilot.v9".into(), None)
@@ -2322,7 +2739,9 @@ mod tests {
     #[test]
     fn test_map_system_info_rootless_and_driver_status() {
         // 根less 判定：SecurityOptions 含 "name=rootless"；DriverStatus 非两元组项忽略
-        use bollard::models::{SystemInfo, SystemInfoCgroupDriverEnum, SystemInfoCgroupVersionEnum};
+        use bollard::models::{
+            SystemInfo, SystemInfoCgroupDriverEnum, SystemInfoCgroupVersionEnum,
+        };
         let si = SystemInfo {
             server_version: Some("5.4.2".into()),
             driver: Some("overlay".into()),
@@ -2332,10 +2751,7 @@ mod tests {
                 vec!["BadSingle".into()], // 非两元组 → 忽略
             ]),
             docker_root_dir: Some("/home/u/.local/share/containers/storage".into()),
-            security_options: Some(vec![
-                "name=apparmor".into(),
-                "name=rootless".into(),
-            ]),
+            security_options: Some(vec!["name=apparmor".into(), "name=rootless".into()]),
             default_runtime: Some("crun".into()),
             cgroup_driver: Some(SystemInfoCgroupDriverEnum::SYSTEMD),
             cgroup_version: Some(SystemInfoCgroupVersionEnum::_2),

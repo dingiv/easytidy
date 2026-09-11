@@ -120,34 +120,44 @@ mod tests {
         assert_eq!(obj.get("name").unwrap(), "dev");
         assert_eq!(obj.get("image").unwrap(), "docker.io/library/ubuntu:24.04");
         assert!(obj.contains_key("setup"));
-        // gui 在共享基座内,经 flatten 平铺到最外层(缺省 false)
-        assert_eq!(obj.get("gui").unwrap(), false);
+        // gui 双开关在共享基座内，缺省 false → skip-if-false 不输出（旧 `gui` 键不再序列化）
+        assert!(!obj.contains_key("gui"));
+        assert!(!obj.contains_key("gui_x11"));
+        assert!(!obj.contains_key("gui_wayland"));
         // 不嵌套 config 键
         assert!(!obj.contains_key("config"));
     }
 
     #[test]
     fn test_conf_template_gui_field_roundtrip() {
-        // gui 字段序列化/反序列化:旧文件无 gui 字段 → 默认 false;新文件含 gui
-        // 字段 → 按设定值
+        // gui 双开关序列化/反序列化：旧文件无 gui 字段（或残留旧 `gui` 键）→
+        // 两半均默认 false；新文件含 gui_x11/gui_wayland 字段 → 按设定值
         let json_old = r#"{
-            "name":"chrome","image":"docker.io/library/ubuntu:24.04",
-            "entry":"google-chrome-stable","entry_args":[],
-            "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
-            "env":[],"silent_boot":false,"persistent":true
-        }"#;
-        let t_old: ConfTemplate = serde_json::from_str(json_old).unwrap();
-        assert!(!t_old.config.params.gui, "旧文件缺 gui 字段应默认 false");
-
-        let json_new = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
             "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
             "env":[],"silent_boot":false,"persistent":true,
             "gui":true
         }"#;
+        let t_old: ConfTemplate = serde_json::from_str(json_old).unwrap();
+        assert!(
+            !t_old.config.params.gui_x11 && !t_old.config.params.gui_wayland,
+            "旧文件（无新字段，残留旧 gui 键被忽略）应默认两半均 false"
+        );
+
+        let json_new = r#"{
+            "name":"chrome","image":"docker.io/library/ubuntu:24.04",
+            "entry":"google-chrome-stable","entry_args":[],
+            "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
+            "env":[],"silent_boot":false,"persistent":true,
+            "gui_x11":true,"gui_wayland":true
+        }"#;
         let t_new: ConfTemplate = serde_json::from_str(json_new).unwrap();
-        assert!(t_new.config.params.gui, "新文件含 gui:true 应生效");
+        assert!(t_new.config.params.gui_x11, "新文件含 gui_x11:true 应生效");
+        assert!(
+            t_new.config.params.gui_wayland,
+            "新文件含 gui_wayland:true 应生效"
+        );
     }
 
     #[test]
@@ -164,9 +174,19 @@ mod tests {
         assert!(t.config.params.gpu_nvidia);
         let cfg = t.build_config("c1");
         assert!(cfg.params.gpu_nvidia);
-        assert!(cfg.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
-        assert!(cfg.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
-        assert!(cfg.params.extra_opts.is_empty(), "gpu 不应隐式加 extra_opts");
+        // 只注 NVIDIA_DRIVER_CAPABILITIES（NVIDIA_VISIBLE_DEVICES 不注——GPU 走 CDI）
+        assert!(cfg
+            .env
+            .iter()
+            .any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
+        assert!(!cfg
+            .env
+            .iter()
+            .any(|e| e.starts_with("NVIDIA_VISIBLE_DEVICES=")));
+        assert!(
+            cfg.params.extra_opts.is_empty(),
+            "gpu 不应隐式加 extra_opts"
+        );
 
         // gpu_amd: true → params.gpu_amd，无 NVIDIA_* env
         let json_a = r#"{
@@ -194,7 +214,14 @@ mod tests {
         let cfgb = tb.build_config("c5");
         assert!(cfgb.params.gpu_nvidia);
         assert!(cfgb.params.gpu_amd);
-        assert!(cfgb.env.iter().any(|e| e == "NVIDIA_VISIBLE_DEVICES=all"));
+        assert!(cfgb
+            .env
+            .iter()
+            .any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
+        assert!(!cfgb
+            .env
+            .iter()
+            .any(|e| e.starts_with("NVIDIA_VISIBLE_DEVICES=")));
 
         // 未设 gpu_* → 不透传
         let json2 = r#"{

@@ -49,9 +49,12 @@ pub fn generate_boot_unit(name: &str, cli_path: &str, gui: bool) -> String {
 
 /// unit 文件路径（~/.config/systemd/user/easytidy-<name>.service）
 fn unit_path(name: &str) -> Result<PathBuf> {
-    let config_home = dirs::config_dir()
-        .ok_or_else(|| Error::Config("无法确定 XDG_CONFIG_HOME".to_string()))?;
-    Ok(config_home.join("systemd").join("user").join(format!("easytidy-{name}.service")))
+    let config_home =
+        dirs::config_dir().ok_or_else(|| Error::Config("无法确定 XDG_CONFIG_HOME".to_string()))?;
+    Ok(config_home
+        .join("systemd")
+        .join("user")
+        .join(format!("easytidy-{name}.service")))
 }
 
 /// 安装自启动 unit（写入 unit 文件；需随后 daemon-reload + enable）。
@@ -119,7 +122,12 @@ pub fn boot_mode(name: &str) -> Result<String> {
     }
     let content = fs::read_to_string(&path)
         .map_err(|e| Error::Config(format!("读取 systemd unit 失败：{e}")))?;
-    Ok(if content.contains(" --gui") { "gui" } else { "silent" }.to_string())
+    Ok(if content.contains(" --gui") {
+        "gui"
+    } else {
+        "silent"
+    }
+    .to_string())
 }
 
 #[cfg(test)]

@@ -159,9 +159,14 @@ export interface ContainerConfig {
   user_gid?: number | null;
   /// 容器内用户名（可选；有值时首次创建经 root exec useradd 建号）
   user_name?: string | null;
-  /// GUI 透传（意图）：开启时引擎展开/重建注入宿主显示 env + X11/Wayland/字体图标挂载
-  gui?: boolean;
-  /// NVIDIA GPU 透传（意图）：开启时注入 `NVIDIA_VISIBLE_DEVICES=all` / `NVIDIA_DRIVER_CAPABILITIES=all` env
+  /// GUI 直通双开关（意图）：任一半开启 → 引擎展开/重建时注入共享基建（keep_id /
+  /// 字体图标 / XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）；X11 半另注入 DISPLAY +
+  /// /tmp/.X11-unix + XAUTHORITY 稳定路径；Wayland 半注入 WAYLAND_DISPLAY
+  gui_x11?: boolean;
+  gui_wayland?: boolean;
+  /// NVIDIA GPU 直通（意图）：开启时注入 `NVIDIA_DRIVER_CAPABILITIES=all` env +
+  /// `nvidia.com/gpu=all` CDI 设备节点（不注 NVIDIA_VISIBLE_DEVICES——与 nvidia hook
+  /// 的 void 冲突，GPU 走 CDI 设备节点）。需宿主 NVIDIA 驱动 + Container Toolkit CDI spec。
   /// + `nvidia.com/gpu=all` CDI 设备节点。需宿主已装 NVIDIA Container Toolkit。
   gpu_nvidia?: boolean;
   /// AMD GPU 透传（意图）：开启时 create 期探测宿主 AMD 裸设备注入
@@ -240,6 +245,35 @@ export interface ImageSummary {
   created: number;
 }
 
+/// rebuild 冗余镜像条目（智能清理候选）
+export interface RebuildImageEntry {
+  id: string;
+  /** 完整 repo:tag */
+  tag: string;
+  /** tag 解析出的容器名（分组键） */
+  container_name: string;
+  size: number;
+  created: number;
+}
+
+/// rebuild 镜像智能清理扫描结果（预览）
+export interface RebuildScanResult {
+  /** 将删除的冗余镜像（非在用） */
+  candidates: RebuildImageEntry[];
+  /** 冗余但被容器引用、跳过的镜像 */
+  skipped_in_use: RebuildImageEntry[];
+  /** 将删除镜像总大小（字节） */
+  total_candidate_size: number;
+}
+
+/// rebuild 镜像智能清理执行结果
+export interface RebuildCleanupResult {
+  deleted: string[];
+  skipped: string[];
+  failures: string[];
+  freed: number;
+}
+
 /// 下层引擎信息（engine_info；podman /info 只读快照）
 /// 字段均可缺（不同 podman 版本填充程度不一，缺时显示「-」）
 export interface EngineInfo {
@@ -274,13 +308,14 @@ export interface EngineInfo {
   mem_total?: number | null;
 }
 
-/// GUI + GPU 透传预览（passthrough_preview）：`gui`/`gpu` 开启时引擎会隐式注入的
+/// GUI + GPU 直通预览（passthrough_preview）：`gui_x11`/`gui_wayland`/`gpu` 开启时
+/// 引擎会隐式注入的
 /// 增量 env / mounts（模板里已声明的同 destination / 同 key 项不重复）。
 /// 模板编辑器开启对应开关时以只读行展示，让用户看见引擎将注入什么。
 export interface PassthroughPreview {
   /// 展开时注入的环境变量（"KEY=VALUE"）
   env: string[];
-  /// 展开时注入的挂载（仅 gui 产生）
+  /// 展开时注入的挂载（仅 GUI 直通产生）
   mounts: MountConfig[];
 }
 
@@ -300,7 +335,7 @@ export interface ServerEnvItem {
 /// GUI 全面切 YAML 后取代 flavor TOML 模板——见 `commands::config::conf_templates`）。
 ///
 /// 后端 `ConfTemplate` 用 `#[serde(flatten)]` 平铺 `ContainerConfig` 字段,
-/// YAML 序列化形状 = 容器关键参数 + `setup`。`gui` / `gpu` 透传意图在
+/// YAML 序列化形状 = 容器关键参数 + `setup`。`gui_x11` / `gui_wayland` / `gpu` 直通意图在
 /// `ContainerConfig` 共享基座内（模板与实例共用），故前端直接继承、不再重复声明。
 export interface ConfTemplate extends ContainerConfig {
   /// 创建后按序执行的安装命令（本轮只存不执行；执行链路下一步接入）

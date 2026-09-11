@@ -1,6 +1,7 @@
 //! GUI 透传规则加载 + 注入（内容数据驱动）。
 //!
-//! `gui: true` 时引擎按宿主实时环境注入显示 env + 目录挂载 + keep-id。本模块把
+//! `gui_x11` / `gui_wayland` 任一开启时引擎按宿主实时环境注入显示 env + 目录挂载 +
+//! keep-id（`shared` 段任一半开启即注入，`x11` / `wayland` 段按各自开关）。本模块把
 //! 「注入什么」从 Rust 代码迁到资源文件 [`ASSETS_DIR::gui-passthrough.yaml`]：
 //! - **dev** = `crates/gui/assets/gui-passthrough.yaml`（源码树，随源码提交）
 //! - **prod** = `~/.easytidy/assets/gui-passthrough.yaml`（数据目录，首跑从内嵌
@@ -27,9 +28,29 @@ use std::path::Path;
 
 use crate::models::{ContainerParams, MountConfig};
 
-/// GUI 透传规则（`gui-passthrough.yaml` 反序列化形状）。
+/// GUI 直通规则（`gui-passthrough.yaml` 反序列化形状）。
+///
+/// 拆三段：**shared**（任一半开启即注入：keep-id / 字体图标 / XDG_DATA_DIRS /
+/// $XDG_RUNTIME_DIR 挂载）+ **x11**（X11 应用半）+ **wayland**（Wayland 应用半）。
+/// `deny_unknown_fields`：旧版扁平格式（顶层 env/mounts/keep_id）解析失败 →
+/// load_rule 回退内嵌默认（不迁移）。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GuiPassthroughRule {
+    /// 共享基建（gui_x11 或 gui_wayland 任一半开启即注入）
+    #[serde(default)]
+    pub shared: GuiPassthroughSection,
+    /// X11 应用半（gui_x11=true）：DISPLAY + /tmp/.X11-unix（XAUTHORITY 由 core 恒注入）
+    #[serde(default)]
+    pub x11: GuiPassthroughSection,
+    /// Wayland 应用半（gui_wayland=true）：WAYLAND_DISPLAY（socket 在 $XDG_RUNTIME_DIR）
+    #[serde(default)]
+    pub wayland: GuiPassthroughSection,
+}
+
+/// 规则中的一个直通段（env + 挂载 + keep-id 意图）。
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct GuiPassthroughSection {
     /// 注入的 env（`KEY=VALUE`，VALUE 可含占位符；空值跳过）
     #[serde(default)]
     pub env: Vec<String>,
@@ -96,76 +117,113 @@ pub fn load_rule() -> GuiPassthroughRule {
 
 /// 执行 GUI 透传注入：按规则展开占位符 + 幂等去重，追加到 params.mounts / env。
 ///
-/// 幂等：模板已声明的同 container_path 挂载 / 同 key env 跳过（以模板作者声明
-/// 为准）。供 [`crate::env::host::inject_gui_passthrough`] 调用。
-pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>) {
+/// 按「共享 + X11 半 + Wayland 半」三段幂等注入：`shared` 在任一半开启时注入，
+/// `x11`/`wayland` 按各自开关注入。
+///
+/// **意图驱动覆盖（2026-09-10 双半拆分）**：commit 快照会把容器 env 烘焙进镜像、
+/// 重建继承，故 GUI 意图相关 env（DISPLAY / XAUTHORITY / WAYLAND_DISPLAY）必须按
+/// 当前意图**覆盖**（非仅追加）：意图开 → 宿主实时值；意图关 → 置空（覆盖镜像里
+/// 的旧值）。两半均关时不注入任何段，但仍执行覆盖清空。
+/// 供 [`crate::env::host::inject_gui_passthrough`] 调用。
+pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>, x11: bool, wayland: bool) {
     let rule = load_rule();
     let vars = host_vars();
 
-    let existing_mount_targets: std::collections::HashSet<String> = params
+    let mut existing_mount_targets: std::collections::HashSet<String> = params
         .mounts
         .iter()
         .map(|m| m.container_path.clone())
         .collect();
-    let existing_env_keys: std::collections::HashSet<String> = env
+    let mut existing_env_keys: std::collections::HashSet<String> = env
         .iter()
         .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
         .collect();
 
-    // env：展开值；空值跳过（session 变量未设）；已声明同 key 跳过
-    for entry in &rule.env {
-        let Some((key, value)) = entry.split_once('=') else {
-            continue;
-        };
-        if key == "XAUTHORITY" {
-            // core 无条件注入稳定路径（见下），yaml 声明一律让位（旧版播种
-            // 副本可能残留随机路径行）
-            continue;
-        }
-        if existing_env_keys.contains(key) {
+    // 三段按序注入：shared（任一半）→ x11 → wayland
+    for (enabled, section) in [
+        (x11 || wayland, &rule.shared),
+        (x11, &rule.x11),
+        (wayland, &rule.wayland),
+    ] {
+        if !enabled {
             continue;
         }
-        let expanded = expand_host_vars(value, &vars);
-        if expanded.is_empty() {
-            continue;
+        // env：展开值；空值跳过；已声明同 key 跳过（XAUTHORITY 由下处 core 恒注入）
+        for entry in &section.env {
+            let Some((key, value)) = entry.split_once('=') else {
+                continue;
+            };
+            if key == "XAUTHORITY" {
+                continue;
+            }
+            if existing_env_keys.contains(key) {
+                continue;
+            }
+            let expanded = expand_host_vars(value, &vars);
+            if expanded.is_empty() {
+                continue;
+            }
+            env.push(format!("{key}={expanded}"));
+            existing_env_keys.insert(key.to_string());
         }
-        env.push(format!("{key}={expanded}"));
+        // mounts：两侧展开；空值 / require_exists 缺失 / 已声明同目标 跳过
+        for m in &section.mounts {
+            let host_path = expand_host_vars(&m.host_path, &vars);
+            let container_path = expand_host_vars(&m.container_path, &vars);
+            if host_path.is_empty() || container_path.is_empty() {
+                continue;
+            }
+            if m.require_exists && !Path::new(&host_path).exists() {
+                continue;
+            }
+            if existing_mount_targets.contains(&container_path) {
+                continue;
+            }
+            params.mounts.push(MountConfig {
+                host_path,
+                container_path: container_path.clone(),
+                read_only: m.read_only,
+            });
+            existing_mount_targets.insert(container_path);
+        }
+        if section.keep_id {
+            params.keep_id = true;
+        }
     }
 
-    // XAUTHORITY 稳定间接路径：core 恒注入（幂等去重 + 覆盖模板/yaml 已有值）。
-    // 真实文件由容器内 server 启动时探测并维护软链（setup.rs ensure_xauthority）。
-    env.retain(|e| !e.starts_with("XAUTHORITY="));
-    env.push(format!("XAUTHORITY={XAUTHORITY_STABLE_PATH}"));
-
-    // mounts：两侧展开；host 路径为空（session 变量未设）跳过；require_exists 且
-    // 宿主路径缺失跳过；已声明同 container_path 跳过
+    // XAUTHORITY 稳定间接路径：仅 X11 半（core 恒注入 + 幂等去重 + 覆盖）。
+    // 真实 auth 文件由容器内 server 启动时探测并维护软链（setup.rs ensure_xauthority）。
     //
-    // 跳过检查用**展开后**的 container_path 比较（2026-09-02 修复）：原实现拿规则
-    // 原文（如 `${XDG_RUNTIME_DIR}`）与已有挂载（已展开的 `/run/user/1000`）比对，
-    // 恒不相等 → 注入重复项 → 后续 `dedup_mounts` 静默丢一条（用户手动挂载也可能
-    // 被误丢）。两侧都展开后再判重，注入才真正幂等。
-    for m in &rule.mounts {
-        let host_path = expand_host_vars(&m.host_path, &vars);
-        let container_path = expand_host_vars(&m.container_path, &vars);
-        if host_path.is_empty() || container_path.is_empty() {
-            continue;
-        }
-        if m.require_exists && !Path::new(&host_path).exists() {
-            continue;
-        }
-        if existing_mount_targets.contains(&container_path) {
-            continue;
-        }
-        params.mounts.push(MountConfig {
-            host_path,
-            container_path,
-            read_only: m.read_only,
-        });
-    }
+    // 意图驱动覆盖：DISPLAY / XAUTHORITY / WAYLAND_DISPLAY 三个 GUI 意图 env 按当前
+    // 意图覆盖（开→宿主实时值，关→置空），覆盖 commit 快照烘焙进镜像的旧值。
+    // 空串 = 覆盖镜像继承的旧值（podman create 容器 env 按 key 覆盖 image env）。
+    let display = if x11 {
+        vars.get("DISPLAY").cloned().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    set_env(env, "DISPLAY", &display);
+    let xauth = if x11 {
+        XAUTHORITY_STABLE_PATH.to_string()
+    } else {
+        String::new()
+    };
+    set_env(env, "XAUTHORITY", &xauth);
+    let wayland_display = if wayland {
+        vars.get("WAYLAND_DISPLAY").cloned().unwrap_or_default()
+    } else {
+        String::new()
+    };
+    set_env(env, "WAYLAND_DISPLAY", &wayland_display);
+}
 
-    if rule.keep_id {
-        params.keep_id = true;
-    }
+/// 覆盖式设置 env（替换同 key 既有项；无则追加）。用于意图驱动覆盖——
+/// commit 快照把容器 env 烘焙进镜像、重建继承，故 GUI 意图 env 必须按意图
+/// 覆盖（而非仅幂等追加），关时置空以清除镜像里的旧值。
+fn set_env(env: &mut Vec<String>, key: &str, value: &str) {
+    let prefix = format!("{key}=");
+    env.retain(|e| !e.starts_with(&prefix));
+    env.push(format!("{key}={value}"));
 }
 
 /// 宿主侧占位符取值（session 耦合值从宿主 env 实时探测；未设 → 空串）。
@@ -231,6 +289,7 @@ mod tests {
 
     /// 回归（2026-09-02）：规则里的 `${XDG_RUNTIME_DIR}` 展开后与已声明的
     /// `/run/user/1000` 相同 → 必须跳过（否则注入重复项、后续被 dedup 静默丢）。
+    /// （shared 段：X11 半开启即可触发。）
     #[test]
     fn apply_skips_existing_expanded_target() {
         let mut params = ContainerParams::default();
@@ -241,7 +300,7 @@ mod tests {
             read_only: false,
         });
         let mut env = Vec::new();
-        apply(&mut params, &mut env);
+        apply(&mut params, &mut env, true, false);
         let run_count = params
             .mounts
             .iter()
@@ -254,7 +313,10 @@ mod tests {
         );
         // 其余新增（字体/图标等）仍应注入
         assert!(
-            params.mounts.iter().any(|m| m.container_path == "/mnt/host/fonts"),
+            params
+                .mounts
+                .iter()
+                .any(|m| m.container_path == "/mnt/host/fonts"),
             "字体挂载应注入：{:?}",
             params.mounts
         );
@@ -263,7 +325,10 @@ mod tests {
     #[test]
     fn expand_known_var() {
         let v = vars();
-        assert_eq!(expand_host_vars("${HOME}/.local/share/fonts", &v), "/home/div/.local/share/fonts");
+        assert_eq!(
+            expand_host_vars("${HOME}/.local/share/fonts", &v),
+            "/home/div/.local/share/fonts"
+        );
         assert_eq!(expand_host_vars("${XDG_RUNTIME_DIR}", &v), "/run/user/1000");
     }
 
@@ -291,34 +356,59 @@ mod tests {
         assert_eq!(expand_host_vars("${HOME/x", &v), "${HOME/x");
     }
 
-    /// 规则文件本身应可解析（锁定「assets 规则 = 合法 GuiPassthroughRule」契约）。
+    /// 规则文件本身应可解析（锁定「assets 规则 = 合法三段式 GuiPassthroughRule」契约）。
     #[test]
     fn embedded_rule_parses() {
         let rule = load_rule();
-        assert!(rule.keep_id, "gui 透传应恒开 keep-id");
-        // X11 socket 恒注入（require_exists=false）
+        // shared：任一半开启即注入的基建
+        assert!(rule.shared.keep_id, "shared 段应恒开 keep-id");
         assert!(
-            rule.mounts.iter().any(|m| m.host_path == "/tmp/.X11-unix" && !m.require_exists),
-            "应含 X11 socket 且非 require_exists：{:?}",
-            rule.mounts
+            rule.shared
+                .mounts
+                .iter()
+                .any(|m| m.host_path == "${XDG_RUNTIME_DIR}"
+                    && m.container_path == "${XDG_RUNTIME_DIR}"),
+            "shared 应含 XDG_RUNTIME_DIR 挂载（两侧占位符）：{:?}",
+            rule.shared.mounts
         );
-        // 字体为 require_exists
         assert!(
-            rule.mounts.iter().any(|m| m.host_path == "/usr/share/fonts" && m.require_exists && m.read_only),
-            "应含系统字体挂载（require_exists + 只读）：{:?}",
-            rule.mounts
+            rule.shared
+                .mounts
+                .iter()
+                .any(|m| m.host_path == "/usr/share/fonts" && m.require_exists && m.read_only),
+            "shared 应含系统字体挂载（require_exists + 只读）：{:?}",
+            rule.shared.mounts
         );
-        // XDG_DATA_DIRS 静态值
         assert!(
-            rule.env.iter().any(|e| e.starts_with("XDG_DATA_DIRS=") && e.contains("/usr/share")),
-            "应含 XDG_DATA_DIRS 系统默认：{:?}",
-            rule.env
+            rule.shared
+                .env
+                .iter()
+                .any(|e| e.starts_with("XDG_DATA_DIRS=") && e.contains("/usr/share")),
+            "shared 应含 XDG_DATA_DIRS 系统默认：{:?}",
+            rule.shared.env
         );
-        // XDG_RUNTIME_DIR 挂载两侧皆占位符
+        // x11：X11 socket 恒注入（require_exists=false）；DISPLAY 半段 env
         assert!(
-            rule.mounts.iter().any(|m| m.host_path == "${XDG_RUNTIME_DIR}" && m.container_path == "${XDG_RUNTIME_DIR}"),
-            "应含 XDG_RUNTIME_DIR 挂载（两侧占位符）：{:?}",
-            rule.mounts
+            rule.x11
+                .mounts
+                .iter()
+                .any(|m| m.host_path == "/tmp/.X11-unix" && !m.require_exists),
+            "x11 应含 X11 socket 且非 require_exists：{:?}",
+            rule.x11.mounts
+        );
+        assert!(
+            rule.x11.env.iter().any(|e| e.starts_with("DISPLAY=")),
+            "x11 应含 DISPLAY env：{:?}",
+            rule.x11.env
+        );
+        // wayland：WAYLAND_DISPLAY 半段 env（socket 在 $XDG_RUNTIME_DIR，shared 段挂载）
+        assert!(
+            rule.wayland
+                .env
+                .iter()
+                .any(|e| e.starts_with("WAYLAND_DISPLAY=")),
+            "wayland 应含 WAYLAND_DISPLAY env：{:?}",
+            rule.wayland.env
         );
     }
 }

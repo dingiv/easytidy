@@ -198,8 +198,9 @@ pub fn merge_mount_program(existing: &str, mount_program: &str) -> Result<String
     let mut v: toml::Value = if existing.trim().is_empty() {
         toml::Value::Table(toml::map::Map::new())
     } else {
-        toml::from_str(existing)
-            .map_err(|e| Error::Config(format!("解析现有 storage.conf 失败（内容已损坏？）：{e}")))?
+        toml::from_str(existing).map_err(|e| {
+            Error::Config(format!("解析现有 storage.conf 失败（内容已损坏？）：{e}"))
+        })?
     };
     let table = v
         .as_table_mut()
@@ -217,7 +218,8 @@ pub fn merge_mount_program(existing: &str, mount_program: &str) -> Result<String
             )));
         }
     }
-    st.entry("driver").or_insert_with(|| toml::Value::String("overlay".to_string()));
+    st.entry("driver")
+        .or_insert_with(|| toml::Value::String("overlay".to_string()));
     let options = st
         .entry("options")
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
@@ -227,10 +229,13 @@ pub fn merge_mount_program(existing: &str, mount_program: &str) -> Result<String
     let overlay = opts
         .entry("overlay")
         .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
-    let ov = overlay
-        .as_table_mut()
-        .ok_or_else(|| Error::Config("storage.conf [storage.options.overlay] 不是表".to_string()))?;
-    ov.insert("mount_program".to_string(), toml::Value::String(mount_program.to_string()));
+    let ov = overlay.as_table_mut().ok_or_else(|| {
+        Error::Config("storage.conf [storage.options.overlay] 不是表".to_string())
+    })?;
+    ov.insert(
+        "mount_program".to_string(),
+        toml::Value::String(mount_program.to_string()),
+    );
     toml::to_string_pretty(&v).map_err(|e| Error::Config(format!("TOML 序列化失败：{e}")))
 }
 
@@ -240,10 +245,7 @@ fn podman_socket_activated() -> bool {
     std::process::Command::new("systemctl")
         .args(["--user", "is-active", "podman.socket"])
         .output()
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout).trim() == "active"
-        })
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "active")
         .unwrap_or(false)
 }
 
@@ -270,16 +272,12 @@ pub async fn apply_fix(podman: &Podman) -> Result<ApplyReport> {
             )));
         }
         Verdict::NotApplicable => {
-            return Err(Error::Config(format!(
-                "不适用：{}",
-                report.summary
-            )));
+            return Err(Error::Config(format!("不适用：{}", report.summary)));
         }
     }
-    let fuse = report
-        .fuse_overlayfs
-        .clone()
-        .ok_or_else(|| Error::Config("fuse-overlayfs 路径缺失（Recommended 结论不应发生）".to_string()))?;
+    let fuse = report.fuse_overlayfs.clone().ok_or_else(|| {
+        Error::Config("fuse-overlayfs 路径缺失（Recommended 结论不应发生）".to_string())
+    })?;
 
     let config_path = storage_conf_path()?;
     if let Some(dir) = config_path.parent() {
@@ -318,8 +316,8 @@ pub async fn apply_fix(podman: &Podman) -> Result<ApplyReport> {
     // 验证：重诊断（socket-activated 下新连接即新 daemon，立即可见；
     // 常驻 daemon 下旧进程仍报旧配置 → verified=false + note_daemon）
     let recheck = diagnose(podman).await?;
-    let verified = recheck.verdict == Verdict::Ok
-        && recheck.mount_program.as_deref() == Some(fuse.as_str());
+    let verified =
+        recheck.verdict == Verdict::Ok && recheck.mount_program.as_deref() == Some(fuse.as_str());
 
     Ok(ApplyReport {
         backup_path,
@@ -355,9 +353,8 @@ pub fn latest_backup() -> Option<PathBuf> {
 /// 回滚：把备份拷回 storage.conf。返回被写入的原路径。
 pub fn restore_backup(backup: &Path) -> Result<PathBuf> {
     let config = storage_conf_path()?;
-    std::fs::copy(backup, &config).map_err(|e| {
-        Error::Config(format!("恢复备份失败（{}）：{e}", backup.display()))
-    })?;
+    std::fs::copy(backup, &config)
+        .map_err(|e| Error::Config(format!("恢复备份失败（{}）：{e}", backup.display())))?;
     tracing::info!("storage.conf 已回滚自 {}", backup.display());
     Ok(config)
 }
@@ -390,13 +387,24 @@ mod tests {
         assert_eq!(verdict_from(true, None, None, true), Verdict::NotApplicable);
         // rootless + overlay + 已配 mount_program → Ok（无论二进制是否在）
         assert_eq!(
-            verdict_from(true, Some("overlay"), Some("/usr/bin/fuse-overlayfs"), false),
+            verdict_from(
+                true,
+                Some("overlay"),
+                Some("/usr/bin/fuse-overlayfs"),
+                false
+            ),
             Verdict::Ok
         );
         // rootless + overlay + native + 二进制已装 → Recommended
-        assert_eq!(verdict_from(true, Some("overlay"), None, true), Verdict::Recommended);
+        assert_eq!(
+            verdict_from(true, Some("overlay"), None, true),
+            Verdict::Recommended
+        );
         // rootless + overlay + native + 二进制未装 → NeedsInstall
-        assert_eq!(verdict_from(true, Some("overlay"), None, false), Verdict::NeedsInstall);
+        assert_eq!(
+            verdict_from(true, Some("overlay"), None, false),
+            Verdict::NeedsInstall
+        );
     }
 
     #[test]

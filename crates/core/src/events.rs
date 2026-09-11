@@ -10,14 +10,14 @@
 //! 3. 设置长/无超时
 //! 4. **重连循环**（超时/错误时重建流）
 
-use std::time::Duration;
-use bollard::system::EventsOptions;
-use bollard::models::EventMessage;
-use futures::StreamExt;
-use tokio::sync::mpsc;
-use tracing::{info, error, debug};
-use crate::podman::Podman;
 use crate::models::EngineEvent;
+use crate::podman::Podman;
+use bollard::models::EventMessage;
+use bollard::system::EventsOptions;
+use futures::StreamExt;
+use std::time::Duration;
+use tokio::sync::mpsc;
+use tracing::{debug, error, info};
 
 /// 启动事件流（永远运行，含重连）。
 ///
@@ -100,7 +100,8 @@ fn map_event(event: EventMessage) -> Option<EngineEvent> {
     }
 
     // 检查是否为 easytidy 管理（按标签）
-    let is_easytidy = actor.attributes
+    let is_easytidy = actor
+        .attributes
         .as_ref()
         .and_then(|attrs| attrs.get("label"))
         .map(|labels| {
@@ -115,7 +116,8 @@ fn map_event(event: EventMessage) -> Option<EngineEvent> {
     }
 
     // 提取容器名
-    let name = actor.attributes
+    let name = actor
+        .attributes
         .as_ref()
         .and_then(|attrs| attrs.get("name"))
         .cloned()
@@ -126,23 +128,14 @@ fn map_event(event: EventMessage) -> Option<EngineEvent> {
     // 匹配事件类型
     match event.action.as_deref() {
         // 创建事件
-        Some("create") => {
-            Some(EngineEvent::ContainerCreated {
-                container_id,
-                name,
-            })
-        }
+        Some("create") => Some(EngineEvent::ContainerCreated { container_id, name }),
         // 启动事件
-        Some("start") => {
-            Some(EngineEvent::ContainerStarted {
-                container_id,
-                name,
-            })
-        }
+        Some("start") => Some(EngineEvent::ContainerStarted { container_id, name }),
         // 停止事件（podman 用 "died"）
         Some("died") => {
             // 提取退出码（podman 提供在 actor.attributes 中）
-            let exit_code = actor.attributes
+            let exit_code = actor
+                .attributes
                 .as_ref()
                 .and_then(|attrs| attrs.get("exitCode"))
                 .and_then(|s| s.parse::<i64>().ok())
@@ -155,12 +148,7 @@ fn map_event(event: EventMessage) -> Option<EngineEvent> {
             })
         }
         // 删除事件
-        Some("destroy") => {
-            Some(EngineEvent::ContainerRemoved {
-                container_id,
-                name,
-            })
-        }
+        Some("destroy") => Some(EngineEvent::ContainerRemoved { container_id, name }),
         // 其他事件忽略
         _ => {
             debug!("忽略事件类型：{:?}", event.action);

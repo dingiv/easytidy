@@ -154,9 +154,11 @@ async fn main() -> Result<()> {
     // 默认目录（/usr/local/share:/usr/share，glib 默认；缺失路径无害）。
     let xdg_fixed = fixup_xdg_data_dirs();
 
-    // XAUTHORITY server 内置自动注入：真实 auth 文件路径含随机后缀,每次会话都变,
-    // 不让用户配——探到后维护稳定软链 <socket 目录>/xauthority,进程 env 统一
-    // 覆盖为稳定路径（与 gui-passthrough.yaml 创建期注入值一致,全系统一个值）。
+    // XAUTHORITY server 内置自动注入（仅 gui_x11 直通容器）：真实 auth 文件路径含随机后缀,每次会话都变,
+    // 不让用户配——创建期 core 仅 gui_x11=true 时烘焙 XAUTHORITY 稳定路径进 spec Env（意图信号）,
+    // server 探到后维护稳定软链 <socket 目录>/xauthority,进程 env 统一覆盖为稳定路径（与
+    // gui-passthrough.yaml 创建期注入值一致,全系统一个值）。gui_x11 关（纯 Wayland /
+    // headless）→ spec 无 XAUTHORITY → ensure_xauthority 直接跳过。
     // socket 目录（容器内 /run/easytidy）rw bind-mount,软链对 podman exec 等
     // 容器内所有进程同样生效。
     let auth_dir = args

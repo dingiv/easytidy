@@ -125,6 +125,13 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
 
 /// 探测 X11 auth 文件并注入**稳定路径** `XAUTHORITY`（server 内置 GUI 透传）。
 ///
+/// **X11 直通意图门控（2026-09-10 双半拆分）**：仅当容器 spec Env 含 `XAUTHORITY`
+/// 时才注入。core 只在 `gui_x11 = true` 时烘焙 `XAUTHORITY=<稳定路径>` 进容器 spec
+/// （单一真相源）；server 进程 env = spec env，故「XAUTHORITY 是否存在」即 X11 直通
+/// 意图信号。`gui_x11` 关（纯 Wayland / headless）→ spec 无 XAUTHORITY → 本函数
+/// 直接返回 `None`（不探测 / 不建软链 / 不 set_var），避免给 Wayland-only 容器
+/// 无谓注入 X11 auth。
+///
 /// **为什么不让用户配 XAUTHORITY**:
 /// - 真实 auth 文件路径含随机后缀（典型 `/run/user/$uid/mutter-Xwaylandauth.<random>`
 ///   或 `xauth_<random>`，compositor 登录会话时随机生成，会变）。
@@ -148,6 +155,17 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
 /// `auth_dir` = XAUTHORITY 稳定路径所在目录（server 的 socket 目录，容器内
 /// 即 `/run/easytidy`，bind-mount rw）。
 pub(crate) fn ensure_xauthority(auth_dir: &std::path::Path) -> Option<String> {
+    // X11 直通意图门控：spec env（= 进程初始 env）的 XAUTHORITY 为空/未设
+    // → gui_x11 关（纯 Wayland / headless，core 意图覆盖已置空），跳过一切 X11 auth 注入。
+    // 非空（core 烘焙的稳定路径）→ gui_x11 开，探到真实文件后维护软链。
+    let x11_requested = match std::env::var("XAUTHORITY") {
+        Ok(v) => !v.is_empty(),
+        Err(_) => false,
+    };
+    if !x11_requested {
+        tracing::debug!("spec env XAUTHORITY 空/未设（gui_x11 关），跳过 XAUTHORITY 自动注入");
+        return None;
+    }
     let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
         tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
         return None;
@@ -256,6 +274,9 @@ mod tests {
             let prev = std::env::var("XDG_RUNTIME_DIR").ok();
             std::env::set_var("XDG_RUNTIME_DIR", dir);
             let xauthority_prev = std::env::var("XAUTHORITY").ok();
+            // 模拟 gui_x11=true 容器：core 烘焙 XAUTHORITY 稳定路径进 spec Env，
+            // server 进程 env 继承它——ensure_xauthority 的 X11 意图门控据此放行。
+            std::env::set_var("XAUTHORITY", "/run/easytidy/xauthority");
             Self { prev, xauthority_prev }
         }
     }
@@ -377,6 +398,27 @@ mod tests {
         assert_eq!(
             ensure_xauthority(std::path::Path::new("/nonexistent-auth-dir")),
             None
+        );
+    }
+
+    /// 门控回归（2026-09-10 双半拆分）：spec env 无 XAUTHORITY（gui_x11 关，
+    /// 纯 Wayland / headless）→ 即使 XDG_RUNTIME_DIR 下有 auth 文件也不注入。
+    #[test]
+    fn test_ensure_xauthority_skips_when_not_requested() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+
+        // XDG 下有 auth 文件（宿主确实是 GUI 会话）
+        let auth_path = tmp.path().join(".mutter-Xwaylandauth.DE23U3");
+        std::fs::write(&auth_path, b"mock-cookie").unwrap();
+
+        // 但 spec env 无 XAUTHORITY（gui_x11 关）→ 门控拦截
+        std::env::remove_var("XAUTHORITY");
+        assert_eq!(ensure_xauthority(tmp.path()), None, "gui_x11 关时不应注入 XAUTHORITY");
+        assert!(
+            !tmp.path().join(XAUTHORITY_STABLE_FILE).exists(),
+            "gui_x11 关时不应创建稳定软链"
         );
     }
 

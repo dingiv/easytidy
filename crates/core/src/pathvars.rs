@@ -24,8 +24,8 @@
 
 use std::collections::HashMap;
 
-use crate::error::{Error, Result};
 use crate::env::resolve_identity;
+use crate::error::{Error, Result};
 use crate::models::MountConfig;
 use crate::userenv::HostUser;
 
@@ -219,12 +219,16 @@ mod tests {
         }
     }
 
-    const UBUNTU_PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\nubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n";
+    const UBUNTU_PASSWD: &str =
+        "root:x:0:0:root:/root:/bin/bash\nubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash\n";
 
     #[test]
     fn expand_host_side() {
         let h = host_path_vars(&host());
-        assert_eq!(expand_path("${HOME}/workspace", &h).unwrap(), "/home/div/workspace");
+        assert_eq!(
+            expand_path("${HOME}/workspace", &h).unwrap(),
+            "/home/div/workspace"
+        );
         assert_eq!(expand_path("${USER}", &h).unwrap(), "div");
         assert_eq!(expand_path("${UID}", &h).unwrap(), "1000");
         assert_eq!(expand_path("${GID}", &h).unwrap(), "1000");
@@ -234,7 +238,10 @@ mod tests {
     fn expand_container_side_no_user_name_uses_image_passwd() {
         // chrome 场景：uid 1000、无 user_name、ubuntu 镜像 → /home/ubuntu
         let c = container_path_vars(1000, 1000, None, Some(UBUNTU_PASSWD));
-        assert_eq!(expand_path("${HOME}/workspace", &c).unwrap(), "/home/ubuntu/workspace");
+        assert_eq!(
+            expand_path("${HOME}/workspace", &c).unwrap(),
+            "/home/ubuntu/workspace"
+        );
         assert_eq!(expand_path("${USER}", &c).unwrap(), "ubuntu");
         assert_eq!(expand_path("${UID}", &c).unwrap(), "1000");
         assert_eq!(expand_path("${GID}", &c).unwrap(), "1000");

@@ -10,7 +10,10 @@ use tracing::{error, info, warn};
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
 use easytidy_core::env::inject_passthrough;
-use easytidy_core::models::{ContainerConfig, ContainerSummary};
+use easytidy_core::models::{
+    ContainerConfig, ContainerSummary, RebuildCleanupResult, RebuildScanResult,
+};
+use easytidy_core::podman::plan_rebuild_cleanup;
 
 use crate::commands::socket::send_json_request;
 use crate::state::{GuiSession, PodmanState};
@@ -275,6 +278,83 @@ pub async fn images_used_by(
         .map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
     Ok(result)
+}
+
+/// 智能清理扫描：计算 rebuild 冗余镜像（每容器名留最新、跳过被占用），
+/// 返回预览（GUI Modal 展示将删哪些 + 总大小）。不删除。
+#[tauri::command]
+pub async fn rebuild_images_scan(
+    podman: tauri::State<'_, PodmanState>,
+) -> Result<RebuildScanResult, String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    let images = p.list_images().await.map_err(|e| e.to_string())?;
+    let redundant = plan_rebuild_cleanup(&images);
+    let tags: Vec<String> = redundant.iter().map(|r| r.tag.clone()).collect();
+    let usage = p.images_used_by(&tags).await.map_err(|e| e.to_string())?;
+    podman.return_podman(p).await;
+
+    let mut candidates = Vec::new();
+    let mut skipped_in_use = Vec::new();
+    for entry in redundant {
+        if usage.get(&entry.tag).map(|v| !v.is_empty()).unwrap_or(false) {
+            skipped_in_use.push(entry);
+        } else {
+            candidates.push(entry);
+        }
+    }
+    let total_candidate_size: u64 = candidates.iter().map(|c| c.size).sum();
+    Ok(RebuildScanResult {
+        candidates,
+        skipped_in_use,
+        total_candidate_size,
+    })
+}
+
+/// 智能清理执行：删除给定的 rebuild 镜像（**删除前复查**：仍冗余 + 未被容器引用才删；
+/// 预览后若发生了新 rebuild，复查会排除已变为在用的镜像）。逐个删除，汇总结果。
+#[tauri::command]
+pub async fn rebuild_images_cleanup(
+    podman: tauri::State<'_, PodmanState>,
+    images: Vec<String>,
+) -> Result<RebuildCleanupResult, String> {
+    let p = podman.get().await.map_err(|e| e.to_string())?;
+    // 重新扫描（防预览→执行间发生新 rebuild）：只删仍冗余的。
+    let all = p.list_images().await.map_err(|e| e.to_string())?;
+    let redundant_tags: HashSet<String> = plan_rebuild_cleanup(&all)
+        .into_iter()
+        .map(|r| r.tag)
+        .collect();
+    // tag -> size（算释放空间）
+    let tag_sizes: std::collections::HashMap<String, u64> = all
+        .iter()
+        .flat_map(|i| i.repo_tags.iter().map(|t| (t.clone(), i.size)))
+        .collect();
+    let usage = p.images_used_by(&images).await.map_err(|e| e.to_string())?;
+
+    let mut deleted = Vec::new();
+    let mut skipped = Vec::new();
+    let mut failures = Vec::new();
+    let mut freed: u64 = 0;
+    for tag in &images {
+        // 复查：不再冗余（如已被新 rebuild 取代为最新/已删）或仍被占用 → 跳过
+        if !redundant_tags.contains(tag) {
+            skipped.push(tag.clone());
+            continue;
+        }
+        if usage.get(tag).map(|v| !v.is_empty()).unwrap_or(false) {
+            skipped.push(tag.clone());
+            continue;
+        }
+        match p.remove_image(tag, false).await {
+            Ok(()) => {
+                freed += tag_sizes.get(tag).copied().unwrap_or(0);
+                deleted.push(tag.clone());
+            }
+            Err(e) => failures.push(format!("{tag}: {e}")),
+        }
+    }
+    podman.return_podman(p).await;
+    Ok(RebuildCleanupResult { deleted, skipped, failures, freed })
 }
 
 // ============================================================================
