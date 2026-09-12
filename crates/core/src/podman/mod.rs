@@ -19,32 +19,6 @@ use bollard::Docker;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// easytidy fork podman service 专用 containers.conf（[`Podman::ensure_fork_service`]
-/// 以 `CONTAINERS_CONF` 注入给子进程）。
-///
-/// **目前唯一内容是 `seccomp_profile = ""`**：fork 暂未编入 libseccomp，默认
-/// profile（/usr/share/containers/seccomp.json）会触发 "seccomp not enabled in
-/// this build" 导致 create 全挂。libseccomp 加回后应移除此注入，让 fork 直接用
-/// 用户默认配置。
-///
-/// 文件落在 app data 目录（`~/.local/share/easytidy/podman-containers.conf`），
-/// 已存在则直接复用。
-fn fork_containers_conf() -> Result<std::path::PathBuf> {
-    let path = crate::appdata::app_data_dir()?.join("podman-containers.conf");
-    if !path.exists() {
-        std::fs::write(
-            &path,
-            r#"# easytidy fork podman engine 专用配置（自动生成）
-# 注：libseccomp 编入 fork 后本文件与 CONTAINERS_CONF 注入一并移除
-[containers]
-seccomp_profile = "unconfined"
-"#,
-        )
-        .map_err(|e| Error::Connect(format!("写入 fork containers.conf 失败：{e}")))?;
-    }
-    Ok(path)
-}
-
 /// 宿主侧 exec（PTY 会话 + 非 tty 一次性；见 exec.rs）
 pub mod exec;
 pub use exec::{ExecOnce, ExecPty};
@@ -116,9 +90,14 @@ impl Podman {
                 return path.exists().then_some(path);
             }
         }
-        let home = dirs::home_dir()?;
-        let path = home.join(".local/lib/easytidy/podman");
-        path.exists().then_some(path)
+        // deb 部署（/usr/local/bin/podman，系统级 easytidy-podman 包）优先于
+        // 开发位（~/.local/lib/easytidy/podman，随源码树手动放置）
+        let mut candidates = Vec::new();
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".local/lib/easytidy/podman"));
+        }
+        candidates.push(PathBuf::from("/usr/local/bin/podman"));
+        candidates.into_iter().find(|p| p.exists())
     }
 
     /// 探测 unix socket 是否有服务监听（connect 即断）。
@@ -131,9 +110,7 @@ impl Podman {
     /// 出现（最长 5s）。
     ///
     /// - 服务随本进程脱离终端（setsid）存活，GUI/CLI 退出不杀服务；
-    /// - **seccomp 规避**：fork 暂未编入 libseccomp，service 启动时注入专用
-    ///   `CONTAINERS_CONF`（`seccomp_profile=""`，见 [`fork_containers_conf`]）；
-    ///   libseccomp 加回后移除该注入；
+    /// - seccomp：fork 已编入 libseccomp（系统级 deb 部署），无需特殊配置；
     /// - fork 二进制缺失或启动失败 → `Err`，由 [`connect`] 回退系统 socket。
     /// libpod 直连复用的拉起入口（只需 socket 路径；二进制自行发现）。
     pub(crate) fn ensure_fork_service_for(sock: &Path) -> Result<()> {
@@ -157,7 +134,6 @@ impl Podman {
             let _ = std::fs::remove_file(sock);
         }
 
-        let conf = fork_containers_conf()?;
         let sock_str = sock
             .to_str()
             .ok_or_else(|| Error::Connect("engine socket 路径非法 UTF-8".to_string()))?;
@@ -165,7 +141,6 @@ impl Podman {
             .arg(bin)
             .args(["system", "service", "--time=0"])
             .arg(format!("unix://{sock_str}"))
-            .env("CONTAINERS_CONF", &conf)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
