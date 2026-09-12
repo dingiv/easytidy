@@ -382,6 +382,8 @@ pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Resu
     apply_plan(&plan, &paths)?;
     // ets 命令软链（幂等；宿主未挂载 ets 时静默跳过）
     ensure_ets_symlink();
+    // VS Code Dev Containers attach 支持（幂等）
+    ensure_vscode_server_dirs(uid, gid);
     Ok(PrepareReport {
         user_created: plan.add_passwd.is_some(),
         skip_reason: plan.skip_reason.clone(),
@@ -400,6 +402,27 @@ fn ensure_ets_symlink() {
     let _ = fs::remove_file(ETS_LINK); // 清旧链/旧文件（不存在则忽略）
     if let Err(e) = symlink(ETS_BIN_TARGET, ETS_LINK) {
         tracing::warn!("创建 {ETS_LINK} 软链失败：{e}");
+    }
+}
+
+/// 预建 VS Code Dev Containers attach 目录（`/.vscode-server`、`/.vscode-remote`）
+/// 并 chown 给容器用户。
+///
+/// attach 以容器默认用户执行，VS Code Server 装到 `/.vscode-server`；而 `/` 根
+/// 目录通常对该用户不可写（registry 镜像层归属 + keep-id 映射），导致
+/// "mkdir: can't create directory '/.vscode-server/': Permission denied"——
+/// 2026-09-12 ubuntu attach 实测。prepare 以 root 跑，预建 + 属主纠正即可。
+/// 幂等；失败仅 warn（不阻断 prepare——attach 是增强能力）。
+fn ensure_vscode_server_dirs(uid: u32, gid: u32) {
+    for dir in ["/.vscode-server", "/.vscode-remote"] {
+        let path = Path::new(dir);
+        if let Err(e) = fs::create_dir_all(path) {
+            tracing::warn!("预建 {dir} 失败（VS Code attach 可能不可用）：{e}");
+            continue;
+        }
+        if let Err(e) = std::os::unix::fs::chown(path, Some(uid), Some(gid)) {
+            tracing::warn!("chown {dir} → {uid}:{gid} 失败（VS Code attach 可能不可用）：{e}");
+        }
     }
 }
 
