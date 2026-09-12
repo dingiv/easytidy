@@ -19,7 +19,9 @@ use super::Podman;
 impl Podman {
     /// 容器 running 时执行容器内准备（root，一次性非 tty）：
     /// - fontconfig 接入（恒执行，幂等）
-    /// - 建号（仅 `params.user_name` 有值；home = `/home/<name>`）
+    /// - 建号（**恒执行**：配置 `user_name` → `/home/<name>`；未配置 → 镜像
+    ///   真实条目跟随，无条目/占位 → `uid<uid>` + `/home/uid<uid>`。VS Code
+    ///   Dev Containers attach 靠 getent 解析容器用户，条目必须存在）
     /// - 家目录补齐（**恒执行**：缺失则创建、属主/权限纠正为 uid:gid/750）
     ///
     /// 实现：exec 容器内 `/run/easytidy-bin/easytidy-dock prepare --uid --gid

@@ -264,19 +264,27 @@ pub struct PreparePlan {
 ///
 /// 占位必须先清除：否则 uid 保护分支把占位误判为「他人占用」跳过建号。
 pub fn plan_prepare(passwd: &str, group: &str, spec: &PrepareSpec) -> PreparePlan {
+    let identity = resolve_identity(passwd, spec.uid, spec.gid, spec.user_name.as_deref());
     let mut plan = PreparePlan {
         uid: spec.uid,
         gid: spec.gid,
-        home: resolve_identity(passwd, spec.uid, spec.gid, spec.user_name.as_deref()).home,
+        home: identity.home,
         ..Default::default()
     };
-    let Some(name) = spec.user_name.clone() else {
-        return plan;
-    };
+    // 恒保证 uid 有 passwd 条目（未配置 user_name 时用 identity.name 兜底：
+    // 镜像真实条目跟随其名，无条目/占位条目 → `uid<uid>`）。
+    // VS Code Dev Containers attach 靠 getent 解析容器用户 home；条目缺失
+    // 时 getent 落空 → Server 回退装到 `/` 触发权限错误（2026-09-12 实测）。
+    let name = identity.name;
     let entries = parse_passwd(passwd);
 
-    // 幂等：同名用户已存在 → 不建号（原条目原样保留）
-    if entries.iter().any(|e| e.name == name) {
+    // 幂等：未配置用户名且该 uid 已有真实条目（home 有效）→ 跟随条目，不动
+    // （配置了 user_name 时要继续走 uid 保护给出 skip_reason，语义不变）
+    if spec.user_name.is_none()
+        && entries
+            .iter()
+            .any(|e| e.uid == spec.uid && e.home != "/" && !e.home.is_empty())
+    {
         return plan;
     }
 
@@ -680,15 +688,19 @@ mod tests {
 
     #[test]
     fn test_plan_no_user_name_only_home() {
-        // 未配置用户名：不建号，仅 ensure-home（home 按身份解析）
+        // 未配置用户名 + 镜像已有真实条目 → 跟随条目，不建号
         let plan = plan_prepare(PASSWD, "", &spec(1000, 1000, None));
         assert!(plan.add_passwd.is_none());
         assert!(plan.add_group.is_none());
         assert!(plan.remove_passwd.is_empty());
         assert_eq!(plan.home, "/home/tidy");
-        // 无条目 → /home/uid<uid>
+        // 未配置用户名 + 无条目 → 恒建号（uid<uid> 兜底命名；VS Code attach
+        // 的 getent 靠 passwd 条目解析 home，缺失则 Server 回退装到 / 报权限错）
         let plan = plan_prepare("", "", &spec(2000, 2000, None));
         assert_eq!(plan.home, "/home/uid2000");
+        let added = plan.add_passwd.as_deref().unwrap();
+        assert!(added.starts_with("uid2000:x:2000:2000:uid2000:/home/uid2000:"));
+        assert!(plan.add_group.is_some(), "gid 空闲时应建组");
     }
 
     // ── IO 细节（tempdir 模拟 /etc；chown 用测试自身 uid/gid——
