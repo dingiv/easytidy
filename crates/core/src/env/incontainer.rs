@@ -388,6 +388,8 @@ pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Resu
         fontconf_dir: PathBuf::from(FONTCONF_DIR),
     };
     apply_plan(&plan, &paths)?;
+    // 家目录 id 残留自愈（幂等；背景见 ensure_home_ownership 的文档）
+    ensure_home_ownership(&plan.home, uid, gid);
     // ets 命令软链（幂等；宿主未挂载 ets 时静默跳过）
     ensure_ets_symlink();
     // GNOME 窗口按钮（幂等；环境不满足时静默跳过）
@@ -410,6 +412,39 @@ fn ensure_ets_symlink() {
     let _ = fs::remove_file(ETS_LINK); // 清旧链/旧文件（不存在则忽略）
     if let Err(e) = symlink(ETS_BIN_TARGET, ETS_LINK) {
         tracing::warn!("创建 {ETS_LINK} 软链失败：{e}");
+    }
+}
+
+/// 家目录归属自愈：把 `/home` 下 uid/gid ≠ 容器用户的文件归位到 uid:gid。
+///
+/// 背景（2026-09-13）：podman 5.4.2 → 6.2 的 rootless native overlay 换了
+/// 存储 id 空间（idmapped mount），旧版创建时 chown 落下的 host 1000/1001
+/// 在新映射下显示为 999/1001；快速重建（同映射直通，不做整树 chown）会把
+/// 存储层残留原样带到新容器。此处在容器内以 root 扫描 /home，把不属于
+/// 容器用户的条目归位——启动即自愈，显示与权限恢复一致。
+///
+/// 实现用 `find ! -uid/-gid + chown` 而非整目录递归 chown：只动错的不碰
+/// 对的（.cargo/venv 里大量属主正确的文件零开销）。符号链接用 -h 语义。
+/// 扫描失败仅 warn（极端大目录慢，但不阻断启动）。
+fn ensure_home_ownership(home: &str, uid: u32, gid: u32) {
+    use std::process::Command;
+    let run = Command::new("/usr/bin/find")
+        .arg(home)
+        .args(["-xdev", "(", "!", "-uid", &uid.to_string(), "-o", "!", "-gid", &gid.to_string(), ")"])
+        .arg("-exec")
+        .arg("chown")
+        .arg("-h")
+        .arg(format!("{uid}:{gid}"))
+        .arg("{}")
+        .arg("+")
+        .output();
+    match run {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => tracing::warn!(
+            "prepare: 家目录归属自愈未完成（不影响启动）：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => tracing::warn!("prepare: 家目录自愈 find 不可用：{e}"),
     }
 }
 
