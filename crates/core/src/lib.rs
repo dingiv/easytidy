@@ -28,7 +28,6 @@ pub mod models;
 pub mod passthrough;
 pub mod pathvars;
 pub mod podman;
-pub mod storage_health;
 pub mod systemd;
 pub mod userenv;
 

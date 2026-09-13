@@ -30,7 +30,6 @@ import { ContainersPanel, ContainerRef } from './ContainersPanel';
 import { DesktopIconsPanel } from './DesktopIconsPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { EngineInfoPanel } from './EngineInfoPanel';
-import { StorageHealthBanner } from './StorageHealthBanner';
 import { ImagesPanel } from './ImagesPanel';
 import { TemplateEditorPane } from './TemplateEditorPane';
 import type { ConfTemplate, ContainerConfig } from '../types';
@@ -264,7 +263,6 @@ function MasterViewInner() {
 
         {/* 右侧：健康横幅 + 标签栏 + 内容区 */}
         <div className="per-right">
-          <StorageHealthBanner />
           {panes.length > 0 && (
             <div className="pane-tabs">
               {panes.map((p) => (

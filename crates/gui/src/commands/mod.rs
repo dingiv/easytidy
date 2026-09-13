@@ -10,7 +10,6 @@
 //! - apps:桌面应用枚举
 //! - passthrough:宿主 .desktop 导出/auto-start
 //! - desktop_icons:桌面快捷方式管理（纯宿主侧扫描/移除/图标重编）
-//! - storage_health:存储健康（docs/18 道路二）诊断/一键修复/横幅忽略标记
 
 pub mod apps;
 pub mod common;
@@ -22,4 +21,3 @@ pub mod passthrough;
 pub mod pty;
 pub mod root;
 pub mod socket;
-pub mod storage_health;
