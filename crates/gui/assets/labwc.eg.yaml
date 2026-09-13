@@ -1,0 +1,67 @@
+# 容器配置示例 —— labwc 嵌套桌面模板（容器内 Wayland 合成器）
+#
+# 形态：容器内跑完整 Wayland 桌面（labwc + waybar + pcmanfm），对宿主只暴露
+# 一个 Wayland 连接——labwc 作为嵌套客户端连宿主合成器（Mutter/Sway）。
+# 宿主桌面只看到一个 labwc 大窗口；容器内应用由 labwc 管理窗口。
+#
+# 场景约束（设计见 docs/20-gui-passthrough.md §3）：
+# - 只传 Wayland（gui_wayland=true，gui_x11=false）：宿主 X11 socket 不挂，
+#   容器内 X11 应用由容器内 XWayland 服务；
+# - 标题栏：宿主不给嵌套 toplevel 画 SSD → wlroots 需 libdecor CSD 补丁
+#   （container-gui-docs/patches/wlroots-0.18.2-libdecor-csd.patch）；
+#   窗口三按钮由 easytidy-dock prepare 恒写 button-layout（已内置）。
+#
+# 构建链（setup 段或 base 镜像固化，二选一）：
+#   wlroots 0.18.2 + 补丁 → ~/wlroots-install
+#   labwc 0.8.x          → ~/labwc-install（LD_LIBRARY_PATH 指 wlroots-install/lib）
+#   运行依赖：libdecor-0-plugin-gtk waybar pcmanfm foot（终端）
+#
+# 启动要点（entry 已含）：
+#   - 必须包 dbus-run-session（GTK/dconf/autostart 需要会话总线）；
+#   - WLR_RENDERER=pixman 为无 GPU 兜底；有 renderD 透传时可去掉走 GLES2。
+#
+# 加载路径：MasterView「配置编辑器」→ 模板选 "labwc" → 预填表单 → 创建。
+
+name: labwc
+image: docker.io/library/ubuntu:24.04
+gui: true
+entry: dbus-run-session
+entry_args:
+  - --
+  - /home/ubuntu/labwc-install/bin/labwc
+  # 无 GPU 容器兜底；有 GPU 直通时删除此行
+  # - C=WLR_RENDERER=pixman  # env 不走这里，见下方 env 段说明
+silent_boot: false
+persistent: true
+user_home: true
+
+# GPU 透传：labwc 宿主侧渲染 + 容器内应用都受益；NVIDIA 勾选后注入 CDI
+gpu_nvidia: true
+extra_opts:
+  - label=disable
+  - apparmor=unconfined
+
+mounts:
+  # 宿主 $XDG_RUNTIME_DIR（Wayland socket——labwc 客户端连接；dbus 会话总线）
+  # 注：core 按 gui_wayland 注入 ${XDG_RUNTIME_DIR} 挂载（gui-passthrough.yaml
+  # shared 段），此处无需重复。模板仅列 XDG 之外的补充挂载。
+  # 宿主字体/图标（只读，经 /mnt/host 接入 fontconfig——shared 段已含，略）
+  # wlroots/labwc 构建产物如固化在镜像外，可改为挂载：
+  # - host_path: ~/wlroots-install
+  #   container_path: /home/ubuntu/wlroots-install
+  #   read_only: false
+
+network:
+  mode: host
+  ports: []
+
+env:
+  # XDG_DATA_DIRS 追加宿主挂载（gdk-pixbuf loaders cache，见 gui-passthrough.yaml 注）
+  - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
+  # labwc 客户端渲染后端：无 GPU/调试期用 pixman；有 GPU 直通建议删除走 GLES2
+  - WLR_RENDERER=pixman
+  # wlroots/labwc 用户级安装的库路径（构建产物不在系统目录时必需）
+  - LD_LIBRARY_PATH=/home/ubuntu/wlroots-install/lib/x86_64-linux-gnu
+
+setup: []
+flavor: labwc

@@ -435,7 +435,7 @@ struct ConfSeed {
     yaml: &'static str,
 }
 
-const CONF_SEEDS: [ConfSeed; 2] = [
+const CONF_SEEDS: [ConfSeed; 3] = [
     ConfSeed {
         name: "full",
         yaml: include_str!("../../assets/full.eg.yaml"),
@@ -444,6 +444,11 @@ const CONF_SEEDS: [ConfSeed; 2] = [
     ConfSeed {
         name: "chrome",
         yaml: include_str!("../../assets/chrome.eg.yaml"),
+    },
+    // labwc 嵌套桌面模板（容器内 Wayland 合成器；docs/20-gui-passthrough.md §3）
+    ConfSeed {
+        name: "labwc",
+        yaml: include_str!("../../assets/labwc.eg.yaml"),
     },
 ];
 
