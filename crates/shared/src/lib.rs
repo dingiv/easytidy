@@ -76,8 +76,15 @@ impl FileLoader {
     /// 否则 `exists()` / `read()` 这类存在性检查会凭空创建 namespace 目录。
     fn resolve_ns(&self, ns: &str, rel: &str) -> Option<PathBuf> {
         let cfg = self.namespaces.get(ns)?;
+        // dev/prod 都支持 `~` 与绝对路径（dev 指向宿主数据目录是与 prod 同源的
+        // 合法写法）；相对路径保持旧语义：相对 <core manifest>。
         let root = if is_dev() {
-            self.manifest_dir.join(&cfg.dev)
+            let dev = expand_tilde(&cfg.dev);
+            if dev.is_absolute() {
+                dev
+            } else {
+                self.manifest_dir.join(dev)
+            }
         } else {
             expand_tilde(&cfg.prod)
         };
@@ -102,7 +109,15 @@ impl FileLoader {
     pub fn ns_candidates(&self, ns: &str, rel: &str) -> Vec<PathBuf> {
         let mut v = Vec::with_capacity(2);
         if let Some(n) = self.namespaces.get(ns) {
-            v.push(self.manifest_dir.join(&n.dev).join(rel));
+            // dev 路径同样支持 `~`（dev 指向宿主数据目录、与 prod 相同时的
+            // 合法写法）；含 `/` 的相对路径不受 expand_tilde 影响。
+            let dev = expand_tilde(&n.dev);
+            let joined = if dev.is_absolute() {
+                dev
+            } else {
+                self.manifest_dir.join(dev)
+            };
+            v.push(joined.join(rel));
             v.push(expand_tilde(&n.prod).join(rel));
         }
         v

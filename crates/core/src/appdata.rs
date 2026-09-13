@@ -195,15 +195,19 @@ mod tests {
 
     #[test]
     fn containers_dir_resolves_via_containers_namespace_in_dev() {
-        // CONTAINERS namespace（dev = data/containers）经 FileLoader 解析后取父目录，
-        // 应落在 <core manifest>/data/containers（与 app_data_dir 同源，其下多一层）。
+        // CONTAINERS namespace 经 FileLoader 解析后取父目录。dev 路径现指向
+        // 宿主数据目录（`~/.easytidy/data/containers`，与 prod 同源——实例配置
+        // 统一收归 ~/.easytidy，源码树不再持有实例数据），`~` 必须展开；
+        // 相对 dev 路径仍相对 <core manifest> 拼接（ns_candidates 兼容两种写法）。
         let dir = containers_dir().unwrap();
-        assert_eq!(
-            dir,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("data")
-                .join("containers"),
-            "containers_dir 应为源码树 data/containers（实际：{}）",
+        assert!(
+            !dir.to_string_lossy().contains("/~/"),
+            "dev 路径的 ~ 未展开（实际：{}）",
+            dir.display()
+        );
+        assert!(
+            dir.ends_with(".easytidy/data/containers"),
+            "containers_dir 应为宿主数据目录（实际：{}）",
             dir.display()
         );
     }

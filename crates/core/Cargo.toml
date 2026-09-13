@@ -62,4 +62,4 @@ ASSETS_DIR = { dev = "../gui/assets", prod = "~/.easytidy/assets" }
 # 容器配置根目录（**每容器一个 `<name>.toml`**，目录即注册表，无单文件）：
 # dev = 源码树 crates/core/data/containers（git-ignore，与已安装实例隔离）；
 # prod = ~/.easytidy/data/containers。core 经 CONTAINERS:: 解析（configfile.rs）。
-CONTAINERS = { dev = "data/containers", prod = "~/.easytidy/data/containers" }
+CONTAINERS = { dev = "~/.easytidy/data/containers", prod = "~/.easytidy/data/containers" }
