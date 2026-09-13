@@ -6,6 +6,14 @@ use std::path::Path;
 use crate::state::{AppMode, AppModeResponse};
 
 pub fn apply_nvidia_workaround() {
+    // ATK 无障碍桥在 WebKitGTK 注册时可能段错误（libatk-bridge-2.0
+    // spi_register_object_to_path，2026-09-13 实测 SIGSEGV；启动时伴随
+    // dbind-WARNING）。GUI 不提供屏幕阅读器支持，恒禁用桥；用户显式设了
+    // NO_AT_BRIDGE 则尊重之。
+    if std::env::var_os("NO_AT_BRIDGE").is_none() {
+        std::env::set_var("NO_AT_BRIDGE", "1");
+    }
+
     // 如果环境变量已设置，跳过检测
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
         return;
