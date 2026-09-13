@@ -390,6 +390,8 @@ pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Resu
     apply_plan(&plan, &paths)?;
     // ets 命令软链（幂等；宿主未挂载 ets 时静默跳过）
     ensure_ets_symlink();
+    // GNOME 窗口按钮（幂等；环境不满足时静默跳过）
+    ensure_button_layout(&plan.home, uid, gid);
     Ok(PrepareReport {
         user_created: plan.add_passwd.is_some(),
         skip_reason: plan.skip_reason.clone(),
@@ -408,6 +410,61 @@ fn ensure_ets_symlink() {
     let _ = fs::remove_file(ETS_LINK); // 清旧链/旧文件（不存在则忽略）
     if let Err(e) = symlink(ETS_BIN_TARGET, ETS_LINK) {
         tracing::warn!("创建 {ETS_LINK} 软链失败：{e}");
+    }
+}
+
+/// 保证 GNOME 窗口三按钮（最小化/最大化/关闭）。
+///
+/// GNOME 上游默认 `button-layout = ":close"`（只有关闭按钮）；libdecor-gtk 等
+/// GTK 标题栏读取同一 GSettings 键，于是容器内 GUI 直通应用"没有最小化/最大化
+/// 按钮"（2026-09-12 labwc/libdecor 嵌套场景实测，详见
+/// container-gui-docs/README.md）。
+///
+/// 修复：以目标用户身份起临时 dbus 会话写一次 GSettings 键（幂等，落
+/// `~/.config/dconf/user`）。约束：
+/// - 需要 `dbus-run-session` + `gsettings` + dconf 后端（debian 系桌面镜像
+///   自带；alpine 等精简镜像缺任一 → 静默跳过，GUI 功能不受影响）；
+/// - 失败仅 warn，不阻断 prepare。
+fn ensure_button_layout(home: &str, uid: u32, gid: u32) {
+    use std::os::unix::process::CommandExt;
+    use std::process::Command;
+
+    const KEY: &str = "org.gnome.desktop.wm.preferences";
+    const LAYOUT: &str = ":minimize,maximize,close";
+    for bin in ["/usr/bin/dbus-run-session", "/usr/bin/gsettings"] {
+        if !Path::new(bin).exists() {
+            tracing::debug!("prepare: {bin} 不存在，跳过 button-layout 配置");
+            return;
+        }
+    }
+    // dconf 库落 ~/.config/dconf，HOME 必须指向目标用户家目录；dbus 会话
+    // socket 需要 XDG_RUNTIME_DIR（不存在则退 /tmp）
+    let runtime_dir = if Path::new("/run/user").join(uid.to_string()).exists() {
+        format!("/run/user/{uid}")
+    } else {
+        "/tmp".to_string()
+    };
+    let run = Command::new("/usr/bin/dbus-run-session")
+        .arg("--")
+        .arg("/usr/bin/gsettings")
+        .arg("set")
+        .arg(KEY)
+        .arg("button-layout")
+        .arg(LAYOUT)
+        .env("HOME", home)
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .uid(uid)
+        .gid(gid)
+        .output();
+    match run {
+        Ok(out) if out.status.success() => {
+            tracing::info!("prepare: button-layout = {LAYOUT}（uid {uid}）");
+        }
+        Ok(out) => tracing::warn!(
+            "prepare: 写 button-layout 失败（GUI 无最小化/最大化按钮，不影响其他功能）：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => tracing::warn!("prepare: 启动 dbus-run-session 失败：{e}"),
     }
 }
 
