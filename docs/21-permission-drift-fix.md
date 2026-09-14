@@ -165,7 +165,42 @@ keep-id rootless 探针 + 生产 store 探针双路验证。
   /usr/local/bin/podman 即该代码构建，无需重装）；
 - §5.4 验收标准作废；prepare 不退役；easytidy 侧无需改动。
 
-### 6.5 遗留核对清单（旧议题，与权限漂移无关）
+### 6.5 重要更正：以上实证均发生在 fuse-overlayfs 上
+
+后续发现（同日）：尽管 storage.conf 已注释 mount_program（"switched to
+native"），实际由于 `storage/overlay/.has-mount-program` 标记文件残留
+"true" + rootless 下 `/usr/bin/fuse-overlayfs` 自动回选，**系统一直在用
+fuse-overlayfs**（运行中容器 mountinfo 实锤 `fuse.fuse-overlayfs`）。
+§6.2/§6.3 的恒等实证对 fuse 场景成立（非连续映射被 disableShifting）。
+随后已真正切到 native，见 §7。
+
+### 6.6 遗留核对清单（旧议题，与权限漂移无关）
 
 GUI 全链路复验、labwc 构建链固化、PipeWire/IM/portal env、
 `/usr/bin/easytidy` 旧二进制处置、target/debug 覆盖来源。
+
+## 7 · 存储迁移：真正切到 native overlay（2026-09-15）
+
+### 7.1 迁移事实
+
+- `.has-mount-program` 写 "false" 后，驱动探测到 native 可用
+  （`useNativeDiff=true, usingMetacopy=false`），新容器挂载实锤为
+  kernel overlay（mountinfo `- overlay`，userxattr，无 uidmapping）；
+- **本机 rootless 架构下 native 同样不移位**：fork 服务/CLI 进程 euid≠0，
+  `checkAndRecordIDMappedSupport` 直接返回不支持 → `disableShifting` →
+  磁盘编码仍为容器视图恒等（c1000→storage 1000、c0→storage 0 实测）；
+- 结论不变：passthrough 即正确语义，路线 A 翻译在可预见未来保持情性；
+  一旦未来内核/idmapped overlay 可用，fork 已持久化配对表（层目录
+  `idmap`），翻译自动启用——两套语义都已覆盖。
+
+### 7.2 fork 配套改造（7050a8148a）
+
+- 快速 Diff 扩展到 native 路径（metacopy 启用时回退 naive，防占位文件丢内容）；
+- 层目录 `idmap` 配对表持久化/清除/失效化（get/UpdateLayerIDMap）；
+- 打包 easytidy-podman 6.2.0-dev+easytidy4。
+
+### 7.3 迁移后状态
+
+- 旧容器（fuse 挂载）随重启自然切到 native；
+- prepare 自愈保留（旧世代层仍有一次性迁移价值）；
+- storage.conf 注释已修正（记录 flag 文件坑 + 编码语义）。
