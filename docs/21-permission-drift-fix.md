@@ -7,6 +7,11 @@
 > 同一容器用户），首轮快速重建瞬态错位、prepare 自愈兜住。
 > 本文 §2 的 podman 层改造为**可选根治项**（消除首轮瞬态），待新会话实施；
 > 实施落地并验证后，退役 prepare 的 ensure_home_ownership 自愈。
+>
+> **2026-09-15 终审：§2 路线 A 已实施并回退（否定性结论），详见 §6。**
+> 核心发现：本系统的 fuse-overlayfs 对非连续映射实际未生效移位，磁盘编码
+> 本来就是容器视图恒等，快速 commit 的 passthrough 已经正确；首轮瞬态仅
+> 来自 5.4.2 旧世代层，prepare 自愈是唯一正确机制，**不退役**。
 
 ## 1 · 根因（实证）
 
@@ -115,3 +120,52 @@ commit 时容器已停。两条候选路线：
 - 连续 5 轮快速重建 id 恒定（不再依赖 prepare）；
 - 退役 ensure_home_ownership 后同样通过；
 - 旧世代镜像不做迁移也只表现首轮瞬态（行为不劣化）。
+
+## 6 · 实施结果（2026-09-15）：路线 A 否定，回退
+
+### 6.1 实施过程
+
+按 §5.3 完整实现了路线 A：`Driver.get()` mount-program 分支挂载成功后把
+`options.UidMaps/GidMaps` 持久化到层目录 `idmap`（unshifted 挂载删除）；
+`Driver.Diff` 快速分支读配对表构造 `idtools.IDMappings` 交给现成
+ToContainer 机制；`UpdateLayerIDMap` 失效化配对表。构建通过，
+keep-id rootless 探针 + 生产 store 探针双路验证。
+
+### 6.2 实证：映射是虚构，磁盘编码恒等
+
+| 探针 | 观测 |
+|---|---|
+| probe2：容器 c1000 新写文件（干净单世代层） | 磁盘 storage 视图 = 1000（恒等） |
+| chrome home/ubuntu（c1000） | h1000（恒等） |
+| gui_container /tmp（c0 root，1777） | h0（恒等） |
+| docs 记录 node（c999）6.2 编码 | h999（恒等） |
+| 而记录的 mount 映射声称 | c1000↔h0、c0↔h1..1000 |
+
+即：**fuse-overlayfs 对非连续映射（keep-id 型 swap，如
+`[0↔1×1000, 1000↔0]`）实际未生效移位，磁盘编码 = 容器视图恒等**。
+`options.UidMaps` 描述的是一种"假如移位生效"的虚构编码。
+
+后果：路线 A 的翻译把正确的 h1000（=c1000）错译成 c999、把 root 的 h0
+错译成 c1000——比现状更有害。且 §5.2 的前提"commit 时映射不可达"虽属实，
+但补上映射也无济于事：映射本身不描述磁盘。
+
+### 6.3 修正后的完整模型
+
+- 6.2 磁盘编码：恒等（container id == storage id），快速 commit 的
+  passthrough + apply 恒等落盘 = **语义自洽，现状已正确**；
+- 首轮瞬态唯一来源：5.4.2 旧世代层按旧（移位式）方案编码（如 node 用户编
+  码 h1000），与恒等 h1000（c1000）**逐文件不可区分**，commit 时无法翻译；
+- prepare 的 ensure_home_ownership（容器内内核态 chown，把编码重写为恒等）
+  是旧数据的一次性、幂等、正确的迁移机制，**永久保留**；
+- 镜像层的旧世代编码可由一轮慢速重建（squash）归位（用户已接受现状）。
+
+### 6.4 处置
+
+- podman fork `vendor/.../overlay.go` 全部回退至 88304bffb8（已安装的
+  /usr/local/bin/podman 即该代码构建，无需重装）；
+- §5.4 验收标准作废；prepare 不退役；easytidy 侧无需改动。
+
+### 6.5 遗留核对清单（旧议题，与权限漂移无关）
+
+GUI 全链路复验、labwc 构建链固化、PipeWire/IM/portal env、
+`/usr/bin/easytidy` 旧二进制处置、target/debug 覆盖来源。
