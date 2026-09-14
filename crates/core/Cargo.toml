@@ -63,3 +63,9 @@ ASSETS_DIR = { dev = "../gui/assets", prod = "~/.easytidy/assets" }
 # dev = 源码树 crates/core/data/containers（git-ignore，与已安装实例隔离）；
 # prod = ~/.easytidy/data/containers。core 经 CONTAINERS:: 解析（configfile.rs）。
 CONTAINERS = { dev = "~/.easytidy/data/containers", prod = "~/.easytidy/data/containers" }
+# conf 模板目录（双轨制）：dev = 源码树 crates/gui/conf（种子文件仍在 GUI——
+# conf 域 GUI 独占，改动即改源文件）；prod = 用户配置目录 ~/.easytidy/conf
+# （首跑播种不覆盖）。变量统一收在 core（与 SERVER_BIN/ASSETS_DIR 同一事实源），
+# GUI 经 conf_template::conf_dir() 取目录，不再自持 namespace。dev 根相对 core
+# manifest（crates/core），../gui/conf 即种子目录。
+CONF_DIR = { dev = "../gui/conf", prod = "~/.easytidy/conf" }

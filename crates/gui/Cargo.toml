@@ -36,14 +36,6 @@ tokio-util = { workspace = true }
 base64 = "0.22"
 tracing-appender = "0.2.5"
 
-# conf 模板目录双轨制 namespace（conf 域 GUI 独占：种子在 crates/gui/conf、
-# 命令在 gui；core 已不含 conf 路径解析）。dev 根相对 GUI manifest（crates/gui）
-# → conf（即 crates/gui/conf，GUI 改动即改源文件、提交即发布）；prod 根为用户
-# 配置目录 ~/.easytidy/conf。供 commands::config::conf_dir()/ConfTemplateStore
-# 经 shared::loader!().resolve("CONF_DIR::") 统一解析（is_dev() 自动切换）。
-[package.metadata.shared]
-CONF_DIR = { dev = "conf", prod = "~/.easytidy/conf" }
-
 [dev-dependencies]
 tempfile = { workspace = true }
 # 让 Cargo 把 crates/server 纳入 GUI 的指纹图（没有这段 build.rs

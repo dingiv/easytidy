@@ -111,17 +111,12 @@ pub async fn apply_container_config(
 // conf 模板管理（GUI 全面切 YAML 后取代 flavor TOML 模板）
 // ============================================================================
 
-/// conf 模板目录（双轨制读写）：dev = `crates/gui/conf`（本 crate manifest + `conf`，
-/// 即源码种子目录——GUI 改动即改源文件、提交即发布）；prod = `~/.easytidy/conf`
-/// （用户配置目录，首跑播种不覆盖）。解析走本 crate 声明的 `CONF_DIR` namespace
-/// （gui/Cargo.toml `[package.metadata.shared]`），`is_dev()` = 运行期 env 含
-/// `CARGO_MANIFEST_DIR`（cargo run / cargo test / tauri dev 成立；安装二进制不含 → prod）。
+/// conf 模板目录（双轨制）：dev = `crates/gui/conf`（种子目录，GUI 改动即改
+/// 源文件）；prod = `~/.easytidy/conf`（用户配置目录，首跑播种不覆盖）。
+/// 路径变量已收归 core（`CONF_DIR` namespace 在 core/Cargo.toml，与
+/// SERVER_BIN 等同一事实源），此处仅委托 [`easytidy_core::conf_template::conf_dir`]。
 fn conf_dir() -> Result<std::path::PathBuf, String> {
-    let dir = easytidy_shared::loader!()
-        .resolve("CONF_DIR::")
-        .ok_or_else(|| "未配置 CONF_DIR namespace".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置模板目录失败：{e}"))?;
-    Ok(dir)
+    easytidy_core::conf_template::conf_dir()
 }
 
 /// 从模板文件路径取身份 stem（`chrome.copy.yaml` → `chrome.copy`）。
@@ -798,12 +793,12 @@ mod tests {
     #[test]
     fn test_conf_dir_dual_track_dev() {
         // 测试运行期 CARGO_MANIFEST_DIR 在 env → is_dev() true → dev 根：
-        // conf 目录 = 本 crate manifest/conf = crates/gui/conf（工作区源码目录）。
+        // conf 目录 = core manifest 的 ../gui/conf（种子留在 GUI，变量归 core）。
         // 编译期（实测 tauri dev）也成立；安装二进制无该 env → prod ~/.easytidy/conf。
         let dir = conf_dir().unwrap();
         assert!(
-            dir.ends_with("crates/gui/conf"),
-            "dev 下 conf 目录应指向工作区 crates/gui/conf，得到 {}",
+            dir.ends_with("gui/conf"),
+            "dev 下 conf 目录应指向工作区种子目录 crates/gui/conf，得到 {}",
             dir.display()
         );
     }

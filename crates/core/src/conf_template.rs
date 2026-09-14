@@ -3,9 +3,9 @@
 //! 数据域拆分后,模板的管理由 flavor(TOML) 收敛到 conf(YAML):
 //! - **conf 模板** = 容器关键参数(意图)+ 可选 `setup` 安装命令(本轮只存不执行)
 //! - 存放:双轨制目录(dev = `crates/gui/conf` 源码目录,prod = `~/.easytidy/conf`,
-//!   经 GUI crate 的 `CONF_DIR` namespace 解析)——目录解析 + 文件 IO 的
-//!   `ConfTemplateStore` 迁到 GUI 命令层(conf 域 GUI 独占:种子在 gui/conf、
-//!   命令在 gui,core 不持有该路径)
+//!   经 core 的 `CONF_DIR` namespace 解析,[`conf_dir`] 统一出口)——目录解析 +
+//!   文件 IO 的 `ConfTemplateStore` 在 GUI 命令层(conf 域 GUI 独占:种子在
+//!   gui/conf、命令在 gui)
 //!
 //! 与 [`Flavor`](crate::flavor::Flavor) 的关系:
 //! - flavor 偏 CLI(创建时执行 setup 安装、带 gui 展开逻辑),GUI 模板 tab 不再使用
@@ -16,6 +16,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::env::inject_passthrough;
 use crate::models::ContainerConfig;
+
+/// conf 模板目录（双轨制）：dev = 源码种子目录 `crates/gui/conf`，prod =
+/// 用户配置目录 `~/.easytidy/conf`（首跑播种不覆盖）。路径由 core 的
+/// `CONF_DIR` namespace（core/Cargo.toml `[package.metadata.shared]`）声明，
+/// 本函数是唯一出口——GUI/CLI 不自持该 namespace（与 `SERVER_BIN` 等同
+/// 「变量归 core」模式）。
+pub fn conf_dir() -> Result<std::path::PathBuf, String> {
+    let dir = easytidy_shared::loader!()
+        .resolve("CONF_DIR::")
+        .ok_or_else(|| "未配置 CONF_DIR namespace".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置模板目录失败：{e}"))?;
+    Ok(dir)
+}
 
 /// conf YAML 模板：容器关键参数 + 可选安装命令(setup)。
 ///
