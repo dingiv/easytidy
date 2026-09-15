@@ -39,16 +39,16 @@ import {
 import type { ContainerConfig, EnvView } from '../types';
 import './ContainersPanel.css';
 
-/** 快照/重建统一下拉的 4 个动作（均不询问用户确认，点击即执行）。
+/** 扁平快照/扁平重建等统一下拉的 4 个动作（均不询问用户确认，点击即执行）。
  *  「快速」= 用普通 commit 代替默认 squash（保留分层、更快）：
- *  - 快照：squash 单层镜像（小体积）/ 快速快照：普通 commit 镜像（更快）
+ *  - 扁平快照：squash 单层镜像（小体积）/ 快速快照：普通 commit 镜像（更快）
  *    （均为独立资产，未接管容器同样适用）
- *  - 重建：squash commit + 安全重建 / 快速重建：普通 commit + 安全重建
+ *  - 扁平重建：squash commit + 安全重建 / 快速重建：普通 commit + 安全重建
  *    （按注册表配置，保留旧容器至新容器就绪、失败自动回滚；仅已接管） */
 const ACTIONS = [
-  { key: 'snapshot', label: '快照', hint: 'squash 单层，体积小' },
+  { key: 'snapshot', label: '扁平快照', hint: 'squash 单层，体积小' },
   { key: 'snapshot-quick', label: '快速快照', hint: '普通 commit，保留分层，更快' },
-  { key: 'rebuild', label: '重建', hint: 'squash commit + 安全重建（失败回滚）' },
+  { key: 'rebuild', label: '扁平重建', hint: 'squash commit + 安全重建（失败回滚）' },
   { key: 'rebuild-quick', label: '快速重建', hint: '普通 commit + 安全重建（失败回滚），更快' },
 ] as const;
 
@@ -97,7 +97,7 @@ function ContainersPanelInner(
   const [envs, setEnvs] = useState<EnvView[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // 正在执行快照/重建动作的容器名（按钮 loading 用）
+  // 正在执行扁平快照/扁平重建/快速系动作的容器名（按钮 loading 用）
   const [acting, setActing] = useState<string | null>(null);
   // 下拉记忆：上次使用动作（localStorage，跨容器共享）；菜单置顶并标记
   const [lastAction, setLastAction] = useState<string>(readLastAction);
@@ -135,7 +135,7 @@ function ContainersPanelInner(
   }, [refreshTick]);
 
   /** 按钮标签 = 上次使用的动作（记忆）；悬停展开全部 4 项 */
-  const lastActionLabel = ACTIONS.find((a) => a.key === lastAction)?.label ?? '快照/重建';
+  const lastActionLabel = ACTIONS.find((a) => a.key === lastAction)?.label ?? '扁平快照/扁平重建';
 
   const handleStart = async (env: EnvView) => {
     try {
@@ -157,7 +157,7 @@ function ContainersPanelInner(
     }
   };
 
-  /** 快照/重建统一动作：不询问用户确认，点击即执行。 */
+  /** 快照类/重建类统一动作：不询问用户确认，点击即执行。 */
   const handleAction = async (env: EnvView, key: string) => {
     // 记忆：下次下拉优先显示（置顶 + 标记）
     setLastAction(key);
@@ -175,7 +175,7 @@ function ContainersPanelInner(
           });
           message.success(
             squash
-              ? `快照已创建：${imageRef}（squash 单层）`
+              ? `扁平快照已创建：${imageRef}（squash 单层）`
               : `快速快照已创建：${imageRef}（保留分层）`,
           );
           break;
@@ -187,7 +187,7 @@ function ContainersPanelInner(
           message.success(
             quick
               ? `容器「${env.name}」快速重建完成`
-              : `容器「${env.name}」已重建并启动`,
+              : `容器「${env.name}」扁平重建完成`,
           );
           break;
         }
@@ -415,8 +415,8 @@ function ContainersPanelInner(
                         运行
                       </Button>
                     ) : null}
-                    {/* 控制台/重建依赖 easytidy server 或注册配置，未接管容器不适用；
-                        快照仅 podman commit，不依赖注册配置，未接管容器同样可快照 */}
+                    {/* 控制台/扁平重建依赖 easytidy server 或注册配置，未接管容器不适用；
+                        扁平快照仅 podman commit，不依赖注册配置，未接管容器同样可快照 */}
                     {/* 控制台下拉：原控制台 / VS Code / 宿主终端 */}
                     {managed && (
                       <Dropdown
@@ -465,8 +465,8 @@ function ContainersPanelInner(
                         复制
                       </Button>
                     )}
-                    {/* 快照/重建统一下拉：hover 展开全部动作（记忆：上次使用置顶+标记），
-                        均不询问确认点击即执行。快照未接管容器同样适用；重建仅已接管。 */}
+                    {/* 扁平快照/扁平重建/快速系列表：hover 展开全部动作（记忆：上次使用置顶+标记），
+                        均不询问确认点击即执行。扁平快照未接管容器同样适用；扁平重建仅已接管。 */}
                     <Dropdown
                       trigger={['hover']}
                       disabled={missing}
@@ -502,7 +502,7 @@ function ContainersPanelInner(
                         icon={<ForkOutlined />}
                         loading={acting === env.name}
                         disabled={missing}
-                        title="快照 / 重建（悬停展开全部动作）"
+                        title="扁平快照 / 扁平重建（悬停展开全部动作）"
                       >
                         {lastActionLabel}
                         <DownOutlined />

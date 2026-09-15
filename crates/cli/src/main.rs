@@ -98,13 +98,13 @@ enum Commands {
         container: String,
     },
 
-    /// 重建容器（应用配置变更：mounts/网络映射；创建后不可变 → 必须重建）
+    /// 扁平重建容器（squash 单层镜像；应用配置变更：mounts/网络映射）
     Rebuild {
         /// 容器名
         #[arg(long)]
         container: String,
         /// 快速重建（普通 commit + fork easytidy_fast 语义，亚秒级；默认为
-        /// squash 全量重建）
+        /// squash 全量扁平重建）
         #[arg(long)]
         quick: bool,
     },
@@ -232,14 +232,14 @@ enum EnvCmd {
         /// 环境名
         name: String,
     },
-    /// 快照：为当前环境创建保险（commit 容器层）
+    /// 扁平快照：为当前环境创建保险（commit 容器层；默认 squash 单层）
     Snapshot {
         /// 环境名
         name: String,
         /// 快照名（最终镜像 = easytidy/snapshot/<name>[:<tag>]；默认=<容器名>-<YYYYmmdd-HHMM>）
         #[arg(long)]
         snapshot: Option<String>,
-        /// 普通 commit（保留分层历史）；默认 squash 单层
+        /// 快速快照：普通 commit 保留分层历史（默认 squash 单层扁平快照）
         #[arg(long)]
         no_squash: bool,
     },
@@ -520,7 +520,7 @@ async fn cmd_rebuild(
     } else {
         podman.rebuild(&container, &config, &bins).await?
     };
-    println!("容器 {} 重建成功（新 ID: {}）", container, new_id);
+    println!("容器 {} 扁平重建成功（新 ID: {}）", container, new_id);
 
     // 容器内准备（对齐 GUI：重建后重跑 fontconfig / useradd / 家目录补齐）：
     // best-effort，失败不阻断（落日志）
@@ -723,7 +723,7 @@ async fn cmd_env_snapshot(
     squash: bool,
 ) -> Result<()> {
     let image_ref = podman.snapshot(&name, snapshot.as_deref(), squash).await?;
-    println!("环境 {name} 快照完成：{image_ref}");
+    println!("环境 {name} 扁平快照完成：{image_ref}");
     Ok(())
 }
 

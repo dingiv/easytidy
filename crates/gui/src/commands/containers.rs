@@ -558,7 +558,7 @@ pub async fn env_snapshot(
         .map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
 
-    info!("环境 {} 快照完成（squash={}）：{}", name, squash, image_ref);
+    info!("环境 {} 扁平快照完成（squash={}）：{}", name, squash, image_ref);
     Ok(image_ref)
 }
 
