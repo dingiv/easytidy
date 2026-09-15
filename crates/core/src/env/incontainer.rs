@@ -440,25 +440,25 @@ fn ensure_ets_symlink() {
 /// 对的。符号链接用 -h 语义。扫描失败仅 warn（极端大目录慢，但不阻断启动）。
 fn ensure_home_ownership(home: &str, uid: u32, gid: u32) {
     let scan_root = home_ownership_scan_root(home);
-    use std::process::Command;
-    let run = Command::new("/usr/bin/find")
-        .arg(&scan_root)
-        .args(["-xdev", "(", "!", "-uid", &uid.to_string(), "-o", "!", "-gid", &gid.to_string(), ")"])
-        .arg("-exec")
-        .arg("chown")
-        .arg("-h")
-        .arg(format!("{uid}:{gid}"))
-        .arg("{}")
-        .arg("+")
-        .output();
-    match run {
-        Ok(out) if out.status.success() => {}
-        Ok(out) => tracing::warn!(
-            "prepare: 家目录归属自愈未完成（不影响启动）：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-        Err(e) => tracing::warn!("prepare: 家目录自愈 find 不可用：{e}"),
-    }
+    // use std::process::Command;
+    // let run = Command::new("/usr/bin/find")
+    //     .arg(&scan_root)
+    //     .args(["-xdev", "(", "!", "-uid", &uid.to_string(), "-o", "!", "-gid", &gid.to_string(), ")"])
+    //     .arg("-exec")
+    //     .arg("chown")
+    //     .arg("-h")
+    //     .arg(format!("{uid}:{gid}"))
+    //     .arg("{}")
+    //     .arg("+")
+    //     .output();
+    // match run {
+    //     Ok(out) if out.status.success() => {}
+    //     Ok(out) => tracing::warn!(
+    //         "prepare: 家目录归属自愈未完成（不影响启动）：{}",
+    //         String::from_utf8_lossy(&out.stderr).trim()
+    //     ),
+    //     Err(e) => tracing::warn!("prepare: 家目录自愈 find 不可用：{e}"),
+    // }
 }
 
 /// `ensure_home_ownership` 的扫描根解析（纯函数）。
@@ -505,8 +505,8 @@ fn ensure_button_layout(home: &str, uid: u32, gid: u32) {
     } else {
         "/tmp".to_string()
     };
-    let run = Command::new("/usr/bin/dbus-run-session")
-        .arg("--")
+    let mut run = Command::new("/usr/bin/dbus-run-session");
+    run.arg("--")
         .arg("/usr/bin/gsettings")
         .arg("set")
         .arg(KEY)
@@ -516,8 +516,13 @@ fn ensure_button_layout(home: &str, uid: u32, gid: u32) {
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .uid(uid)
         .gid(gid)
-        .output();
-    match run {
+        // 易泄漏点：dbus-run-session 的子孙（dbus-daemon/dconf）会继承本进程
+        // 的 stdout/stderr（= dock exec 会话管道），若它们多存活几分钟，
+        // exec_oneshot 的 EOF 等待就把整个重建拖住。stdin 接 null，输出走
+        // output() 自建管道（随 dbus-run-session 退出即闭），不引用会话管道。
+        .stdin(std::process::Stdio::null());
+    let out = run.output();
+    match out {
         Ok(out) if out.status.success() => {
             tracing::info!("prepare: button-layout = {LAYOUT}（uid {uid}）");
         }

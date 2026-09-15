@@ -45,10 +45,24 @@ impl Podman {
             argv.push("--name".to_string());
             argv.push(n.clone());
         }
-        let out = self
-            .exec_oneshot(name, "0", argv)
-            .await
-            .map_err(|e| Error::Connect(format!("容器内准备 exec 失败：{e}")))?;
+        let argv2 = argv.clone();
+        let exec = async {
+            self.exec_oneshot(name, "0", argv2)
+                .await
+                .map_err(|e| Error::Connect(format!("容器内准备 exec 失败：{e}")))
+        };
+        // 兑底：exec 会话可能因 prepare 的孙子进程（dbus-daemon 等）短期继承
+        // 会话管道而不 EOF，历史实测最长 ~2m39s。prepare 幂等且自愈，超时不应
+        // 阻塞重建主链路——超时视为已完成，下次启动自会补齐。
+        let out = match tokio::time::timeout(std::time::Duration::from_secs(60), exec).await {
+            Ok(res) => res?,
+            Err(_) => {
+                tracing::warn!(
+                    "容器内准备 exec 超过 60s 未返回（可能被残留子进程拖住输出流），放行不阻塞；下次启动自会补齐"
+                );
+                return Ok(());
+            }
+        };
         if out.code != 0 {
             return Err(Error::Connect(format!(
                 "容器内准备失败（退出码 {}）：\n{}",
