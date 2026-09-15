@@ -388,8 +388,6 @@ pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Resu
         fontconf_dir: PathBuf::from(FONTCONF_DIR),
     };
     apply_plan(&plan, &paths)?;
-    // 家目录 id 残留自愈（幂等；背景见 ensure_home_ownership 的文档）
-    ensure_home_ownership(&plan.home, uid, gid);
     // ets 命令软链（幂等；宿主未挂载 ets 时静默跳过）
     ensure_ets_symlink();
     // GNOME 窗口按钮（幂等；环境不满足时静默跳过）
@@ -413,80 +411,6 @@ fn ensure_ets_symlink() {
     if let Err(e) = symlink(ETS_BIN_TARGET, ETS_LINK) {
         tracing::warn!("创建 {ETS_LINK} 软链失败：{e}");
     }
-}
-
-/// 家目录归属自愈：扫描 `/home` 下 uid/gid ≠ 容器用户的条目归位到 uid:gid。
-///
-/// **扫描范围**：`home` 的 parent 是 `/home` 时升格为整个 `/home`（覆盖
-/// `/home` 顶层、`/home/easytidy` 等镜像构建遗留 sibling 目录）；其它
-/// 情况（plan.home = `/root` 等）仅扫 `home` 子树。`-xdev` 自动跳过
-/// bind-mount（如 `/home/ubuntu/Downloads`），宿主数据不会被改。
-///
-/// 背景（2026-09-13）：podman 5.4.2 → 6.2 的 rootless native overlay 换了
-/// 存储 id 空间（idmapped mount），旧版创建时 chown 落下的 host 1000/1001
-/// 在新映射下显示为 999/1001；快速重建（同映射直通，不做整树 chown）会把
-/// 存储层残留原样带到新容器。此处在容器内以 root 扫描 /home，把不属于
-/// 容器用户的条目归位——启动即自愈，显示与权限恢复一致。
-///
-/// 2026-09-16 升级：原实现只扫 `home`（容器用户的家），漏掉了 `/home`
-/// 顶层与 `/home/easytidy` 等镜像构建遗留 sibling 目录（root 创建、
-/// 999:999 属主、无 chown）。新容器进程 ubuntu(1000:1000) 写不进这些
-/// 目录，会让 easytidy-server 的 `storage::init()` 创建 `/home/<u>/.easytidy`
-/// 在某些时序下报 Permission denied、apps 登记表也写不进 `/home/easytidy/apps.toml`。
-/// 升格到 `/home` 后整树统一归位（uid:gid 已对的 .cargo/venv 跳过，
-/// 只动错的）。
-///
-/// 实现用 `find ! -uid/-gid + chown` 而非整目录递归 chown：只动错的不碰
-/// 对的。符号链接用 -h 语义。扫描失败仅 warn（极端大目录慢，但不阻断启动）。
-fn ensure_home_ownership(home: &str, uid: u32, gid: u32) {
-    let scan_root = home_ownership_scan_root(home);
-    // find ! -uid/-gid + chown -h：只动错的不碰对的；-xdev 自动跳过 bind-mount；
-    // -h 让符号链接自身归位而非链接目标。外部 find/chown 不可用或失败仅告警，
-    // 不阻断启动（自愈是尽力而为，属主问题下次启动仍会尝试）。
-    let run = std::process::Command::new("/usr/bin/find")
-        .arg(&scan_root)
-        .args([
-            "-xdev",
-            "(",
-            "!",
-            "-uid",
-            &uid.to_string(),
-            "-o",
-            "!",
-            "-gid",
-            &gid.to_string(),
-            ")",
-        ])
-        .arg("-exec")
-        .arg("/usr/bin/chown")
-        .arg("-h")
-        .arg(format!("{uid}:{gid}"))
-        .arg("{}")
-        .arg("+")
-        .output();
-    match run {
-        Ok(out) if out.status.success() => {
-            tracing::debug!("prepare: 家目录归属自愈完成（扫描根 {}）", scan_root.display());
-        }
-        Ok(out) => tracing::warn!(
-            "prepare: 家目录归属自愈未完成（不影响启动）：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ),
-        Err(e) => tracing::warn!("prepare: 家目录自愈 find 不可用：{e}"),
-    }
-}
-
-/// `ensure_home_ownership` 的扫描根解析（纯函数）。
-///
-/// `home` 形如 `/home/<user>` → 升格到 `/home`（覆盖所有 sibling 目录）；
-/// 其它（`/root`、`/srv/<u>` 等）→ 原样返回 `home`（仅扫用户家子树，
-/// 不污染无关目录）。
-pub(crate) fn home_ownership_scan_root(home: &str) -> PathBuf {
-    Path::new(home)
-        .parent()
-        .filter(|p| p.as_os_str() == "/home")
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from(home))
 }
 
 /// 保证 GNOME 窗口三按钮（最小化/最大化/关闭）。
@@ -928,59 +852,4 @@ mod tests {
         assert!(ensure_home("", uid, gid).is_err());
     }
 
-    // ── ensure_home_ownership 扫描根解析（2026-09-16）──
-    //
-    // 历史：原实现只扫容器用户家 `/home/<u>`，漏掉镜像构建遗留的 sibling
-    // （`/home/easytidy` 999:999、`/home/host` 0:999、`/home` 顶层 root 属主），
-    // 导致 easytidy-server 写不进去。升级后：`home` parent = `/home` 时升格
-    // 整个 `/home` 树，其它情况（`/root` 等）保持原状仅扫 `home` 子树。
-
-    #[test]
-    fn test_home_ownership_scan_root_promotes_under_home() {
-        // /home/<user> → 升格到 /home（覆盖 sibling 孤儿目录）
-        assert_eq!(home_ownership_scan_root("/home/ubuntu"), PathBuf::from("/home"));
-        assert_eq!(home_ownership_scan_root("/home/node"), PathBuf::from("/home"));
-    }
-
-    #[test]
-    fn test_home_ownership_scan_root_passes_through_non_home() {
-        // /root、/srv/<u>、空字符串等 → 原样，不污染无关目录
-        assert_eq!(home_ownership_scan_root("/root"), PathBuf::from("/root"));
-        assert_eq!(home_ownership_scan_root("/srv/tidy"), PathBuf::from("/srv/tidy"));
-        assert_eq!(home_ownership_scan_root(""), PathBuf::from(""));
-    }
-
-    #[test]
-    fn test_home_ownership_scan_root_handles_deeply_nested() {
-        // 深嵌套（plan.home 不会出现，但保证不爆）→ 仅 direct child 升格，
-        // 否则原样返回；避免无意中扫到 /home 下任意子树。
-        assert_eq!(
-            home_ownership_scan_root("/home/a/b/c"),
-            PathBuf::from("/home/a/b/c")
-        );
-    }
-
-    #[test]
-    fn test_write_fontconfig_skips_without_mount() {
-        let (tmp, _paths) = tmp_env();
-        let r = write_fontconfig(
-            &tmp.path().join("no-such-host"),
-            &tmp.path().join("no-such-fonts"),
-        );
-        assert!(r.is_ok(), "无挂载/无 fontconfig 目录应静默跳过");
-    }
-
-    #[test]
-    fn test_write_fontconfig_writes_conf() {
-        let (tmp, _paths) = tmp_env();
-        let host_fonts = tmp.path().join("host");
-        let fonts_dir = tmp.path().join("fonts");
-        fs::create_dir_all(&host_fonts).unwrap();
-        fs::create_dir_all(&fonts_dir).unwrap();
-        write_fontconfig(&host_fonts, &fonts_dir).unwrap();
-        let conf = fs::read_to_string(fonts_dir.join("local.conf")).unwrap();
-        assert!(conf.contains("<fontconfig>"));
-        assert!(conf.contains("/mnt/host/fonts"));
-        assert!(conf.contains("/mnt/host/.local/share/fonts"));
-    }
 }
