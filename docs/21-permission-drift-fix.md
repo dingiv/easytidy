@@ -179,28 +179,44 @@ fuse-overlayfs**（运行中容器 mountinfo 实锤 `fuse.fuse-overlayfs`）。
 GUI 全链路复验、labwc 构建链固化、PipeWire/IM/portal env、
 `/usr/bin/easytidy` 旧二进制处置、target/debug 覆盖来源。
 
-## 7 · 存储迁移：真正切到 native overlay（2026-09-15）
+## 7 · native 迁移：已实施并紧急回退（2026-09-15/16）
 
-### 7.1 迁移事实
+> **状态：已回退到 fuse-overlayfs。** 本节保留完整教训。
 
-- `.has-mount-program` 写 "false" 后，驱动探测到 native 可用
-  （`useNativeDiff=true, usingMetacopy=false`），新容器挂载实锤为
-  kernel overlay（mountinfo `- overlay`，userxattr，无 uidmapping）；
-- **本机 rootless 架构下 native 同样不移位**：fork 服务/CLI 进程 euid≠0，
-  `checkAndRecordIDMappedSupport` 直接返回不支持 → `disableShifting` →
-  磁盘编码仍为容器视图恒等（c1000→storage 1000、c0→storage 0 实测）；
-- 结论不变：passthrough 即正确语义，路线 A 翻译在可预见未来保持情性；
-  一旦未来内核/idmapped overlay 可用，fork 已持久化配对表（层目录
-  `idmap`），翻译自动启用——两套语义都已覆盖。
+### 7.1 迁移实施（09-15）
 
-### 7.2 fork 配套改造（7050a8148a）
+- flag 文件置 false → 新容器实锤 native 挂载（mountinfo `- overlay`，无移位）；
+- fork 快速 Diff 扩展到 native + 层目录 `idmap` 配对表持久化
+  （7050a8148a，打包 +easytidy4）。
 
-- 快速 Diff 扩展到 native 路径（metacopy 启用时回退 naive，防占位文件丢内容）；
-- 层目录 `idmap` 配对表持久化/清除/失效化（get/UpdateLayerIDMap）；
-- 打包 easytidy-podman 6.2.0-dev+easytidy4。
+### 7.2 事故与回退（09-16 00:2x–01:3x）
 
-### 7.3 迁移后状态
+用户按新二进制重启容器后「全部容器权限错位」（home 拒绝访问、/etc/passwd
+显示 999:1001）。实证根因：
 
-- 旧容器（fuse 挂载）随重启自然切到 native；
-- prepare 自愈保留（旧世代层仍有一次性迁移价值）；
-- storage.conf 注释已修正（记录 flag 文件坑 + 编码语义）。
+- **fuse 挂载自带 id 口径翻译**：磁盘层的编码差（旧世代 999 系 vs 现行
+  1000 系）在容器视图中被掩盖，一切正常；
+- **native（本机 rootless，无 idmapped overlay）不移位**，直接按容器
+  userns 呈现 inode 真实 id → 同一份磁盘编码在容器视图全面错位
+  （/home/ubuntu 磁盘 real 100999 = 容器 c999，而用户是 c1000）；
+- 即 fuse 在此系统上一直承担着「视图语义适配器」角色，数据本身无损
+  （mtime/ctime 证据：无 chown/损坏；desk_pilot02 RW 层另有一晚 00:35 的
+  187k 文件批量重写，疑 GUI 快照/恢复操作，与存储切换无关）。
+
+回退步骤（已执行）：`.has-mount-program` 置 true + storage.conf 显式
+mount_program → 杀 socket 服务（驱动选择在服务生命周期内缓存）→ 重新拉起
+→ 重启容器 → gui/chrome/desk 三容器 fuse 挂载 + 权限视图全部恢复；
+desk_pilot02 的 /home/node 额外被改为 root 属主（00:34，非存储切换所致），
+已在容器内 `chown -R node:node` 修复并验证可写。
+
+### 7.3 若未来要真切 native（前置条件）
+
+1. 每容器先一轮全量重编码归位（慢速重建 squash，或宿主侧按容器映射 chown
+   整个 upperdir），使磁盘 id 与容器视图恒等；
+2. 确认 easytidy prepare 在 native 下正常生效（本次观察到未兜底）；
+3. 再切 flag；fork 的 idmap 配对表机制在真移位环境下自动启用。
+
+### 7.4 遗留核对清单（旧议题，与权限漂移无关）
+
+GUI 全链路复验、labwc 构建链固化、PipeWire/IM/portal env、
+`/usr/bin/easytidy` 旧二进制处置、target/debug 覆盖来源。
