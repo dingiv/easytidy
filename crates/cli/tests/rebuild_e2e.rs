@@ -8,18 +8,75 @@
 //!
 //! 流程：create（临时 configfile + 假 server 二进制）→ 手写一条 bind mount
 //! （宿主临时目录 → /data）与 mapped 端口（随机空闲宿主端口 → 容器 80/tcp）
-//! 到配置 → `Podman::rebuild` → 用独立 bollard 连接（等价 `podman inspect`）
-//! 验证 HostConfig.Mounts 与 NetworkSettings.Ports → 清理容器。
+//! 到配置 → `Podman::rebuild` → 用独立 unix-socket HTTP inspect（等价
+//! `podman inspect`）验证 Mounts 与 NetworkSettings.Ports → 清理容器。
 
 use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use bollard::Docker;
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::models::{
     ContainerConfig, MountConfig, NetworkConfig, NetworkMode, PortMapping,
 };
 use easytidy_core::podman::Podman;
+
+
+/// 独立 unix-socket HTTP inspect（等价 podman inspect，独立于引擎实现）。
+async fn inspect_container_compat(name: &str) -> Result<serde_json::Value, String> {
+    use http_body_util::BodyExt;
+    use hyper::Request;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::{TokioExecutor, TokioIo};
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tower_service::Service;
+
+    #[derive(Clone)]
+    struct Connector {
+        path: std::path::PathBuf,
+    }
+    impl Service<hyper::Uri> for Connector {
+        type Response = TokioIo<tokio::net::UnixStream>;
+        type Error = std::io::Error;
+        type Future = Pin<
+            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
+        >;
+        fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+        fn call(&mut self, _req: hyper::Uri) -> Self::Future {
+            let path = self.path.clone();
+            Box::pin(async move {
+                let s = tokio::net::UnixStream::connect(path).await?;
+                Ok(TokioIo::new(s))
+            })
+        }
+    }
+
+    let socket = format!(
+        "{}/podman/podman.sock",
+        std::env::var("XDG_RUNTIME_DIR").map_err(|e| e.to_string())?
+    );
+    let client: Client<Connector, http_body_util::Full<bytes::Bytes>> =
+        Client::builder(TokioExecutor::new()).build(Connector {
+            path: std::path::PathBuf::from(socket),
+        });
+    let req = Request::get(format!(
+        "http://podman/v5.0/containers/{}/json",
+        name
+    ))
+    .body(http_body_util::Full::new(bytes::Bytes::new()))
+    .map_err(|e| e.to_string())?;
+    let resp = client.request(req).await.map_err(|e| e.to_string())?;
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .map_err(|e| e.to_string())?
+        .to_bytes();
+    serde_json::from_slice(&bytes).map_err(|e| format!("解析 inspect 失败：{e}"))
+}
+
 
 fn unique_name(prefix: &str) -> String {
     let ts = SystemTime::now()
@@ -181,52 +238,49 @@ async fn rebuild_applies_mounts_and_ports() {
         println!("[rebuild] new id = {new_id}");
         check(id != new_id, "rebuild 后容器 ID 应变化")?;
 
-        // 独立 bollard 连接直接 inspect（等价 podman inspect，独立于引擎实现）
-        let socket_path = format!(
-            "{}/podman/podman.sock",
-            std::env::var("XDG_RUNTIME_DIR").map_err(|e| e.to_string())?
-        );
-        let docker = Docker::connect_with_unix(&socket_path, 120, bollard::API_DEFAULT_VERSION)
-            .map_err(|e| format!("连接 podman socket 失败：{e}"))?;
-        let info = docker
-            .inspect_container(&name, None)
+        // 独立 unix-socket HTTP inspect（等价 podman inspect，独立于引擎实现）
+        let info = inspect_container_compat(&name)
             .await
             .map_err(|e| format!("podman inspect 失败：{e}"))?;
 
         // 验证 1：mounts 生效（/data → src_dir rw；/tmp-e2e → tmpdir ro；含 engine 内部挂载）。
         // podman 在顶层 Mounts（MountPoint 列表）报告生效挂载；HostConfig.Mounts 不回显。
-        let mounts = info.mounts.clone().unwrap_or_default();
+        let mounts = info
+            .get("Mounts")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
         println!(
             "[inspect] top-level Mounts = {}",
             serde_json::to_string_pretty(&mounts).unwrap()
         );
-        let data_mount = mounts
-            .iter()
-            .find(|m| m.destination.as_deref() == Some("/data"))
-            .ok_or("mount /data 未出现在顶层 Mounts")?;
+        let get_mount = |dest: &str| {
+            mounts
+                .iter()
+                .find(|m| m.get("Destination").and_then(|v| v.as_str()) == Some(dest))
+                .ok_or(format!("mount {dest} 未出现在顶层 Mounts"))
+        };
+        let data_mount = get_mount("/data")?;
         check(
-            data_mount.source.as_deref() == Some(src_dir.to_str().unwrap()),
+            data_mount.get("Source").and_then(|v| v.as_str()) == Some(src_dir.to_str().unwrap()),
             "mount /data 的宿主源路径不匹配",
         )?;
         check(
-            data_mount.rw.unwrap_or(true),
+            data_mount.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
             "mount /data 应为可写",
         )?;
-        let tmp_mount = mounts
-            .iter()
-            .find(|m| m.destination.as_deref() == Some("/tmp-e2e"))
-            .ok_or("mount /tmp-e2e 未出现在顶层 Mounts")?;
+        let tmp_mount = get_mount("/tmp-e2e")?;
         check(
-            !tmp_mount.rw.unwrap_or(true),
+            !tmp_mount.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
             "mount /tmp-e2e 应为只读",
         )?;
 
         // 验证 2：端口映射生效（NetworkSettings.Ports: "80/tcp" → HostPort）
         let ports = info
-            .network_settings
-            .as_ref()
-            .and_then(|n| n.ports.clone())
-            .unwrap_or_default();
+            .get("NetworkSettings")
+            .and_then(|n| n.get("Ports"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         println!(
             "[inspect] NetworkSettings.Ports = {}",
             serde_json::to_string_pretty(&ports).unwrap()
@@ -234,20 +288,20 @@ async fn rebuild_applies_mounts_and_ports() {
         let binding = ports
             .get("80/tcp")
             .ok_or("端口 80/tcp 未出现在 NetworkSettings.Ports")?
-            .as_ref()
+            .as_array()
             .ok_or("80/tcp 无绑定")?
             .first()
             .ok_or("80/tcp 无绑定条目")?;
         check(
-            binding.host_port.as_deref() == Some(&host_port.to_string()),
+            binding.get("HostPort").and_then(|p| p.as_str()) == Some(&host_port.to_string()),
             "宿主端口不匹配",
         )?;
 
         // 验证 3：rebuild 后容器应运行中（假 server sleep 300）
         let running = info
-            .state
-            .as_ref()
-            .and_then(|s| s.running)
+            .get("State")
+            .and_then(|s| s.get("Running"))
+            .and_then(|r| r.as_bool())
             .unwrap_or(false);
         println!("[inspect] State.Running = {running}");
         check(running, "rebuild 后容器应处于运行状态")?;
@@ -255,9 +309,10 @@ async fn rebuild_applies_mounts_and_ports() {
         // 验证 4：新身份模型——容器默认用户 = 配置的 <uid>:<gid>（inspect
         // Config.User 回显；不再恒为 "0:0"）。路径同 core inspect_config
         let user = info
-            .config
+            .get("Config")
             .as_ref()
-            .and_then(|c| c.user.as_deref())
+            .and_then(|c| c.get("User"))
+            .and_then(|u| u.as_str())
             .unwrap_or_default();
         println!("[inspect] Config.User = {user}");
         check(user == "1000:1000", "inspect Config.User 应回显配置的 1000:1000")?;

@@ -8,8 +8,6 @@ pub enum Error {
     NoXdgRuntime,
     #[error("podman 连接失败：{0}")]
     Connect(String),
-    #[error("podman API 调用失败：{0}")]
-    Api(#[from] bollard::errors::Error),
     #[error("IO 错误：{0}")]
     Io(#[from] std::io::Error),
     #[error("配置文件解析失败：{0}")]

@@ -1,9 +1,8 @@
-//! libpod 扩展端点（手写，经 podman unix socket 的 raw HTTP）。
+//! libpod 扩展端点（经 podman unix socket 的 raw HTTP，共享 [`HttpClient`]）。
 //!
-//! 背景：Docker compat 端点（bollard 使用）不支持 podman 特有的
-//! `--userns=keep-id`（容器 uid = 宿主 uid 真对齐）。keep-id 仅在
-//! libpod 端点可用：`POST /libpod/containers/create` 的
-//! `namespaces.userns.nsmode = "keep-id"`。
+//! 背景：Docker compat 端点不支持 podman 特有的 `--userns=keep-id`
+//! （容器 uid = 宿主 uid 真对齐）。keep-id 仅在 libpod 端点可用：
+//! `POST /libpod/containers/create` 的 `namespaces.userns.nsmode = "keep-id"`。
 //!
 //! keep-id 语义（rootless，实测文件属主/访问行为，2026-08-07）：
 //! - **容器内 uid 1000（node 用户）= 宿主当前登录用户（uid 1000）**：
@@ -17,108 +16,27 @@
 //! - 注意：/proc/self/uid_map 的字面映射（1000→0）不代表实际文件属主
 //!   行为——以 keep-id 层的真实身份为准（实测文件属主 = 宿主用户）
 
-use std::path::PathBuf;
-use std::task::{Context, Poll};
-
-use http_body_util::{BodyExt, Full};
-use hyper::body::Bytes;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::{json, Value};
-use tower_service::Service;
 
 use crate::error::{Error, Result};
-
-/// 基于 unix socket 的连接器（hyper-util legacy client 的 Connect 约束）。
-///
-/// 注意：hyper 1 的 `hyper::service::Service` 是封死 trait，外部不可实现；
-/// 必须实现 `tower_service::Service<Uri>`（hyper-util 内部使用）。
-#[derive(Clone)]
-struct UnixConnector {
-    socket_path: PathBuf,
-}
-
-impl Service<hyper::Uri> for UnixConnector {
-    type Response = TokioIo<tokio::net::UnixStream>;
-    type Error = std::io::Error;
-    type Future = std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>>
-                + Send,
-        >,
-    >;
-
-    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, _req: hyper::Uri) -> Self::Future {
-        let path = self.socket_path.clone();
-        Box::pin(async move {
-            let stream = tokio::net::UnixStream::connect(path).await?;
-            Ok(TokioIo::new(stream))
-        })
-    }
-}
+use hyper::body::Bytes;
+use crate::podman::http::HttpClient;
 
 /// libpod 客户端（仅覆盖我们用到的端点）。
 ///
 /// libpod 端点需要 API 版本前缀（`/v<ApiVersion>/libpod/...`，裸 `/libpod/...`
 /// 返回 404——podman 实测）；ApiVersion 取自 `GET /version`。
 pub struct Libpod {
-    client: Client<UnixConnector, Full<Bytes>>,
+    http: HttpClient,
     api_version: String,
-}
-
-/// fork 优先的 podman socket 路径：easytidy fork service（$XDG_RUNTIME_DIR/
-/// easytidy/podman.sock，可拉起则拉起）→ 系统 podman.socket 回退。
-/// 与 bollard 封装（podman::Podman::connect）保持同一路径选择逻辑，
-/// 保证 rebuild/快照等 libpod 直连与 compat 调用落在同一个 engine 上。
-fn socket_path() -> Result<PathBuf> {
-    let fork_sock = crate::podman::Podman::fork_socket_path()?;
-    if fork_sock.exists() || crate::podman::Podman::ensure_fork_service_for(&fork_sock).is_ok() {
-        return Ok(fork_sock);
-    }
-    let runtime = std::env::var("XDG_RUNTIME_DIR").map_err(|_| Error::NoXdgRuntime)?;
-    Ok(PathBuf::from(runtime).join("podman/podman.sock"))
 }
 
 impl Libpod {
     pub async fn new() -> Result<Self> {
-        let connector = UnixConnector {
-            socket_path: socket_path()?,
-        };
-        let client = Client::builder(TokioExecutor::new()).build(connector);
-
-        // 取 API 版本（libpod 路径前缀需要）
-        // URI host 为占位（unix socket 传输，见 UnixConnector 注释）
-        let req = hyper::Request::get("http://podman/version")
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| Error::Connect(format!("构造 /version 请求失败：{e}")))?;
-        let resp = client
-            .request(req)
-            .await
-            .map_err(|e| Error::Connect(format!("/version 请求失败：{e}")))?;
-        let bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Error::Connect(format!("读取 /version 失败：{e}")))?
-            .to_bytes();
-        let v: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| Error::Connect(format!("解析 /version 失败：{e}")))?;
-        let api_version = v
-            .get("ApiVersion")
-            .or_else(|| v.get("api_version"))
-            .and_then(|x| x.as_str())
-            .unwrap_or("5.0.0")
-            .to_string();
+        let http = HttpClient::connect().await?;
+        let api_version = http.api_version().to_string();
         tracing::debug!("podman ApiVersion：{api_version}");
-
-        Ok(Self {
-            client,
-            api_version,
-        })
+        Ok(Self { http, api_version })
     }
 
     /// POST /v<version>/libpod/containers/create?name=<name>，body 为
@@ -132,48 +50,27 @@ impl Libpod {
             "libpod create 请求（容器 {name}）：\n{}",
             serde_json::to_string_pretty(&body).unwrap_or_default()
         );
-        // 注：这不是网络请求。URI 中的 "podman" 只是 hyper 强制要求的
-        // 绝对 URI 占位主机名——连接层由 UnixConnector 替换为本机
-        // $XDG_RUNTIME_DIR/podman/podman.sock 的 unix domain socket
-        // （同 podman CLI 自身与 bollard 的传输方式），零网络流量。
         let fast_param = if fast { "&easytidy_fast=true" } else { "" };
-        let uri: hyper::Uri = format!(
-            "http://podman/v{}/libpod/containers/create?name={}{}",
+        let path = format!(
+            "/v{}/libpod/containers/create?name={}{}",
             self.api_version,
             urlencoding(name),
             fast_param
-        )
-        .parse()
-        .map_err(|e| Error::Connect(format!("URI 解析失败：{e}")))?;
-
-        let req = hyper::Request::post(uri)
-            .header("content-type", "application/json")
-            .body(Full::new(Bytes::from(serde_json::to_vec(&body).map_err(
-                |e| Error::Config(format!("序列化 libpod create body 失败：{e}")),
-            )?)))
-            .map_err(|e| Error::Connect(format!("构造请求失败：{e}")))?;
-
-        let resp = self
-            .client
-            .request(req)
+        );
+        let body_bytes = serde_json::to_vec(&body)
+            .map(Bytes::from)
+            .map_err(|e| Error::Connect(format!("序列化 libpod create body 失败：{e}")))?;
+        let (status, resp_bytes) = self
+            .http
+            .request_bytes("POST", &path, Some(body_bytes))
             .await
             .map_err(|e| Error::Connect(format!("libpod create 请求失败：{e}")))?;
-
-        let status = resp.status();
-        let resp_bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Error::Connect(format!("读取响应失败：{e}")))?
-            .to_bytes();
-
         let text = String::from_utf8_lossy(&resp_bytes).to_string();
-        if !status.is_success() {
+        if !(200..300).contains(&status) {
             return Err(Error::Connect(format!(
                 "libpod create 失败（HTTP {status}）：{text}"
             )));
         }
-
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| Error::Connect(format!("解析 libpod create 响应失败：{e}：{text}")))?;
         v.get("Id")
@@ -190,7 +87,7 @@ impl Libpod {
     /// - `squash`：
     ///   - `true` 等价 `podman commit --squash`：把多层合并为**单层**,镜像体积更小,
     ///     不再叠加源容器原有历史层。作为"环境快照"的**默认**语义(fork 后镜像层干净)。
-    ///   - `false` 普通 commit：保留源容器的**分层历史**（体积 = 源镜像层 + 容器增量层）。
+    ///   - `false` 普通 commit：保留源容器的**分层历史**（体积 = 源镜像层 + 增量层）。
     /// - `repo` 与 `tag` **分开传**：实测 libpod commit 的 `repo` 参数不允许含 `:`,
     ///   podman 会在其内部按 `<repo>:latest` 解析,遇到已有 `:` 的 repo 会触发
     ///   `parsing reference "<repo>:<tag>:latest": invalid reference format` 500。
@@ -235,36 +132,18 @@ impl Libpod {
         if fast {
             query.push_str("&easytidy_fast=true");
         }
-        let uri: hyper::Uri = format!("http://podman/v{}/libpod/commit?{query}", self.api_version)
-            .parse()
-            .map_err(|e| Error::Connect(format!("URI 解析失败：{e}")))?;
-
-        let req = hyper::Request::post(uri)
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(Full::new(Bytes::new()))
-            .map_err(|e| Error::Connect(format!("构造 commit 请求失败：{e}")))?;
-
-        let resp = self
-            .client
-            .request(req)
+        let path = format!("/v{}/libpod/commit?{query}", self.api_version);
+        let (status, resp_bytes) = self
+            .http
+            .request_bytes("POST", &path, None)
             .await
             .map_err(|e| Error::Connect(format!("libpod commit 请求失败：{e}")))?;
-
-        let status = resp.status();
-        let resp_bytes = resp
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Error::Connect(format!("读取 commit 响应失败：{e}")))?
-            .to_bytes();
-
         let text = String::from_utf8_lossy(&resp_bytes).to_string();
-        if !status.is_success() {
+        if !(200..300).contains(&status) {
             return Err(Error::Connect(format!(
                 "libpod commit 失败（HTTP {status}）：{text}"
             )));
         }
-
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| Error::Connect(format!("解析 libpod commit 响应失败：{e}：{text}")))?;
         v.get("Id")
@@ -275,27 +154,8 @@ impl Libpod {
     }
 }
 
-/// URL 编码（仅容器名，实际多为 [a-z0-9_-]）。
-fn urlencoding(s: &str) -> String {
-    s.chars()
-        .map(|c| match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c.to_string(),
-            _ => {
-                let mut out = String::new();
-                for b in c.to_string().bytes() {
-                    out.push_str(&format!("%{:02X}", b));
-                }
-                out
-            }
-        })
-        .collect()
-}
 
-/// 构造 keep-id 容器创建 body（Docker-compat 形状 + libpod namespaces 扩展）。
-///
-/// 入参沿用 bollard create 的等价字段：镜像/命令/环境/标签/HostConfig
-/// （init、mounts、network、ports）。
-#[allow(clippy::too_many_arguments)]
+
 pub fn keep_id_create_body(
     name: &str,
     hostname: &str,
@@ -355,8 +215,8 @@ pub fn keep_id_create_body(
             let source = m.get("Source").cloned().unwrap_or(Value::Null);
             let target = m.get("Target").cloned().unwrap_or(Value::Null);
             let ro = m.get("ReadOnly").and_then(|v| v.as_bool()).unwrap_or(false);
-            let options = if ro { json!(["ro"]) } else { json!([]) };
-            json!({
+            let options = if ro { serde_json::json!(["ro"]) } else { serde_json::json!([]) };
+            serde_json::json!({
                 "type": typ,
                 "source": source,
                 "destination": target,
@@ -366,7 +226,7 @@ pub fn keep_id_create_body(
         .collect();
     // libpod SpecGenerator 的端口字段是 `portmappings`（扁平 []PortMapping，
     // host_port/container_port 为**数字** uint16）；入参沿用 Docker PortBinding
-    // 嵌套形状（{"PORT/PROTO": [{HostIp, HostPort}]，bollard serde 标签为
+    // 嵌套形状（{"PORT/PROTO": [{HostIp, HostPort}]，compat serde 标签为
     // **PascalCase**，HostPort 为字符串），在此归一化——字段名/形状不对时
     // libpod 静默忽略（曾按小写键取值 → host_port 全落空 → podman 随机分配，
     // 2026-08-27 socket 实测）。
@@ -382,7 +242,7 @@ pub fn keep_id_create_body(
                     let host_port = b.get("HostPort").and_then(|v| {
                         v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))
                     }).unwrap_or(0);
-                    json!({
+                    serde_json::json!({
                         "host_ip": b.get("HostIp").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                         "host_port": host_port,
                         "container_port": container_port,
@@ -404,11 +264,11 @@ pub fn keep_id_create_body(
     for d in &raw_devices {
         let trimmed = d.trim();
         if !trimmed.is_empty() && !device_list.iter().any(|v| v["path"] == trimmed) {
-            device_list.push(json!({ "path": trimmed }));
+            device_list.push(serde_json::json!({ "path": trimmed }));
         }
     }
     if gpu_nvidia {
-        device_list.push(json!({ "path": "nvidia.com/gpu=all" }));
+        device_list.push(serde_json::json!({ "path": "nvidia.com/gpu=all" }));
     }
 
     // PID 命名空间：SpecGenerator 的 pidns.nsmode。默认即 private（省略该字段），
@@ -438,7 +298,7 @@ pub fn keep_id_create_body(
         }
     }
 
-    let mut body = json!({
+    let mut body = serde_json::json!({
         "name": name,
         "image": image,
         // libpod SpecGenerator 用 "command"（Docker compat 才是 "cmd"）
@@ -455,7 +315,7 @@ pub fn keep_id_create_body(
         // libpod 原生字段 `netns.nsmode`，不是 Docker compat 的 `network_mode`
         // （后者 libpod REST API 静默忽略 → 默认走 pasta）
         "netns": match network_mode {
-            Some(mode) => json!({ "nsmode": mode }),
+            Some(mode) => serde_json::json!({ "nsmode": mode }),
             None => Value::Null,
         },
         "exposed_ports": exposed_ports,
@@ -466,7 +326,7 @@ pub fn keep_id_create_body(
     // （非「替换」），镜像若设 ENTRYPOINT（如 mysql/postgres/redis 的 `bash -c`、
     // 各类带 ENTRYPOINT 的镜像）会包住我们的 command → server 启动失败（参数被消费）。
     // 显式置空数组 → 镜像 ENTRYPOINT 不生效，`command` 即为 PID 1 的字面命令。
-    body["entrypoint"] = json!([]);
+    body["entrypoint"] = serde_json::json!([]);
     // 用户命名空间：显式映射（uidmaps/gidmaps）与 keep-id **互斥**（podman 实测
     // `--uidmap` 与 `--userns` 不能同开）。显式映射非空 → 写 libpod 顶层
     // `uidmappings`/`gidmappings`（落 OCI `linux.uidMappings`），**不**写 keep-id
@@ -482,36 +342,52 @@ pub fn keep_id_create_body(
         let to_api = |ms: &[crate::models::IdMapping]| -> Vec<Value> {
             ms.iter()
                 .map(|m| {
-                    json!({ "containerID": m.container_id, "hostID": m.host_id, "size": m.length })
+                    serde_json::json!({ "containerID": m.container_id, "hostID": m.host_id, "size": m.length })
                 })
                 .collect()
         };
         if !uidmaps.is_empty() {
-            body["uidmappings"] = json!(to_api(&uidmaps));
+            body["uidmappings"] = serde_json::json!(to_api(&uidmaps));
         }
         if !gidmaps.is_empty() {
-            body["gidmappings"] = json!(to_api(&gidmaps));
+            body["gidmappings"] = serde_json::json!(to_api(&gidmaps));
         }
     } else if keep_id {
-        body["userns"] = json!({ "nsmode": "keep-id" });
+        body["userns"] = serde_json::json!({ "nsmode": "keep-id" });
     }
     // 设备直通（裸设备 + GPU CDI 引用）；空则省略
     if !device_list.is_empty() {
-        body["devices"] = json!(device_list);
+        body["devices"] = serde_json::json!(device_list);
     }
     // PID 命名空间（pid=host 等）
     if let Some(mode) = &pid_mode {
-        body["pidns"] = json!({ "nsmode": mode });
+        body["pidns"] = serde_json::json!({ "nsmode": mode });
     }
     // 安全选项（解析后的 SpecGenerator 字段）
     if let Some(profile) = &apparmor_profile {
-        body["apparmor_profile"] = json!(profile);
+        body["apparmor_profile"] = serde_json::json!(profile);
     }
     if !selinux_opts.is_empty() {
-        body["selinux_opts"] = json!(selinux_opts);
+        body["selinux_opts"] = serde_json::json!(selinux_opts);
     }
     if let Some(path) = &seccomp_profile_path {
-        body["seccomp_profile_path"] = json!(path);
+        body["seccomp_profile_path"] = serde_json::json!(path);
     }
     body
+}
+
+/// URL 编码（仅容器名，实际多为 [a-z0-9_-]）。
+fn urlencoding(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => c.to_string(),
+            _ => {
+                let mut out = String::new();
+                for b in c.to_string().bytes() {
+                    out.push_str(&format!("%{:02X}", b));
+                }
+                out
+            }
+        })
+        .collect()
 }

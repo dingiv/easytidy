@@ -2,7 +2,7 @@
 //!
 //! ## 已知 podman bug（#23712，≥5.2.1）
 //!
-//! 响应头延迟直到第一个事件存在 → bollard 空闲 ~2 分钟后超时 RequestTimeoutError。
+//! 响应头延迟直到第一个事件存在 → 客户端空闲 ~2 分钟后可能超时。
 //!
 //! **对策**：
 //! 1. 不设置事件类型过滤器（podman 过滤器是 AND 逻辑，且用 "died" 非 "die"）
@@ -12,9 +12,9 @@
 
 use crate::models::EngineEvent;
 use crate::podman::Podman;
-use bollard::models::EventMessage;
-use bollard::system::EventsOptions;
 use futures::StreamExt;
+use http_body_util::BodyExt;
+use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -49,37 +49,43 @@ async fn listen_events(
     podman: &Podman,
     tx: mpsc::Sender<EngineEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 构建选项：不设置过滤器（客户端侧过滤）
-    let opts = EventsOptions::<String> {
-        since: None, // 从现在开始
-        until: None,
-        filters: std::collections::HashMap::new(), // 不设置过滤器（podman bug 对策）
-    };
-
-    // 获取底层数据流
-    let docker = &podman.docker;
-
-    // 创建事件流（无超时，通过重连循环处理空闲超时）
-    let mut stream = docker.events(Some(opts));
+    let (status, body) = podman.http().open_stream("GET", "/events").await?;
+    let mut body = body.into_data_stream();
+    if !(200..300).contains(&status) {
+        return Err(format!("事件流 HTTP {status}").into());
+    }
 
     info!("事件流已连接，开始监听...");
 
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok(event) => {
-                if let Some(engine_event) = map_event(event) {
-                    debug!("收到事件：{:?}", engine_event);
-
-                    // 发送到 channel（失败则说明接收端关闭，退出）
+    // /events 输出为逐行 JSON（EventMessage）
+    let mut buf: Vec<u8> = Vec::new();
+    let mut body = body;
+    while let Some(chunk) = StreamExt::next(&mut body).await {
+        let chunk = chunk.map_err(|e| -> Box<dyn std::error::Error> { format!("事件流读取失败：{e}").into() })?;
+        buf.extend_from_slice(&chunk);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..=pos).collect();
+            let line = String::from_utf8_lossy(&line);
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let event: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    debug!("事件行解析失败（忽略）：{e}");
+                    continue;
+                }
+            };
+            match map_event(&event) {
+                Some(engine_event) => {
+                    debug!("收到事件：{engine_event:?}");
                     if tx.send(engine_event).await.is_err() {
                         error!("事件 channel 关闭，停止监听");
                         return Ok(());
                     }
                 }
-            }
-            Err(e) => {
-                // 流错误，返回外层重连
-                return Err(format!("事件流错误：{}", e).into());
+                None => debug!("忽略事件：{line}"),
             }
         }
     }
@@ -87,71 +93,65 @@ async fn listen_events(
     Ok(())
 }
 
-/// 从 podman EventMessage 映射为 EngineEvent（客户端侧过滤）。
+/// 从 compat EventMessage JSON 映射为 EngineEvent（客户端侧过滤）。
 ///
-/// 仅处理 easytidy 管理的容器（按标签 `manager=easytidy`）。
-fn map_event(event: EventMessage) -> Option<EngineEvent> {
-    // 获取 actor
-    let actor = event.actor?;
-
-    // 检查是否为容器事件（仅处理容器）
-    if actor.attributes.as_ref().and_then(|a| a.get("kind")) != Some(&"container".to_string()) {
+/// 仅处理容器事件（Type == "container"）且 easytidy 管理的
+/// （Actor.Attributes.label 含 `manager=easytidy`）。
+fn map_event(event: &Value) -> Option<EngineEvent> {
+    // 仅容器事件
+    if event.get("Type").and_then(|t| t.as_str()) != Some("container") {
         return None;
     }
 
+    let action = event.get("Action").and_then(|a| a.as_str()).unwrap_or("");
+    let actor = event.get("Actor")?;
+    let attributes = actor.get("Attributes")?;
+
     // 检查是否为 easytidy 管理（按标签）
-    let is_easytidy = actor
-        .attributes
-        .as_ref()
-        .and_then(|attrs| attrs.get("label"))
-        .map(|labels| {
-            // podman 标签格式："manager=easytidy,easytidy.name=xxx"
-            labels.contains("manager=easytidy")
-        })
+    let is_easytidy = attributes
+        .get("label")
+        .and_then(|l| l.as_str())
+        .map(|labels| labels.contains("manager=easytidy"))
         .unwrap_or(false);
 
     if !is_easytidy {
-        debug!("跳过非 easytidy 容器事件：{:?}", actor.attributes);
+        debug!("跳过非 easytidy 容器事件：{attributes}");
         return None;
     }
 
-    // 提取容器名
-    let name = actor
-        .attributes
-        .as_ref()
-        .and_then(|attrs| attrs.get("name"))
-        .cloned()
-        .unwrap_or_else(|| actor.id.clone().unwrap_or_default());
+    let container_id = actor
+        .get("ID")
+        .and_then(|i| i.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let name = attributes
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or_default()
+        .to_string();
 
-    let container_id = actor.id?;
-
-    // 匹配事件类型
-    match event.action.as_deref() {
-        // 创建事件
-        Some("create") => Some(EngineEvent::ContainerCreated { container_id, name }),
-        // 启动事件
-        Some("start") => Some(EngineEvent::ContainerStarted { container_id, name }),
+    match action {
+        "create" => Some(EngineEvent::ContainerCreated {
+            container_id,
+            name,
+        }),
+        "start" => Some(EngineEvent::ContainerStarted { container_id, name }),
         // 停止事件（podman 用 "died"）
-        Some("died") => {
-            // 提取退出码（podman 提供在 actor.attributes 中）
-            let exit_code = actor
-                .attributes
-                .as_ref()
-                .and_then(|attrs| attrs.get("exitCode"))
+        "died" => {
+            let exit_code = attributes
+                .get("exitCode")
+                .and_then(|s| s.as_str())
                 .and_then(|s| s.parse::<i64>().ok())
                 .unwrap_or(-1);
-
             Some(EngineEvent::ContainerDied {
                 container_id,
                 name,
                 exit_code,
             })
         }
-        // 删除事件
-        Some("destroy") => Some(EngineEvent::ContainerRemoved { container_id, name }),
-        // 其他事件忽略
+        "destroy" => Some(EngineEvent::ContainerRemoved { container_id, name }),
         _ => {
-            debug!("忽略事件类型：{:?}", event.action);
+            debug!("忽略事件类型：{action}");
             None
         }
     }

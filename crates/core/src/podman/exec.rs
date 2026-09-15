@@ -1,4 +1,4 @@
-//! 宿主侧 exec PTY（bollard exec API）。
+//! 宿主侧 exec PTY / 一次性 exec（自研 unix-socket HTTP exec API）。
 //!
 //! 在**运行中的容器**里以指定用户（如 root）起交互进程并挂接 stdio——
 //! rootless 下宿主对容器 user namespace 拥有所有权，可自由选择 ns 内
@@ -11,8 +11,10 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use futures::StreamExt;
+use http_body_util::BodyExt;
+use hyper::body::{Bytes, Incoming};
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
@@ -29,7 +31,94 @@ pub struct ExecPty {
     pub output: Pin<Box<dyn futures::Stream<Item = Result<Vec<u8>>> + Send>>,
 }
 
+/// exec 会话输出流的归一化条目（非 tty demux 后的 stdout/stderr 分路）。
+enum ExecChunk {
+    StdOut(Vec<u8>),
+    StdErr(Vec<u8>),
+}
+
 impl Podman {
+    /// 创建 exec 会话，返回 exec ID。
+    async fn create_exec(
+        &self,
+        container: &str,
+        user: &str,
+        tty: bool,
+        attach_stdin: bool,
+        env: Option<Vec<String>>,
+        cmd: Vec<String>,
+    ) -> Result<String> {
+        let body = serde_json::json!({
+            "AttachStdin": attach_stdin,
+            "AttachStdout": true,
+            "AttachStderr": true,
+            "Tty": tty,
+            "Cmd": cmd,
+            "Env": env,
+            "User": user,
+        });
+        let body_bytes = serde_json::to_vec(&body)
+            .map(Bytes::from)
+            .map_err(|e| Error::Connect(format!("序列化 exec create body 失败：{e}")))?;
+        let (status, body) = self
+            .http
+            .request_bytes(
+                "POST",
+                &format!(
+                    "/containers/{}/exec",
+                    Self::urlquery_encode(container)
+                ),
+                Some(body_bytes),
+            )
+            .await?;
+        if !(200..300).contains(&status) {
+            return Err(Error::Connect(format!(
+                "创建 exec 失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&body).trim()
+            )));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| Error::Connect(format!("解析 exec create 响应失败：{e}")))?;
+        v.get("Id")
+            .and_then(|i| i.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| Error::Connect("exec create 响应缺少 Id".to_string()))
+    }
+
+    /// 启动 exec（attach 模式）：返回响应体字节流。
+    ///
+    /// - `tty=true`：原始字节流（无 demux 头）
+    /// - `tty=false`：Docker 多路复用流（8 字节帧头），由调用方 demux
+    async fn start_exec_stream(
+        &self,
+        exec_id: &str,
+        tty: bool,
+    ) -> Result<Incoming> {
+        let (status, body) = self
+            .http
+            .open_stream(
+                "POST",
+                &format!(
+                    "/exec/{}/start?tty={}",
+                    Self::urlquery_encode(exec_id),
+                    tty
+                ),
+            )
+            .await?;
+        if !(200..300).contains(&status) {
+            let bytes = body
+                .collect()
+                .await
+                .map_err(|e| Error::Connect(format!("exec start 读流失败：{e}")))?
+                .to_bytes();
+            return Err(Error::Connect(format!(
+                "exec start 失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&bytes).trim()
+            )));
+        }
+        Ok(body)
+    }
+
     /// 在容器内以指定用户起交互进程（**不分配 TTY**）并挂接 stdio。
     ///
     /// 与 [`exec_pty`] 区别：不分配 exec TTY——专为「exec'd 进程本身不需要
@@ -53,61 +142,41 @@ impl Podman {
                 "exec_no_tty 需要明确指定 cmd（client 子命令）".to_string(),
             ));
         }
-        let exec = self
-            .docker
-            .create_exec::<String>(
-                container,
-                CreateExecOptions {
-                    attach_stdin: Some(true),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    tty: Some(false),
-                    env: None,
-                    cmd: Some(cmd),
-                    privileged: None,
-                    detach_keys: None,
-                    user: Some(user.to_string()),
-                    working_dir: None,
-                },
+        let exec_id = self.create_exec(container, user, false, true, None, cmd).await;
+        let exec_id = match exec_id {
+            Ok(id) => id,
+            Err(e) => return Err(e),
+        };
+        let (status, body, input) = self
+            .http
+            .open_stream_with_stdin(
+                "POST",
+                &format!(
+                    "/exec/{}/start?tty=false",
+                    Self::urlquery_encode(&exec_id)
+                ),
             )
-            .await
-            .map_err(Error::Api)?;
-
-        match self
-            .docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: false,
-                    tty: false,
-                    output_capacity: None,
-                }),
-            )
-            .await
-            .map_err(Error::Api)?
-        {
-            StartExecResults::Attached { output, input } => {
-                let output = output
-                    .map(|item| match item {
-                        Ok(log) => Ok(match log {
-                            bollard::container::LogOutput::StdOut { message }
-                            | bollard::container::LogOutput::StdErr { message }
-                            | bollard::container::LogOutput::Console { message }
-                            | bollard::container::LogOutput::StdIn { message } => message.to_vec(),
-                        }),
-                        Err(e) => Err(Error::Api(e)),
-                    })
-                    .boxed();
-                Ok(ExecPty {
-                    exec_id: exec.id.clone(),
-                    input: Arc::new(Mutex::new(input)),
-                    output,
-                })
-            }
-            StartExecResults::Detached => {
-                Err(Error::Connect("exec 意外进入 detach 模式".to_string()))
-            }
+            .await?;
+        if !(200..300).contains(&status) {
+            let bytes = body
+                .collect()
+                .await
+                .map_err(|e| Error::Connect(format!("exec start 读流失败：{e}")))?
+                .to_bytes();
+            return Err(Error::Connect(format!(
+                "exec start 失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&bytes).trim()
+            )));
         }
+        // 非 tty：Docker 多路复用流 demux，stdout/stderr 合并为一股输出
+        let output = Box::pin(super::http::DemuxStream::new(body).map(|item| {
+            item.map_err(|e| Error::Connect(format!("exec 输出流读取失败：{e}")))
+        }));
+        Ok(ExecPty {
+            exec_id,
+            input,
+            output,
+        })
     }
 
     /// 在容器内以指定用户起交互进程（TTY）并挂接 stdio。
@@ -129,89 +198,82 @@ impl Podman {
         } else {
             cmd
         };
-        // TTY 尺寸在 create 时给定（start 前 resize 不可用；bollard create
-        // body 无尺寸字段，首帧前补一次 resize）
-        let exec = self
-            .docker
-            .create_exec::<String>(
+        // TTY 尺寸在 create 时给定（start 前 resize 不可用；首帧前补一次 resize）
+        let exec_id = self
+            .create_exec(
                 container,
-                CreateExecOptions {
-                    attach_stdin: Some(true),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    tty: Some(true),
-                    env: Some(vec![format!("COLUMNS={cols}"), format!("LINES={rows}")]),
-                    cmd: Some(cmd),
-                    privileged: None,
-                    detach_keys: None,
-                    user: Some(user.to_string()),
-                    working_dir: None,
-                },
+                user,
+                true,
+                true,
+                Some(vec![format!("COLUMNS={cols}"), format!("LINES={rows}")]),
+                cmd,
             )
-            .await
-            .map_err(Error::Api)?;
-
-        match self
-            .docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: false,
-                    tty: true,
-                    output_capacity: None,
-                }),
+            .await?;
+        let (status, body, input) = self
+            .http
+            .open_stream_with_stdin(
+                "POST",
+                &format!("/exec/{}/start?tty=true", Self::urlquery_encode(&exec_id)),
             )
-            .await
-            .map_err(Error::Api)?
-        {
-            StartExecResults::Attached { output, input } => {
-                // 统一读侧类型：LogOutput → Vec<u8>（TTY 下 stdout/stderr 合流）
-                let output = output
-                    .map(|item| match item {
-                        Ok(log) => Ok(match log {
-                            bollard::container::LogOutput::StdOut { message }
-                            | bollard::container::LogOutput::StdErr { message }
-                            | bollard::container::LogOutput::Console { message }
-                            | bollard::container::LogOutput::StdIn { message } => message.to_vec(),
-                        }),
-                        Err(e) => Err(Error::Api(e)),
-                    })
-                    .boxed();
-                Ok(ExecPty {
-                    exec_id: exec.id.clone(),
-                    input: Arc::new(Mutex::new(input)),
-                    output,
-                })
-            }
-            // detach: false 请求不会返回 Detached
-            StartExecResults::Detached => {
-                Err(Error::Connect("exec 意外进入 detach 模式".to_string()))
-            }
+            .await?;
+        if !(200..300).contains(&status) {
+            let bytes = body
+                .collect()
+                .await
+                .map_err(|e| Error::Connect(format!("exec start 读流失败：{e}")))?
+                .to_bytes();
+            return Err(Error::Connect(format!(
+                "exec start 失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&bytes).trim()
+            )));
         }
+        // tty：无 demux 头，原始字节流直通
+        let output = Box::pin(body.into_data_stream().map(|item| {
+            item.map(|b| b.to_vec())
+                .map_err(|e| Error::Connect(format!("exec 输出流读取失败：{e}")))
+        }));
+        Ok(ExecPty {
+            exec_id,
+            input,
+            output,
+        })
     }
 
     /// 调整 exec PTY 尺寸（容器内 TTY 的 SIGWINCH 等价）。
     pub async fn resize_exec_pty(&self, exec_id: &str, cols: u16, rows: u16) -> Result<()> {
-        self.docker
-            .resize_exec(
-                exec_id,
-                ResizeExecOptions {
-                    height: rows,
-                    width: cols,
-                },
+        let _: Value = self
+            .http
+            .json_ok(
+                "POST",
+                &format!(
+                    "/exec/{}/resize?h={rows}&w={cols}",
+                    Self::urlquery_encode(exec_id)
+                ),
+                None,
             )
-            .await
-            .map_err(Error::Api)
+            .await?;
+        Ok(())
     }
 
     /// 查询 exec 进程退出码（未退出返回 None）。
     pub async fn exec_exit_code(&self, exec_id: &str) -> Result<Option<i32>> {
-        let info = self
-            .docker
-            .inspect_exec(exec_id)
-            .await
-            .map_err(Error::Api)?;
-        Ok(info.exit_code.map(|c| c as i32))
+        let (status, body) = self
+            .http
+            .request_bytes(
+                "GET",
+                &format!("/exec/{}/json", Self::urlquery_encode(exec_id)),
+                None,
+            )
+            .await?;
+        if !(200..300).contains(&status) {
+            return Err(Error::Connect(format!(
+                "exec inspect 失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&body).trim()
+            )));
+        }
+        let v: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|e| Error::Connect(format!("解析 exec inspect 失败：{e}")))?;
+        Ok(v.get("ExitCode").and_then(|c| c.as_i64()).map(|c| c as i32))
     }
 
     /// 写入 exec PTY stdin。
@@ -229,7 +291,7 @@ impl Podman {
     ///
     /// 用途：容器内 root 一次性操作（useradd 建号、fontconfig 接入、装包
     /// 校验）——要退出码与 stderr 语义，不需要交互 TTY。
-    /// bollard 已按 `LogOutput` 变体完成 multiplex 头 demux，无需手写解析。
+    /// Docker 多路复用流 demux 由 [`super::http::Demuxer`] 完成。
     ///
     /// 容器必须 running（未启动时 podman 拒绝 exec，返回 Api 错误）。
     pub async fn exec_oneshot(
@@ -238,59 +300,19 @@ impl Podman {
         user: &str,
         cmd: Vec<String>,
     ) -> Result<ExecOnce> {
-        let exec = self
-            .docker
-            .create_exec::<String>(
-                container,
-                CreateExecOptions {
-                    attach_stdin: Some(false),
-                    attach_stdout: Some(true),
-                    attach_stderr: Some(true),
-                    tty: Some(false),
-                    env: None,
-                    cmd: Some(cmd),
-                    privileged: None,
-                    detach_keys: None,
-                    user: Some(user.to_string()),
-                    working_dir: None,
-                },
+        let exec_id = self.create_exec(container, user, false, false, None, cmd).await?;
+        let (stdout, stderr) = self
+            .http
+            .read_demux_stream(
+                "POST",
+                &format!(
+                    "/exec/{}/start?tty=false",
+                    Self::urlquery_encode(&exec_id)
+                ),
             )
             .await
-            .map_err(Error::Api)?;
-
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        if let StartExecResults::Attached { output, .. } = self
-            .docker
-            .start_exec(
-                &exec.id,
-                Some(StartExecOptions {
-                    detach: false,
-                    tty: false,
-                    output_capacity: None,
-                }),
-            )
-            .await
-            .map_err(Error::Api)?
-        {
-            use futures::StreamExt;
-            let mut stream = output;
-            while let Some(item) = stream.next().await {
-                match item {
-                    Ok(log) => match log {
-                        bollard::container::LogOutput::StdOut { message } => {
-                            stdout.push_str(&String::from_utf8_lossy(&message))
-                        }
-                        bollard::container::LogOutput::StdErr { message } => {
-                            stderr.push_str(&String::from_utf8_lossy(&message))
-                        }
-                        _ => {}
-                    },
-                    Err(e) => return Err(Error::Api(e)),
-                }
-            }
-        }
-        let code = self.wait_exec_code(&exec.id).await?;
+            .map_err(|e| Error::Connect(format!("exec 输出读取失败：{e}")))?;
+        let code = self.wait_exec_code(&exec_id).await?;
         Ok(ExecOnce {
             code,
             stdout,
@@ -318,6 +340,51 @@ pub struct ExecOnce {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+
+/// `mpsc::Sender<Bytes>` 的 AsyncWrite 适配器（等价 tokio-util PollSender+SinkWriter，
+/// 不引入额外 feature）。缓冲满时返回 Pending 待唤醒。
+pub(crate) struct SenderWriter {
+    pub(crate) tx: Option<tokio::sync::mpsc::UnboundedSender<hyper::body::Bytes>>,
+}
+
+impl tokio::io::AsyncWrite for SenderWriter {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let Some(tx) = self.tx.as_mut() else {
+            return std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "exec stdin 已关闭",
+            )));
+        };
+        // unbounded channel：终端 stdin 流量极小，无需背压协调
+        match tx.send(hyper::body::Bytes::copy_from_slice(data)) {
+            Ok(()) => std::task::Poll::Ready(Ok(data.len())),
+            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                e.to_string(),
+            ))),
+        }
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        self.tx = None;
+        std::task::Poll::Ready(Ok(()))
+    }
 }
 
 #[cfg(test)]

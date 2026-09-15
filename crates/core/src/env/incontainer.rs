@@ -440,25 +440,40 @@ fn ensure_ets_symlink() {
 /// 对的。符号链接用 -h 语义。扫描失败仅 warn（极端大目录慢，但不阻断启动）。
 fn ensure_home_ownership(home: &str, uid: u32, gid: u32) {
     let scan_root = home_ownership_scan_root(home);
-    // use std::process::Command;
-    // let run = Command::new("/usr/bin/find")
-    //     .arg(&scan_root)
-    //     .args(["-xdev", "(", "!", "-uid", &uid.to_string(), "-o", "!", "-gid", &gid.to_string(), ")"])
-    //     .arg("-exec")
-    //     .arg("chown")
-    //     .arg("-h")
-    //     .arg(format!("{uid}:{gid}"))
-    //     .arg("{}")
-    //     .arg("+")
-    //     .output();
-    // match run {
-    //     Ok(out) if out.status.success() => {}
-    //     Ok(out) => tracing::warn!(
-    //         "prepare: 家目录归属自愈未完成（不影响启动）：{}",
-    //         String::from_utf8_lossy(&out.stderr).trim()
-    //     ),
-    //     Err(e) => tracing::warn!("prepare: 家目录自愈 find 不可用：{e}"),
-    // }
+    // find ! -uid/-gid + chown -h：只动错的不碰对的；-xdev 自动跳过 bind-mount；
+    // -h 让符号链接自身归位而非链接目标。外部 find/chown 不可用或失败仅告警，
+    // 不阻断启动（自愈是尽力而为，属主问题下次启动仍会尝试）。
+    let run = std::process::Command::new("/usr/bin/find")
+        .arg(&scan_root)
+        .args([
+            "-xdev",
+            "(",
+            "!",
+            "-uid",
+            &uid.to_string(),
+            "-o",
+            "!",
+            "-gid",
+            &gid.to_string(),
+            ")",
+        ])
+        .arg("-exec")
+        .arg("/usr/bin/chown")
+        .arg("-h")
+        .arg(format!("{uid}:{gid}"))
+        .arg("{}")
+        .arg("+")
+        .output();
+    match run {
+        Ok(out) if out.status.success() => {
+            tracing::debug!("prepare: 家目录归属自愈完成（扫描根 {}）", scan_root.display());
+        }
+        Ok(out) => tracing::warn!(
+            "prepare: 家目录归属自愈未完成（不影响启动）：{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => tracing::warn!("prepare: 家目录自愈 find 不可用：{e}"),
+    }
 }
 
 /// `ensure_home_ownership` 的扫描根解析（纯函数）。

@@ -10,10 +10,10 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-bollard = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
+http-body = { workspace = true }
 tower-service = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }

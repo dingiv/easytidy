@@ -1,7 +1,7 @@
-//! podman socket API 客户端（bollard 封装）。
+//! podman socket API 客户端（自研 unix-socket HTTP，含 libpod 扩展端点）。
 //!
 //! 连接 rootless podman user socket（$XDG_RUNTIME_DIR/podman/podman.sock），
-//! 通过 bollard Docker compat API + libpod 扩展端点管理容器生命周期。
+//! 通过 Docker compat API + libpod 扩展端点管理容器生命周期。
 //!
 //! ## 标签方案
 //!
@@ -15,10 +15,14 @@ use crate::models::{
     ContainerConfig, ContainerConfigView, ContainerParams, ContainerSummary, ImageSummary,
     MountConfig, NetworkConfig, NetworkMode, PortMapping, RebuildImageEntry,
 };
-use bollard::Docker;
+use http_body_util::BodyExt;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// podman unix-socket HTTP 传输（自研；见 http.rs）
+pub(crate) mod http;
+pub(crate) use http::HttpClient;
 /// 宿主侧 exec（PTY 会话 + 非 tty 一次性；见 exec.rs）
 pub mod exec;
 pub use exec::{ExecOnce, ExecPty};
@@ -27,11 +31,16 @@ pub mod user;
 
 /// Podman 客户端封装。
 pub struct Podman {
-    /// bollard Docker 实例（Docker compat API）
-    pub(super) docker: Docker,
+    /// unix-socket HTTP 客户端（compat + libpod 共用）
+    pub(super) http: HttpClient,
 }
 
 impl Podman {
+    /// 共享 HTTP 客户端（events 等模块使用）。
+    pub(crate) fn http(&self) -> &HttpClient {
+        &self.http
+    }
+
     /// easytidy 容器内二进制的挂载目录（tmpfs `/run` 下，学 podman-init）。
     ///
     /// 用 `/run/easytidy-bin/`（**不是** `/run/easytidy/bin`）——`/run/easytidy`
@@ -170,23 +179,9 @@ impl Podman {
     ///    安装或启动失败时的回退，保持原有行为。
     /// 连接后调用 ping 协商版本（Docker-v29 教训：永不硬编码 API 版本）。
     pub async fn connect() -> Result<Self> {
-        let socket_path = Self::connect_fork_or_system_socket()?;
-
-        // bollard 的 UnixStream 需要明确路径字符串
-        let socket_str = socket_path
-            .to_str()
-            .ok_or_else(|| Error::Connect("socket 路径非法 UTF-8".to_string()))?;
-
-        // 使用 bollard 的 connect_with_unix 方法
-        let docker = Docker::connect_with_unix(socket_str, 120, bollard::API_DEFAULT_VERSION)
-            .map_err(|e| Error::Connect(format!("连接 podman 失败：{e}")))?;
-
-        let mut client = Self { docker };
-
-        // 协商版本（验证连接并获取 podman 支持的最高 API 版本）
-        client.negotiate_version().await?;
-
-        Ok(client)
+        // HttpClient::connect 内部完成 socket 选择 + /version 协商（路径前缀）
+        let http = HttpClient::connect().await?;
+        Ok(Self { http })
     }
 
     /// 决定连接哪个 socket：优先 fork（可自动拉起），失败回退系统。
@@ -216,68 +211,42 @@ impl Podman {
         Ok(system_sock)
     }
 
-    /// 协商 API 版本（ping podman 并获取服务器版本）。
-    ///
-    /// bollard 默认使用最新 API 版本；某些 podman 版本可能不支持。
-    /// 此方法验证连接并可选地降级到特定版本（失败时 pin ClientVersion）。
-    async fn negotiate_version(&mut self) -> Result<()> {
-        let version = self
-            .docker
-            .version()
-            .await
-            .map_err(|e| Error::Connect(format!("版本协商失败：{e}")))?;
-
-        tracing::debug!(
-            "podman 版本：API={}, OS={}",
-            version.api_version.unwrap_or_default(),
-            version.os.unwrap_or_default()
-        );
-
-        // TODO: 如果 API 版本过老，可以在这里降级
-        // 目前 bollard 0.18 支持 Docker API 1.43+，对应 podman 5.2+
-
-        Ok(())
-    }
-
     /// 列出所有容器（包括停止的）。
     ///
     /// 从 podman 投影为 `ContainerSummary`，按 `manager=easytidy` 标签判定 `managed`。
     pub async fn list_containers(&self) -> Result<Vec<ContainerSummary>> {
-        use bollard::container::ListContainersOptions;
-
-        let opts = ListContainersOptions::<String> {
-            all: true,
-            ..Default::default()
-        };
-
-        let containers = self.docker.list_containers(Some(opts)).await?;
-
-        let result: Vec<ContainerSummary> = containers
+        let containers = self
+            .http
+            .json_ok("GET", "/containers/json?all=1", None)
+            .await?;
+        let arr = containers.as_array().cloned().unwrap_or_default();
+        Ok(arr
             .into_iter()
             .filter_map(|c| self.map_container_summary(c))
-            .collect();
-
-        Ok(result)
+            .collect())
     }
 
-    /// 从 bollard ContainerSummary 映射为我们的模型。
-    fn map_container_summary(
-        &self,
-        c: bollard::models::ContainerSummary,
-    ) -> Option<ContainerSummary> {
-        let name = c.names?.first()?.trim_start_matches('/').to_string();
-        let id = c.id?;
-        let image = c.image.unwrap_or_default();
-        let status = c.state.unwrap_or_else(|| "unknown".to_string());
-
-        // 按标签判定是否为 easytidy 管理
+    /// 从 compat /containers/json 条目映射为我们的模型。
+    fn map_container_summary(&self, c: Value) -> Option<ContainerSummary> {
+        let names = c.get("Names")?.as_array()?.first()?.as_str()?.to_string();
+        let name = names.trim_start_matches('/').to_string();
+        let id = c.get("Id")?.as_str()?.to_string();
+        let image = c
+            .get("Image")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let status = c
+            .get("State")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
         let managed = c
-            .labels
-            .as_ref()
-            .and_then(|labels| labels.get("manager"))
+            .get("Labels")
+            .and_then(|l| l.get("manager"))
+            .and_then(|v| v.as_str())
             .map(|v| v == "easytidy")
             .unwrap_or(false);
-
         Some(ContainerSummary {
             name,
             id: id.chars().take(12).collect(), // 短 ID
@@ -292,8 +261,8 @@ impl Podman {
     /// GUI「环境信息」界面与后续存储健康检测（doctor）共用。只读、无副作用，
     /// 可随时调用。
     pub async fn engine_info(&self) -> Result<crate::models::EngineInfo> {
-        let info = self.docker.info().await?;
-        let mut e = map_system_info(info);
+        let info = self.http.json_ok("GET", "/info", None).await?;
+        let mut e = map_system_info(&info);
         // 宿主侧补充：overlay 挂载方式（native vs fuse-overlayfs）——/info 不
         // 区分（两者都报 Driver=overlay），可靠信号是 storage.conf 的
         // mount_program（libpod /info 的 Store 字段实测为空）
@@ -425,7 +394,6 @@ impl Podman {
         config: &ContainerConfig,
         fast: bool,
     ) -> Result<String> {
-        use bollard::models::{HostConfig, Mount, MountTypeEnum, PortBinding};
         use std::collections::HashMap;
 
         // 透传注入（幂等，同 key/同挂载目标去重）：创建入口统一兜底——模板路径
@@ -454,45 +422,35 @@ impl Podman {
         labels.insert("manager".to_string(), "easytidy".to_string());
         labels.insert("easytidy.name".to_string(), name.to_string());
 
+        // bind mount 条目（Docker-compat Mount JSON 形状）
+        let bind = |source: String, target: &str, read_only: bool| {
+            serde_json::json!({
+                "Type": "bind",
+                "Source": source,
+                "Target": target,
+                "ReadOnly": read_only,
+            })
+        };
+
         // 构建挂载：server 二进制 + dock 二进制 + socket 目录 + 用户配置的
         // bind mounts
         let mut mounts = vec![
             // Server 二进制（只读）
-            Mount {
-                typ: Some(MountTypeEnum::BIND),
-                source: Some(bins.server.to_string_lossy().to_string()),
-                target: Some(Self::SERVER_TARGET.to_string()),
-                read_only: Some(true),
-                ..Default::default()
-            },
+            bind(bins.server.to_string_lossy().to_string(), Self::SERVER_TARGET, true),
             // dock 二进制（只读）：容器内 root 工具（prepare 容器准备 + root
             // 终端通道 daemon/client；musl 静态，零容器内命令依赖）
-            Mount {
-                typ: Some(MountTypeEnum::BIND),
-                source: Some(bins.dock.to_string_lossy().to_string()),
-                target: Some(Self::DOCK_TARGET.to_string()),
-                read_only: Some(true),
-                ..Default::default()
-            },
+            bind(bins.dock.to_string_lossy().to_string(), Self::DOCK_TARGET, true),
             // Socket 目录（可写）
-            Mount {
-                typ: Some(MountTypeEnum::BIND),
-                source: Some(socket_host_dir.to_string_lossy().to_string()),
-                target: Some("/run/easytidy".to_string()),
-                read_only: Some(false),
-                ..Default::default()
-            },
+            bind(socket_host_dir.to_string_lossy().to_string(), "/run/easytidy", false),
         ];
         // ets 二进制（只读，可选）：宿主未安装时跳过（容器内无 ets 命令，
         // prepare 不建软链）
         if let Some(ets) = &bins.ets {
-            mounts.push(Mount {
-                typ: Some(MountTypeEnum::BIND),
-                source: Some(ets.to_string_lossy().to_string()),
-                target: Some(Self::ETS_TARGET.to_string()),
-                read_only: Some(true),
-                ..Default::default()
-            });
+            mounts.push(bind(
+                ets.to_string_lossy().to_string(),
+                Self::ETS_TARGET,
+                true,
+            ));
         }
         // 容器默认用户解析（新模型）：配置值优先，缺省取宿主登录用户；
         // 均不可得 → 报错（不再静默回退 root——root 模型已移除）。
@@ -517,13 +475,7 @@ impl Podman {
 
         for m in &user_mounts {
             validate_mount(m)?;
-            mounts.push(Mount {
-                typ: Some(MountTypeEnum::BIND),
-                source: Some(m.host_path.clone()),
-                target: Some(m.container_path.clone()),
-                read_only: Some(m.read_only),
-                ..Default::default()
-            });
+            mounts.push(bind(m.host_path.clone(), &m.container_path, m.read_only));
         }
 
         // 身份提示 env（server 侧身份自发现的兜底输入）：
@@ -536,19 +488,18 @@ impl Podman {
             env.push(format!("EASYTIDY_USER_NAME={name}"));
         }
 
-        // 构建 HostConfig
-        let mut host_config = HostConfig {
-            init: Some(true), // catatonit = PID 1
-            mounts: Some(mounts),
-            ..Default::default()
-        };
+        // 构建 HostConfig（JSON 形状与 Docker-compat 一致）
+        let mut host_config = serde_json::json!({
+            "Init": true, // catatonit = PID 1
+            "Mounts": mounts,
+        });
 
         // 网络配置（host ⇄ bridge+端口映射 切换）
         let mut exposed_ports: Option<HashMap<String, HashMap<(), ()>>> = None;
-        let mut port_bindings: Option<HashMap<String, Option<Vec<PortBinding>>>> = None;
+        let mut port_bindings: Option<serde_json::Value> = None;
         match config.params.network.mode {
             NetworkMode::Host => {
-                host_config.network_mode = Some("host".to_string());
+                host_config["NetworkMode"] = serde_json::json!("host");
                 if !config.params.network.ports.is_empty() {
                     tracing::warn!(
                         "容器 {} 网络模式为 host，端口映射不生效（已忽略）：{:?}",
@@ -561,7 +512,7 @@ impl Podman {
                 // 不设 network_mode → podman 默认 bridge
                 if !config.params.network.ports.is_empty() {
                     let mut exposed = HashMap::new();
-                    let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
+                    let mut bindings = serde_json::Map::new();
                     for p in &config.params.network.ports {
                         let protocol = if p.protocol.is_empty() {
                             "tcp"
@@ -578,18 +529,15 @@ impl Podman {
                         exposed.insert(key.clone(), HashMap::new());
                         bindings.insert(
                             key,
-                            Some(vec![PortBinding {
-                                host_ip: None,
-                                host_port: Some(p.host_port.to_string()),
-                            }]),
+                            serde_json::json!([{ "HostIp": "", "HostPort": p.host_port.to_string() }]),
                         );
                     }
                     exposed_ports = Some(exposed);
-                    port_bindings = Some(bindings);
+                    port_bindings = Some(serde_json::Value::Object(bindings));
                 }
             }
         }
-        host_config.port_bindings = port_bindings;
+        host_config["PortBindings"] = port_bindings.clone().unwrap_or(serde_json::Value::Null);
 
         // server Cmd：entry 链式拉起接通（此前 `entry` 字段存而不用——server
         // 支持 --entry 但创建时从未传入）。有 entry 才追加；entry + args
@@ -691,16 +639,8 @@ impl Podman {
         // 宿主 home 读写 / /run/user/1000（显示 socket）自然可达（GUI 窗口可用）。
         if config.params.keep_id {
             let libpod = crate::libpod::Libpod::new().await?;
-            // mounts / port_bindings 已在 host_config 中（早于本分支 move），从 host_config 取
-            let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
-                .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
-            let port_bindings_json = match &host_config.port_bindings {
-                Some(pb) => Some(
-                    serde_json::to_value(pb)
-                        .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?,
-                ),
-                None => None,
-            };
+            let mounts_json = host_config["Mounts"].clone();
+            let port_bindings_json = host_config.get("PortBindings").cloned();
             let body = crate::libpod::keep_id_create_body(
                 container_name,
                 name,
@@ -709,7 +649,7 @@ impl Podman {
                 env.clone(),
                 labels.clone(),
                 mounts_json.as_array().cloned().unwrap_or_default(),
-                host_config.network_mode.clone(),
+                host_config.get("NetworkMode").and_then(|v| v.as_str()).map(str::to_string),
                 exposed_ports.clone(),
                 port_bindings_json,
                 None,
@@ -729,15 +669,8 @@ impl Podman {
         }
         // 非 keep-id 路径同样走 libpod 端点创建（仅支持 podman；
         // 不带 userns，容器内 uid 落在宿主 subuid 段，User 字段仍为配置 uid:gid）
-        let mounts_json = serde_json::to_value(host_config.mounts.clone().unwrap_or_default())
-            .map_err(|e| Error::Config(format!("序列化 mounts 失败：{e}")))?;
-        let port_bindings_json = match &host_config.port_bindings {
-            Some(pb) => Some(
-                serde_json::to_value(pb)
-                    .map_err(|e| Error::Config(format!("序列化 port_bindings 失败：{e}")))?,
-            ),
-            None => None,
-        };
+        let mounts_json = host_config["Mounts"].clone();
+        let port_bindings_json = host_config.get("PortBindings").cloned();
         let libpod = crate::libpod::Libpod::new().await?;
         let body = crate::libpod::keep_id_create_body(
             container_name,
@@ -747,7 +680,7 @@ impl Podman {
             env,
             labels,
             mounts_json.as_array().cloned().unwrap_or_default(),
-            host_config.network_mode.clone(),
+            host_config.get("NetworkMode").and_then(|v| v.as_str()).map(str::to_string),
             exposed_ports,
             port_bindings_json,
             None,
@@ -875,7 +808,7 @@ impl Podman {
     /// 探测镜像的 /etc/passwd（建一次性普通容器 → 读 archive → 删除）。
     ///
     /// 用于挂载路径容器侧 `${HOME}`/`${USER}` 展开（未配 user_name 时）。
-    /// 进程内按 image 名缓存（镜像 passwd 会话内视为不可变）。纯 bollard/libpod
+    /// 进程内按 image 名缓存（镜像 passwd 会话内视为不可变）。纯 HTTP API
     /// API，不依赖 podman CLI（铁律：零 podman CLI 调用）。
     async fn image_passwd(&self, image: &str) -> Result<String> {
         // 缓存命中 → 直接返回
@@ -884,24 +817,20 @@ impl Podman {
         }
 
         let probe_name = format!("easytidy-probe-{}", uuid::Uuid::new_v4().simple());
-        let options = bollard::container::CreateContainerOptions {
-            name: probe_name,
-            platform: None,
-        };
-        let config = bollard::container::Config {
-            image: Some(image.to_string()),
-            ..Default::default()
-        };
-
         let created = self
-            .docker
-            .create_container(Some(options), config)
+            .http
+            .json_ok(
+                "POST",
+                &format!("/containers/create?name={probe_name}"),
+                Some(serde_json::json!({ "Image": image })),
+            )
             .await
             .map_err(|e| Error::Connect(format!("探测容器创建失败（{image}）：{e}")))?;
 
         // 读 /etc/passwd（archive）；无论读成功与否都清理探测容器
-        let read = self.read_container_file(&created.id, "/etc/passwd").await;
-        if let Err(e) = self.docker.remove_container(&created.id, None).await {
+        let probe_id = created.get("Id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let read = self.read_container_file(&probe_id, "/etc/passwd").await;
+        if let Err(e) = self.remove(&probe_id, false).await {
             tracing::warn!("探测容器清理失败（忽略）：{e}");
         }
 
@@ -913,19 +842,16 @@ impl Podman {
 
     /// 从已创建（未启动）容器读取单个文件（archive GET → tar → 解出）。
     async fn read_container_file(&self, id: &str, path: &str) -> Result<String> {
-        use bollard::container::DownloadFromContainerOptions;
-        use futures::StreamExt;
-
-        let options = DownloadFromContainerOptions {
-            path: path.to_string(),
-        };
-        let mut stream = self.docker.download_from_container(id, Some(options));
-        let mut buf: Vec<u8> = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| Error::Connect(format!("读取 {path} 失败：{e}")))?;
-            buf.extend_from_slice(&chunk);
-        }
-        parse_passwd_from_tar(&buf)
+        let (_, bytes) = self
+            .http
+            .request_bytes(
+                "GET",
+                &format!("/containers/{id}/archive?path={}", Self::urlquery_encode(path)),
+                None,
+            )
+            .await
+            .map_err(|e| Error::Connect(format!("读取 {path} 失败：{e}")))?;
+        parse_passwd_from_tar(&bytes)
     }
 
     /// 环境快照:把运行中容器 commit 成镜像 `easytidy/snapshot/<snapshot_name>`
@@ -976,7 +902,7 @@ impl Podman {
         // 新容器 base——下次 create 时再注入 easytidy 自己的 labels，所以这里
         // 清空所有 label 不影响后续识别逻辑。podman 5.4.2 无 `--unsetlabel`，
         // 唯一可控路径是 commit 时传 `changes=LABEL=foo=`（空值覆盖）。
-        let changes = self.build_label_clear_changes(name).await;
+        let changes = self.build_label_clear_changes(name).await?;
         tracing::info!(
             "环境 {} 快照:清空 {} 个 labels 后 commit → {}",
             name,
@@ -1011,15 +937,22 @@ impl Podman {
     /// podman 5.4.2 commit 不支持真正删除 label——commit 时传 `LABEL=foo=`
     /// 把 image 的 label value 改成空串，敏感内容（路径 / env / 端口）消失。
     /// key 仍存在但 value 清空（podman 设计上不允许从 image 删 label key）。
-    async fn build_label_clear_changes(&self, name: &str) -> Vec<String> {
-        let labels = match self.docker.inspect_container(name, None).await {
-            Ok(detail) => detail.config.and_then(|c| c.labels).unwrap_or_default(),
-            Err(e) => {
-                tracing::warn!("快照时读取容器 labels 失败（labels 会原样保留在快照镜像）：{e}");
-                return Vec::new();
-            }
-        };
-        labels.into_keys().map(|k| format!("LABEL={k}=")).collect()
+    async fn build_label_clear_changes(&self, name: &str) -> Result<Vec<String>> {
+        let detail = self
+            .inspect_compat(name)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("容器 {name} 不存在")))?;
+        let labels = detail
+            .get("Config")
+            .and_then(|c| c.get("Labels"))
+            .and_then(|l| l.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let mut changes = Vec::new();
+        for k in labels.keys() {
+            changes.push(format!("LABEL={k}="));
+        }
+        Ok(changes)
     }
 
     /// 重建容器（应用配置变更：mounts / 网络映射，创建后不可变 → 必须重建）。
@@ -1221,20 +1154,15 @@ impl Podman {
     /// 容器存在且是 easytidy 管理的（`manager=easytidy` 标签）→ true。
     /// 不存在 → false（不报错）。
     async fn has_easytidy_container(&self, name: &str) -> Result<bool> {
-        let detail = match self.docker.inspect_container(name, None).await {
-            Ok(d) => d,
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("404") || msg.contains("No such") || msg.contains("not found") {
-                    return Ok(false);
-                }
-                return Err(Error::Connect(format!("检查容器 {name} 失败：{msg}")));
-            }
+        let Some(detail) = self.inspect_compat(name).await? else {
+            return Ok(false);
         };
         Ok(detail
-            .config
-            .and_then(|c| c.labels)
-            .map(|l| l.get("manager").map(|v| v == "easytidy").unwrap_or(false))
+            .get("Config")
+            .and_then(|c| c.get("Labels"))
+            .and_then(|l| l.get("manager"))
+            .and_then(|v| v.as_str())
+            .map(|v| v == "easytidy")
             .unwrap_or(false))
     }
 
@@ -1322,47 +1250,45 @@ impl Podman {
     /// - 端口: `NetworkSettings.Ports`（实际生效的端口绑定）
     pub async fn inspect_config(&self, name: &str) -> Result<ContainerConfigView> {
         let info = self
-            .docker
-            .inspect_container(name, None)
-            .await
-            .map_err(|e| Error::Connect(format!("检查容器配置失败：{e}")))?;
+            .inspect_compat(name)
+            .await?
+            .ok_or_else(|| Error::Connect(format!("检查容器配置失败：{name} 不存在")))?;
 
-        // mounts（仅 bind 类型；MountPoint.RW = true 表示可写）
         let mut mounts = Vec::new();
-        if let Some(mount_list) = info.mounts.clone() {
+        if let Some(mount_list) = info.get("Mounts").and_then(|m| m.as_array()).cloned() {
             for m in mount_list {
-                if m.typ != Some(bollard::models::MountPointTypeEnum::BIND) {
+                if m.get("Type").and_then(|t| t.as_str()) != Some("bind") {
                     continue;
                 }
                 mounts.push(MountConfig {
-                    host_path: m.source.unwrap_or_default(),
-                    container_path: m.destination.unwrap_or_default(),
-                    read_only: !m.rw.unwrap_or(true),
+                    host_path: m.get("Source").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    container_path: m.get("Destination").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    read_only: !m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
                 });
             }
         }
 
-        // 网络模式（"host" → Host，其余按 Mapped 展示）
         let host_network = info
-            .host_config
-            .as_ref()
-            .and_then(|h| h.network_mode.as_deref())
+            .get("HostConfig")
+            .and_then(|h| h.get("NetworkMode"))
+            .and_then(|m| m.as_str())
             .is_some_and(|m| m == "host");
 
-        // 端口映射（NetworkSettings.Ports：key = "<container_port>/<protocol>"）
         let mut ports = Vec::new();
-        if let Some(port_map) = info.network_settings.as_ref().and_then(|n| n.ports.clone()) {
+        if let Some(port_map) = info
+            .get("NetworkSettings")
+            .and_then(|n| n.get("Ports"))
+            .and_then(|p| p.as_object())
+            .cloned()
+        {
             for (key, bindings) in port_map {
-                let Some((port, protocol)) = key.split_once('/') else {
-                    continue;
-                };
-                let Ok(container_port) = port.parse::<u16>() else {
-                    continue;
-                };
+                let Some((port, protocol)) = key.split_once('/') else { continue };
+                let Ok(container_port) = port.parse::<u16>() else { continue };
                 let host_port = bindings
-                    .as_ref()
+                    .as_array()
                     .and_then(|b| b.first())
-                    .and_then(|b| b.host_port.as_ref())
+                    .and_then(|b| b.get("HostPort"))
+                    .and_then(|p| p.as_str())
                     .and_then(|p| p.parse::<u16>().ok())
                     .unwrap_or(0);
                 ports.push(PortMapping {
@@ -1374,31 +1300,19 @@ impl Podman {
             ports.sort_by_key(|p| p.container_port);
         }
 
-        // env（含系统注入 EASYTIDY_USER_* 与 podman 自动补的 PATH/HOSTNAME/TERM/HOME——
-        // GUI 对比时过滤后子集比较，见 ConfigManager.tsx envRestartEqual）
         let env = info
-            .config
-            .as_ref()
-            .and_then(|c| c.env.clone())
+            .get("Config")
+            .and_then(|c| c.get("Env"))
+            .and_then(|e| e.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
             .unwrap_or_default();
-
-        // 容器进程用户（新模型 = 配置值 <uid>:<gid>；旧 root 容器为 "0:0"）
-        let user = info.config.as_ref().and_then(|c| c.user.clone());
-
-        // userns 模式（keep-id 容器实际可能回显 "private"/None——语义以 keep_id + docs/12 为准）
-        let userns_mode = info
-            .host_config
-            .as_ref()
-            .and_then(|h| h.userns_mode.clone());
+        let user = info.get("Config").and_then(|c| c.get("User")).and_then(|u| u.as_str()).map(str::to_string);
+        let userns_mode = info.get("HostConfig").and_then(|h| h.get("UsernsMode")).and_then(|u| u.as_str()).map(str::to_string);
 
         Ok(ContainerConfigView {
             mounts,
             network: NetworkConfig {
-                mode: if host_network {
-                    NetworkMode::Host
-                } else {
-                    NetworkMode::Mapped
-                },
+                mode: if host_network { NetworkMode::Host } else { NetworkMode::Mapped },
                 ports,
             },
             env,
@@ -1407,26 +1321,69 @@ impl Podman {
         })
     }
 
+
+
+
+    /// compat inspect（GET /containers/{name}/json）。不存在 → Ok(None)。
+    async fn inspect_compat(&self, name: &str) -> Result<Option<Value>> {
+        let (status, body) = self
+            .http
+            .json(
+                "GET",
+                &format!("/containers/{}/json", Self::urlquery_encode(name)),
+                None,
+            )
+            .await
+            .map_err(|e| Error::Connect(format!("检查容器 {name} 失败：{e}")))?;
+        if (200..300).contains(&status) {
+            Ok(Some(body))
+        } else if status == 404 {
+            Ok(None)
+        } else {
+            Err(Error::Connect(format!(
+                "检查容器 {name} 失败：HTTP {status}：{}",
+                body.get("message").and_then(|m| m.as_str()).unwrap_or("")
+            )))
+        }
+    }
+
+    /// query 值 URL 编码（保留 `/`——podman archive 路径需要）。
+    fn urlquery_encode(s: &str) -> String {
+        s.chars()
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | '/' => c.to_string(),
+                _ => {
+                    let mut out = String::new();
+                    for b in c.to_string().bytes() {
+                        out.push_str(&format!("%{:02X}", b));
+                    }
+                    out
+                }
+            })
+            .collect()
+    }
+
     /// 查询容器是否运行中。
     async fn is_running(&self, name_or_id: &str) -> Result<bool> {
         let info = self
-            .docker
-            .inspect_container(name_or_id, None)
-            .await
-            .map_err(|e| Error::Connect(format!("检查容器状态失败：{e}")))?;
-        Ok(info.state.and_then(|s| s.running).unwrap_or(false))
+            .inspect_compat(name_or_id)
+            .await?
+            .ok_or_else(|| Error::Connect(format!("检查容器状态失败：{name_or_id} 不存在")))?;
+        Ok(info
+            .get("State")
+            .and_then(|s| s.get("Running"))
+            .and_then(|r| r.as_bool())
+            .unwrap_or(false))
     }
 
     /// 重命名容器（重建时释放正式名 / 回滚时换回）。
     async fn rename(&self, old: &str, new: &str) -> Result<()> {
-        use bollard::container::RenameContainerOptions;
-
-        self.docker
-            .rename_container(
-                old,
-                RenameContainerOptions {
-                    name: new.to_string(),
-                },
+        let _: Value = self
+            .http
+            .json_ok(
+                "POST",
+                &format!("/containers/{}/rename?name={}", Self::urlquery_encode(old), Self::urlquery_encode(new)),
+                None,
             )
             .await
             .map_err(|e| Error::Connect(format!("重命名容器失败（{old} → {new}）：{e}")))?;
@@ -1467,75 +1424,49 @@ impl Podman {
         &self,
         name: &str,
     ) -> Result<Option<crate::models::ContainerStateView>> {
-        let info = match self.docker.inspect_container(name, None).await {
-            Ok(i) => i,
-            Err(e) => {
-                // bollard 对不存在的容器返回 404；按"不存在"返回 None 而非错误
-                let msg = e.to_string();
-                if msg.contains("404") || msg.contains("No such") || msg.contains("not found") {
-                    return Ok(None);
-                }
-                return Err(Error::Connect(format!("检查容器状态失败：{e}")));
-            }
-        };
-        let Some(state) = info.state else {
+        let Some(info) = self.inspect_compat(name).await? else {
             return Ok(None);
         };
-        // bollard 的 ContainerStateStatusEnum 是封闭枚举，通过 Debug 取大写变体名
-        // （如 "Running" / "Exited" / "Created"）→ 转小写得到 podman 原生状态字符串。
-        // 比硬编码 match 列表更鲁棒（bollard 新增变体时自动兼容）。
+        let Some(state) = info.get("State") else {
+            return Ok(None);
+        };
+        // compat API 的 State.Status 本就是小写字符串（"running"/"exited"/...）
         let status_str = state
-            .status
-            .map(|s| format!("{:?}", s).to_lowercase())
-            .unwrap_or_else(|| "unknown".into());
+            .get("Status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("unknown")
+            .to_string();
 
         Ok(Some(crate::models::ContainerStateView {
-            running: state.running.unwrap_or(false),
+            running: state.get("Running").and_then(|r| r.as_bool()).unwrap_or(false),
             status: status_str,
-            exit_code: state.exit_code,
-            error: state.error.filter(|s| !s.is_empty()),
+            exit_code: state.get("ExitCode").and_then(|c| c.as_i64()),
+            error: state
+                .get("Error")
+                .and_then(|e| e.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string),
         }))
     }
 
     /// 容器日志（podman logs 等价）：合并 stdout + stderr，按 `tail_lines` 取尾。
     ///
-    /// `tail_lines = 0` → bollard 传 "all"（全部历史日志）。容器不存在 / 已删除
+    /// `tail_lines = 0` → 传 "all"（全部历史日志）。容器不存在 / 已删除
     /// → 返回 Err（调用方按"不存在"处理）。`tail_lines` 上限 10000 行避免单次返回过大。
     pub async fn container_logs(&self, name: &str, tail_lines: usize) -> Result<String> {
-        use bollard::container::{LogOutput, LogsOptions};
-        use futures::StreamExt;
-
         let tail = if tail_lines == 0 {
             "all".to_string()
         } else {
             tail_lines.min(10000).to_string()
         };
-        let opts = Some(LogsOptions {
-            stdout: true,
-            stderr: true,
-            follow: false,
-            since: 0,
-            until: 0,
-            timestamps: false,
-            tail,
-        });
-
-        let mut stream = self.docker.logs(name, opts);
-        let mut output = String::new();
-        while let Some(item) = stream.next().await {
-            match item {
-                Ok(LogOutput::StdOut { message })
-                | Ok(LogOutput::StdErr { message })
-                | Ok(LogOutput::Console { message })
-                | Ok(LogOutput::StdIn { message }) => {
-                    output.push_str(&String::from_utf8_lossy(&message));
-                }
-                Err(e) => {
-                    return Err(Error::Connect(format!("读取容器日志失败：{e}")));
-                }
-            }
-        }
-        Ok(output)
+        let path = format!(
+            "/containers/{}/logs?stdout=true&stderr=true&tail={}",
+            Self::urlquery_encode(name),
+            tail
+        );
+        let (stdout, stderr) = self.http.read_demux_stream("GET", &path).await?;
+        // 顺序近似：podman 按时间交错写入两路；合并展示以 stdout 在前
+        Ok(format!("{stdout}{stderr}"))
     }
 
     /// 生成重建镜像 tag（容器名净化 + 时间戳，保证唯一）。
@@ -1576,13 +1507,16 @@ impl Podman {
     /// auto-start 应用由**容器内 server 启动自读拉起**（配置在容器内，容器自包含），
     /// 宿主侧不再推送。
     pub async fn start(&self, name_or_id: &str) -> Result<()> {
-        use bollard::container::StartContainerOptions;
-
         // bind-mount 源目录须已存在：开机后重建（见 ensure_socket_dir）
         self.ensure_socket_dir(name_or_id).await?;
 
-        self.docker
-            .start_container(name_or_id, None::<StartContainerOptions<String>>)
+        let _: Value = self
+            .http
+            .json_ok(
+                "POST",
+                &format!("/containers/{}/start", Self::urlquery_encode(name_or_id)),
+                None,
+            )
             .await
             .map_err(|e| Error::Connect(format!("启动容器失败：{e}")))?;
 
@@ -1592,13 +1526,14 @@ impl Podman {
 
     /// 停止容器（按名或 ID）。
     pub async fn stop(&self, name_or_id: &str) -> Result<()> {
-        use bollard::container::StopContainerOptions;
-
         // 默认 10 秒超时
-        let opts = StopContainerOptions { t: 10 };
-
-        self.docker
-            .stop_container(name_or_id, Some(opts))
+        let _: Value = self
+            .http
+            .json_ok(
+                "POST",
+                &format!("/containers/{}/stop?t=10", Self::urlquery_encode(name_or_id)),
+                None,
+            )
             .await
             .map_err(|e| Error::Connect(format!("停止容器失败：{e}")))?;
 
@@ -1611,16 +1546,19 @@ impl Podman {
     /// 重启语义即重新 boot：同样触发 passthrough auto-start 拉起（await，
     /// 原因见 [`Podman::start`]）。
     pub async fn restart(&self, name_or_id: &str) -> Result<()> {
-        use bollard::container::RestartContainerOptions;
-
         // bind-mount 源目录须已存在：开机后重建（见 ensure_socket_dir）
         self.ensure_socket_dir(name_or_id).await?;
 
-        // 默认 10 秒超时
-        let opts = RestartContainerOptions { t: 10 };
-
-        self.docker
-            .restart_container(name_or_id, Some(opts))
+        let _: Value = self
+            .http
+            .json_ok(
+                "POST",
+                &format!(
+                    "/containers/{}/restart?t=10",
+                    Self::urlquery_encode(name_or_id)
+                ),
+                None,
+            )
             .await
             .map_err(|e| Error::Connect(format!("重启容器失败：{e}")))?;
 
@@ -1633,21 +1571,23 @@ impl Podman {
     ///
     /// force: 是否强制删除（运行中的容器需要 force=true）。
     pub async fn remove(&self, name_or_id: &str, force: bool) -> Result<()> {
-        use bollard::container::RemoveContainerOptions;
-
-        let opts = RemoveContainerOptions {
-            force,
-            v: false, // 不删除匿名卷
-            ..Default::default()
-        };
-
-        match self.docker.remove_container(name_or_id, Some(opts)).await {
-            Ok(_) => {}
+        let path = format!(
+            "/containers/{}?{}",
+            Self::urlquery_encode(name_or_id),
+            if force { "force=1" } else { "" }
+        );
+        match self.http.request_bytes("DELETE", &path, None).await {
+            Ok((status, _)) if (200..300).contains(&status) || status == 404 => {}
+            Ok((404, _)) => {}
             // 容器本就不存在（被外部 Podman 客户端删过）——删除幂等，目标已达成，不报错
-            Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 404, ..
-            }) => {
+            Ok((404, _)) => {
                 tracing::info!("容器 {name_or_id} 本就不存在，视为已删除（外部删除）");
+            }
+            Ok((status, body)) => {
+                return Err(Error::Connect(format!(
+                    "删除容器失败：HTTP {status}：{}",
+                    String::from_utf8_lossy(&body).trim()
+                )));
             }
             Err(e) => return Err(Error::Connect(format!("删除容器失败：{e}"))),
         }
@@ -1658,61 +1598,61 @@ impl Podman {
 
     /// 检查镜像是否存在。
     async fn image_exists(&self, image: &str) -> Result<bool> {
-        match self.docker.inspect_image(image).await {
-            Ok(_) => Ok(true),
-            Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 404, ..
-            }) => Ok(false),
-            Err(e) => Err(Error::Api(e)),
-        }
+        let (status, _) = self
+            .http
+            .request_bytes(
+                "GET",
+                &format!("/images/{}/json", Self::urlquery_encode(image)),
+                None,
+            )
+            .await?;
+        Ok((200..300).contains(&status))
     }
 
-    /// 拉取镜像。
     /// 列出所有镜像（GUI 镜像管理）。
     pub async fn list_images(&self) -> Result<Vec<crate::models::ImageSummary>> {
-        use bollard::image::ListImagesOptions;
-
-        let images = self
-            .docker
-            .list_images(Some(ListImagesOptions::<String> {
-                all: false,
-                ..Default::default()
-            }))
-            .await
-            .map_err(Error::Api)?;
-
-        Ok(images
+        let images = self.http.json_ok("GET", "/images/json", None).await?;
+        let arr = images.as_array().cloned().unwrap_or_default();
+        Ok(arr
             .into_iter()
             .map(|i| crate::models::ImageSummary {
-                // bollard ImageSummary 字段非 Option（id: String, repo_tags: Vec, ...）
                 id: i
-                    .id
+                    .get("Id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
                     .trim_start_matches("sha256:")
                     .chars()
                     .take(12)
                     .collect(),
-                repo_tags: i.repo_tags,
-                size: i.size as u64,
-                created: i.created,
+                repo_tags: i
+                    .get("RepoTags")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                size: i.get("Size").and_then(|v| v.as_i64()).unwrap_or(0) as u64,
+                created: i.get("Created").and_then(|v| v.as_i64()).unwrap_or(0),
             })
             .collect())
     }
 
     /// 删除镜像（force 强制删除被引用镜像）。
     pub async fn remove_image(&self, name: &str, force: bool) -> Result<()> {
-        use bollard::image::RemoveImageOptions;
-
-        self.docker
-            .remove_image(
-                name,
-                Some(RemoveImageOptions {
-                    force,
-                    ..Default::default()
-                }),
-                None,
-            )
-            .await
-            .map_err(Error::Api)?;
+        let path = format!(
+            "/images/{}?{}",
+            Self::urlquery_encode(name),
+            if force { "force=1" } else { "" }
+        );
+        let (status, body) = self.http.request_bytes("DELETE", &path, None).await?;
+        if !(200..300).contains(&status) {
+            return Err(Error::Connect(format!(
+                "删除镜像失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&body).trim()
+            )));
+        }
         tracing::info!("镜像已删除：{name}");
         Ok(())
     }
@@ -1728,46 +1668,55 @@ impl Podman {
         &self,
         images: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>> {
-        use bollard::container::ListContainersOptions;
-
         // 1. 解析每个目标镜像的完整 ID（去 `sha256:` 前缀归一，便于比对）。
         let norm = |s: String| s.trim_start_matches("sha256:").to_string();
         let mut image_ids: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         for image in images {
-            match self.docker.inspect_image(image).await {
-                Ok(img) => {
-                    image_ids.insert(image.clone(), norm(img.id.unwrap_or_default()));
-                }
-                Err(_) => {
-                    // 镜像不存在 → 无容器占用（必然可删）
-                    image_ids.insert(image.clone(), String::new());
-                }
-            }
+            let id = match self
+                .http
+                .json_ok(
+                    "GET",
+                    &format!("/images/{}/json", Self::urlquery_encode(image)),
+                    None,
+                )
+                .await
+            {
+                Ok(img) => img
+                    .get("Id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                Err(_) => String::new(), // 镜像不存在 → 无容器占用（必然可删）
+            };
+            image_ids.insert(image.clone(), norm(id));
         }
 
         // 2. 列出所有容器（list 响应已带 ImageID，all=true 含已停止）。
         let containers = self
-            .docker
-            .list_containers(Some(ListContainersOptions::<String> {
-                all: true,
-                ..Default::default()
-            }))
-            .await
-            .map_err(Error::Api)?;
+            .http
+            .json_ok("GET", "/containers/json?all=1", None)
+            .await?;
+        let arr = containers.as_array().cloned().unwrap_or_default();
 
         // 3. 按 ImageID 命中收集容器名。
         let mut result: std::collections::HashMap<String, Vec<String>> =
             images.iter().map(|i| (i.clone(), Vec::new())).collect();
-        for c in containers {
-            let image_id = norm(c.image_id.unwrap_or_default());
+        for c in arr {
+            let image_id = c
+                .get("ImageID")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let image_id = norm(image_id);
             if image_id.is_empty() {
                 continue;
             }
             let name = c
-                .names
-                .as_ref()
+                .get("Names")
+                .and_then(|n| n.as_array())
                 .and_then(|n| n.first())
+                .and_then(|n| n.as_str())
                 .map(|s| s.trim_start_matches('/').to_string())
                 .unwrap_or_default();
             if name.is_empty() {
@@ -1783,24 +1732,41 @@ impl Podman {
     }
 
     pub async fn pull_image(&self, image: &str) -> Result<()> {
-        use bollard::image::CreateImageOptions;
-        use futures::StreamExt;
-
-        let opts = CreateImageOptions {
-            from_image: image,
-            ..Default::default()
-        };
-
-        let mut stream = self.docker.create_image(Some(opts), None, None);
-
-        while let Some(result) = stream.next().await {
-            match result {
-                Ok(progress) => {
-                    if let Some(id) = progress.id {
-                        tracing::debug!("拉取进度：{} - {:?}", id, progress.status);
-                    }
+        let (status, body) = self
+            .http
+            .open_stream(
+                "POST",
+                &format!(
+                    "/images/create?fromImage={}",
+                    Self::urlquery_encode(image)
+                ),
+            )
+            .await
+            .map_err(|e| Error::Connect(format!("拉取镜像失败：{e}")))?;
+        if !(200..300).contains(&status) {
+            let bytes = body
+                .collect()
+                .await
+                .map_err(|e| Error::Connect(format!("拉取镜像失败：{e}")))?
+                .to_bytes();
+            return Err(Error::Connect(format!(
+                "拉取镜像失败：HTTP {status}：{}",
+                String::from_utf8_lossy(&bytes).trim()
+            )));
+        }
+        // 进度流：JSON 行（{"status":..., "id":...}），整体收集后逐行 debug 记录
+        let bytes = body
+            .collect()
+            .await
+            .map_err(|e| Error::Connect(format!("拉取镜像失败：{e}")))?
+            .to_bytes();
+        for line in String::from_utf8_lossy(&bytes).lines() {
+            if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {
+                let id = v.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let st = v.get("status").and_then(|v| v.as_str()).unwrap_or("");
+                if !id.is_empty() {
+                    tracing::debug!("拉取进度：{id} - {st}");
                 }
-                Err(e) => return Err(Error::Connect(format!("拉取镜像失败：{e}"))),
             }
         }
 
@@ -2014,38 +1980,64 @@ pub fn plan_rebuild_cleanup(images: &[ImageSummary]) -> Vec<RebuildImageEntry> {
     redundant
 }
 
-/// 映射 bollard `SystemInfo`（`/info` 响应）→ [`EngineInfo`]（纯函数，单测入口）。
+/// 映射 compat `/info` 响应 → [`EngineInfo`]（纯函数，单测入口）。
 ///
 /// rootless 判定：`SecurityOptions` 含 `name=rootless`（podman 5.x 实测：
 /// rootless 模式含此项，root 模式不含）。`DriverStatus` 是 `[key, value]` 对，
 /// 非两元组项忽略（不 panic）。
-fn map_system_info(info: bollard::models::SystemInfo) -> crate::models::EngineInfo {
+fn map_system_info(info: &Value) -> crate::models::EngineInfo {
     use crate::models::EngineInfo;
-    let security_options = info.security_options.clone().unwrap_or_default();
-    EngineInfo {
-        version: info.server_version,
-        storage_driver: info.driver,
-        storage_driver_status: info
-            .driver_status
+    let s = |k: &str| {
+        info.get(k)
+            .and_then(|v| v.as_str())
             .unwrap_or_default()
-            .into_iter()
-            .filter_map(|pair| match pair.as_slice() {
-                [k, v] => Some((k.clone(), v.clone())),
-                _ => None,
+            .to_string()
+    };
+    let opt_s = |k: &str| {
+        info.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+    };
+    let security_options: Vec<String> = info
+        .get("SecurityOptions")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    EngineInfo {
+        version: opt_s("ServerVersion"),
+        storage_driver: opt_s("Driver"),
+        storage_driver_status: info
+            .get("DriverStatus")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|pair| {
+                        let p = pair.as_array()?;
+                        if p.len() == 2 {
+                            Some((
+                                p[0].as_str()?.to_string(),
+                                p[1].as_str()?.to_string(),
+                            ))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
             })
-            .collect(),
-        storage_root: info.docker_root_dir,
+            .unwrap_or_default(),
+        storage_root: opt_s("DockerRootDir"),
         // overlay_mount_program 由 engine_info 宿主侧探测后填入（/info 不含）
         overlay_mount_program: None,
         rootless: security_options.iter().any(|s| s.contains("rootless")),
-        default_runtime: info.default_runtime,
-        cgroup_driver: info.cgroup_driver.map(|d| d.to_string()),
-        cgroup_version: info.cgroup_version.map(|v| v.to_string()),
-        os: info.operating_system,
-        kernel_version: info.kernel_version,
-        arch: info.architecture,
-        ncpu: info.ncpu.map(|n| n as u64),
-        mem_total: info.mem_total.map(|m| m as u64),
+        default_runtime: opt_s("DefaultRuntime"),
+        cgroup_driver: opt_s("CgroupDriver"),
+        cgroup_version: opt_s("CgroupVersion"),
+        os: opt_s("OperatingSystem"),
+        kernel_version: opt_s("KernelVersion"),
+        arch: opt_s("Architecture"),
+        ncpu: info.get("NCPU").and_then(|v| v.as_u64()),
+        mem_total: info.get("MemTotal").and_then(|v| v.as_u64()),
     }
 }
 
@@ -2269,7 +2261,7 @@ mod tests {
 
     #[test]
     fn test_libpod_body_portmappings_libpod_shape() {
-        // 入参为 bollard PortBinding 序列化的嵌套形状（**PascalCase**
+        // 入参为 compat PortBinding 序列化的嵌套形状（**PascalCase**
         // HostIp/HostPort，HostPort 为字符串）；libpod SpecGenerator 需要
         // 扁平 `portmappings` []PortMapping（host_port/container_port 为
         // 数字，container_port/protocol 从键推导）——形状不对时 libpod 静默
@@ -2739,30 +2731,26 @@ mod tests {
     #[test]
     fn test_map_system_info_rootless_and_driver_status() {
         // 根less 判定：SecurityOptions 含 "name=rootless"；DriverStatus 非两元组项忽略
-        use bollard::models::{
-            SystemInfo, SystemInfoCgroupDriverEnum, SystemInfoCgroupVersionEnum,
-        };
-        let si = SystemInfo {
-            server_version: Some("5.4.2".into()),
-            driver: Some("overlay".into()),
-            driver_status: Some(vec![
-                vec!["Backing Filesystem".into(), "extfs".into()],
-                vec!["Native Overlay Diff".into(), "false".into()],
-                vec!["BadSingle".into()], // 非两元组 → 忽略
-            ]),
-            docker_root_dir: Some("/home/u/.local/share/containers/storage".into()),
-            security_options: Some(vec!["name=apparmor".into(), "name=rootless".into()]),
-            default_runtime: Some("crun".into()),
-            cgroup_driver: Some(SystemInfoCgroupDriverEnum::SYSTEMD),
-            cgroup_version: Some(SystemInfoCgroupVersionEnum::_2),
-            operating_system: Some("ubuntu".into()),
-            kernel_version: Some("6.17.0-41-generic".into()),
-            architecture: Some("amd64".into()),
-            ncpu: Some(16),
-            mem_total: Some(63593201664),
-            ..Default::default()
-        };
-        let e = map_system_info(si);
+        let si = serde_json::json!({
+            "ServerVersion": "5.4.2",
+            "Driver": "overlay",
+            "DriverStatus": [
+                ["Backing Filesystem", "extfs"],
+                ["Native Overlay Diff", "false"],
+                ["BadSingle"],
+            ],
+            "DockerRootDir": "/home/u/.local/share/containers/storage",
+            "SecurityOptions": ["name=apparmor", "name=rootless"],
+            "DefaultRuntime": "crun",
+            "CgroupDriver": "systemd",
+            "CgroupVersion": "2",
+            "OperatingSystem": "ubuntu",
+            "KernelVersion": "6.17.0-41-generic",
+            "Architecture": "amd64",
+            "NCPU": 16,
+            "MemTotal": 63593201664u64,
+        });
+        let e = map_system_info(&si);
         assert_eq!(e.version.as_deref(), Some("5.4.2"));
         assert_eq!(e.storage_driver.as_deref(), Some("overlay"));
         assert_eq!(
@@ -2779,10 +2767,8 @@ mod tests {
         assert_eq!(e.mem_total, Some(63593201664));
 
         // root 模式（无 name=rootless）→ rootless=false
-        let root_si = SystemInfo {
-            security_options: Some(vec!["name=apparmor".into()]),
-            ..Default::default()
-        };
-        assert!(!map_system_info(root_si).rootless);
+        let mut root_si = si.clone();
+        root_si["SecurityOptions"] = serde_json::json!(["name=apparmor"]);
+        assert!(!map_system_info(&root_si).rootless);
     }
 }
