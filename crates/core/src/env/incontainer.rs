@@ -444,6 +444,10 @@ fn ensure_button_layout(home: &str, uid: u32, gid: u32) {
     } else {
         "/tmp".to_string()
     };
+    // 根治 exec 会话挂起：dbus-run-session 的孙子进程（dbus-daemon/dconf）
+    // 若继承任何会话管道，进程退出后输出流迟迟不 EOF，exec_oneshot 会等几分钟。
+    // 因此 stdio 全部接 null（不引用 dock exec 会话管道），错误详情不再逐字
+    // 捕获——失败仅以退出码告警（button-layout 是增强项，失败不影响其他功能）。
     let mut run = Command::new("/usr/bin/dbus-run-session");
     run.arg("--")
         .arg("/usr/bin/gsettings")
@@ -455,19 +459,16 @@ fn ensure_button_layout(home: &str, uid: u32, gid: u32) {
         .env("XDG_RUNTIME_DIR", &runtime_dir)
         .uid(uid)
         .gid(gid)
-        // 易泄漏点：dbus-run-session 的子孙（dbus-daemon/dconf）会继承本进程
-        // 的 stdout/stderr（= dock exec 会话管道），若它们多存活几分钟，
-        // exec_oneshot 的 EOF 等待就把整个重建拖住。stdin 接 null，输出走
-        // output() 自建管道（随 dbus-run-session 退出即闭），不引用会话管道。
-        .stdin(std::process::Stdio::null());
-    let out = run.output();
-    match out {
-        Ok(out) if out.status.success() => {
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match run.status() {
+        Ok(st) if st.success() => {
             tracing::info!("prepare: button-layout = {LAYOUT}（uid {uid}）");
         }
-        Ok(out) => tracing::warn!(
-            "prepare: 写 button-layout 失败（GUI 无最小化/最大化按钮，不影响其他功能）：{}",
-            String::from_utf8_lossy(&out.stderr).trim()
+        Ok(st) => tracing::warn!(
+            "prepare: 写 button-layout 失败（GUI 无最小化/最大化按钮，不影响其他功能）：退出码 {:?}",
+            st.code()
         ),
         Err(e) => tracing::warn!("prepare: 启动 dbus-run-session 失败：{e}"),
     }
