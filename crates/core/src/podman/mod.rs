@@ -1220,6 +1220,8 @@ impl Podman {
         let exec = self.exec_no_tty(container, "0", cmd).await?;
         // 等 bootstrap 进程退出（daemon 是其 setsid 子进程，bootstrap 退出后
         // 继续独立运行）。输出收集供 debug 溯源。
+        // 先关 stdin：否则请求体流不结束，输出流 EOF 永不到来（会话挂死）。
+        Self::exec_close_stdin(&exec.input).await;
         let mut stream = exec.output;
         let mut out = String::new();
         while let Some(item) = stream.next().await {
@@ -1399,6 +1401,8 @@ impl Podman {
             Ok(e) => e,
             Err(_) => return false,
         };
+        // 只读输出：立即关 stdin，否则输出流 EOF 永不到来（会话挂死）
+        Self::exec_close_stdin(&exec.input).await;
         let mut stream = exec.output;
         let mut buf = String::new();
         while let Some(item) = stream.next().await {

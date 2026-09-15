@@ -236,6 +236,19 @@ impl Podman {
         Ok(v.get("ExitCode").and_then(|c| c.as_i64()).map(|c| c as i32))
     }
 
+    /// 关闭 exec 会话的 stdin 写端。
+    ///
+    /// 只读消费 output 的调用方（bootstrap/ping 等"启动进程 → 等退出"模式）
+    /// 必须在读完前关闭 stdin：请求体流不结束，服务端的输出流 EOF 永远
+    /// 不会到来（会话管道被本结构的写端持有）。
+    pub async fn exec_close_stdin(
+        input: &Arc<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let mut w = input.lock().await;
+        let _ = w.shutdown().await;
+    }
+
     /// 写入 exec PTY stdin。
     pub async fn exec_pty_write(
         input: &Arc<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
