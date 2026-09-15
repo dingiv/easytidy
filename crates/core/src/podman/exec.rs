@@ -12,9 +12,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use futures::StreamExt;
-use http_body_util::BodyExt;
 use hyper::body::Bytes;
 use serde_json::Value;
+use hyper_util::rt::TokioIo;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
@@ -54,29 +54,51 @@ impl Podman {
         let body_bytes = serde_json::to_vec(&body)
             .map(Bytes::from)
             .map_err(|e| Error::Connect(format!("序列化 exec create body 失败：{e}")))?;
-        let (status, body) = self
+        let (status, resp) = self
             .http
             .request_bytes(
                 "POST",
-                &format!(
-                    "/containers/{}/exec",
-                    Self::urlquery_encode(container)
-                ),
+                &format!("/containers/{}/exec", Self::urlquery_encode(container)),
                 Some(body_bytes),
             )
             .await?;
         if !(200..300).contains(&status) {
             return Err(Error::Connect(format!(
                 "创建 exec 失败：HTTP {status}：{}",
-                String::from_utf8_lossy(&body).trim()
+                String::from_utf8_lossy(&resp).trim()
             )));
         }
-        let v: serde_json::Value = serde_json::from_slice(&body)
+        let v: serde_json::Value = serde_json::from_slice(&resp)
             .map_err(|e| Error::Connect(format!("解析 exec create 响应失败：{e}")))?;
         v.get("Id")
             .and_then(|i| i.as_str())
             .map(str::to_string)
             .ok_or_else(|| Error::Connect("exec create 响应缺少 Id".to_string()))
+    }
+
+    /// 启动 exec 并 **upgrade 连接**（Docker exec start 的 hijack 语义：
+    /// `Connection: Upgrade` + `Upgrade: tcp` → 101 → 裸双向流）。
+    ///
+    /// 返回升级后的裸 IO：读侧 = 容器进程 stdout/stderr（tty 时合流），
+    /// 写侧 = 容器进程 stdin。**写端保持打开**（关闭 = stdin EOF）。
+    async fn start_exec_upgraded(
+        &self,
+        exec_id: &str,
+        tty: bool,
+    ) -> Result<TokioIo<hyper::upgrade::Upgraded>> {
+        let (status, io) = self
+            .http
+            .request_upgrade(
+                "POST",
+                &format!("/exec/{}/start?tty={tty}", Self::urlquery_encode(exec_id)),
+            )
+            .await?;
+        if status != 101 {
+            return Err(Error::Connect(format!(
+                "exec start 未按预期升级连接（HTTP {status}）"
+            )));
+        }
+        Ok(TokioIo::new(io))
     }
 
     /// 在容器内以指定用户起交互进程（**不分配 TTY**）并挂接 stdio。
@@ -102,39 +124,16 @@ impl Podman {
                 "exec_no_tty 需要明确指定 cmd（client 子命令）".to_string(),
             ));
         }
-        let exec_id = self.create_exec(container, user, false, true, None, cmd).await;
-        let exec_id = match exec_id {
-            Ok(id) => id,
-            Err(e) => return Err(e),
-        };
-        let (status, body, input) = self
-            .http
-            .open_stream_with_stdin(
-                "POST",
-                &format!(
-                    "/exec/{}/start?tty=false",
-                    Self::urlquery_encode(&exec_id)
-                ),
-            )
+        let exec_id = self
+            .create_exec(container, user, false, true, None, cmd)
             .await?;
-        if !(200..300).contains(&status) {
-            let bytes = body
-                .collect()
-                .await
-                .map_err(|e| Error::Connect(format!("exec start 读流失败：{e}")))?
-                .to_bytes();
-            return Err(Error::Connect(format!(
-                "exec start 失败：HTTP {status}：{}",
-                String::from_utf8_lossy(&bytes).trim()
-            )));
-        }
-        // 非 tty：Docker 多路复用流 demux，stdout/stderr 合并为一股输出
-        let output = Box::pin(super::http::DemuxStream::new(body).map(|item| {
-            item.map_err(|e| Error::Connect(format!("exec 输出流读取失败：{e}")))
-        }));
+        let io = self.start_exec_upgraded(&exec_id, false).await?;
+        let (read_half, write_half) = tokio::io::split(io);
+        // 非 tty：Docker 多路复用流（8 字节帧头），后台任务 demux 为纯输出块流
+        let output = Box::pin(demux_read_stream(read_half));
         Ok(ExecPty {
             exec_id,
-            input,
+            input: Arc::new(Mutex::new(Box::pin(write_half))),
             output,
         })
     }
@@ -169,32 +168,16 @@ impl Podman {
                 cmd,
             )
             .await?;
-        let (status, body, input) = self
-            .http
-            .open_stream_with_stdin(
-                "POST",
-                &format!("/exec/{}/start?tty=true", Self::urlquery_encode(&exec_id)),
-            )
-            .await?;
-        if !(200..300).contains(&status) {
-            let bytes = body
-                .collect()
-                .await
-                .map_err(|e| Error::Connect(format!("exec start 读流失败：{e}")))?
-                .to_bytes();
-            return Err(Error::Connect(format!(
-                "exec start 失败：HTTP {status}：{}",
-                String::from_utf8_lossy(&bytes).trim()
-            )));
-        }
-        // tty：无 demux 头，原始字节流直通
-        let output = Box::pin(body.into_data_stream().map(|item| {
+        let io = self.start_exec_upgraded(&exec_id, true).await?;
+        let (read_half, write_half) = tokio::io::split(io);
+        // tty：无帧头，原始字节流直通
+        let output = Box::pin(tokio_util::io::ReaderStream::new(read_half).map(|item| {
             item.map(|b| b.to_vec())
                 .map_err(|e| Error::Connect(format!("exec 输出流读取失败：{e}")))
         }));
         Ok(ExecPty {
             exec_id,
-            input,
+            input: Arc::new(Mutex::new(Box::pin(write_half))),
             output,
         })
     }
@@ -236,19 +219,6 @@ impl Podman {
         Ok(v.get("ExitCode").and_then(|c| c.as_i64()).map(|c| c as i32))
     }
 
-    /// 关闭 exec 会话的 stdin 写端。
-    ///
-    /// 只读消费 output 的调用方（bootstrap/ping 等"启动进程 → 等退出"模式）
-    /// 必须在读完前关闭 stdin：请求体流不结束，服务端的输出流 EOF 永远
-    /// 不会到来（会话管道被本结构的写端持有）。
-    pub async fn exec_close_stdin(
-        input: &Arc<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
-    ) {
-        use tokio::io::AsyncWriteExt;
-        let mut w = input.lock().await;
-        let _ = w.shutdown().await;
-    }
-
     /// 写入 exec PTY stdin。
     pub async fn exec_pty_write(
         input: &Arc<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
@@ -273,7 +243,10 @@ impl Podman {
         user: &str,
         cmd: Vec<String>,
     ) -> Result<ExecOnce> {
-        let exec_id = self.create_exec(container, user, false, false, None, cmd).await?;
+        let exec_id = self
+            .create_exec(container, user, false, false, None, cmd)
+            .await?;
+        // AttachStdin=false → 无 stdin 流，响应为普通多路复用流，读到 EOF 即结束
         let (stdout, stderr) = self
             .http
             .read_demux_stream(
@@ -316,48 +289,80 @@ pub struct ExecOnce {
 }
 
 
-/// `mpsc::Sender<Bytes>` 的 AsyncWrite 适配器（等价 tokio-util PollSender+SinkWriter，
-/// 不引入额外 feature）。缓冲满时返回 Pending 待唤醒。
-pub(crate) struct SenderWriter {
-    pub(crate) tx: Option<tokio::sync::mpsc::UnboundedSender<hyper::body::Bytes>>,
+/// 实测（需真实 podman + 运行中容器 desk_pilot）：upgrade 语义下
+/// exec_no_tty 的输出 EOF 及时到达（回归：stdin 不关闭导致会话挂死）。
+#[tokio::test]
+#[ignore]
+async fn test_exec_no_tty_eof_regression() {
+    let podman = Podman::connect().await.unwrap();
+    let start = std::time::Instant::now();
+    let exec = podman
+        .exec_no_tty(
+            "desk_pilot",
+            "0",
+            vec!["/bin/sh".into(), "-c".into(), "echo hi".into()],
+        )
+        .await
+        .unwrap();
+    let mut out = String::new();
+    futures::StreamExt::for_each(exec.output, |item| {
+        if let Ok(bytes) = item {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        futures::future::ready(())
+    })
+    .await;
+    let code = podman.wait_exec_code(&exec.exec_id).await.unwrap();
+    let elapsed = start.elapsed();
+    assert!(out.contains("hi"), "应读到 echo 输出：{out:?}");
+    assert!(code == 0);
+    assert!(elapsed.as_secs() < 10, "EOF 应及时到达，实际 {elapsed:?}");
 }
 
-impl tokio::io::AsyncWrite for SenderWriter {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        data: &[u8],
-    ) -> std::task::Poll<std::io::Result<usize>> {
-        let Some(tx) = self.tx.as_mut() else {
-            return std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                "exec stdin 已关闭",
-            )));
-        };
-        // unbounded channel：终端 stdin 流量极小，无需背压协调
-        match tx.send(hyper::body::Bytes::copy_from_slice(data)) {
-            Ok(()) => std::task::Poll::Ready(Ok(data.len())),
-            Err(e) => std::task::Poll::Ready(Err(std::io::Error::new(
-                std::io::ErrorKind::BrokenPipe,
-                e.to_string(),
-            ))),
+
+/// 把（upgrade 后的）容器进程输出读半解包为纯输出块流：
+/// 非 tty 时按 Docker 多路复用帧头 demux（stdout/stderr 按到达顺序合并），
+/// tty 时原样直通由调用方处理。
+fn demux_read_stream<R>(
+    read_half: R,
+) -> impl futures::Stream<Item = Result<Vec<u8>>> + Send
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>>>();
+    tokio::spawn(async move {
+        let mut demux = super::http::Demuxer::default();
+        let mut reader = read_half;
+        let mut buf = [0u8; 8192];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
+                Ok(0) => break,
+                Ok(n) => demux.feed(&buf[..n]),
+                Err(e) => {
+                    let _ = tx.send(Err(Error::Connect(format!(
+                        "exec 输出流读取失败：{e}"
+                    ))));
+                    return;
+                }
+            }
+            loop {
+                let delta = demux.take_merged_delta();
+                if delta.is_empty() {
+                    break;
+                }
+                if tx.send(Ok(delta)).is_err() {
+                    return;
+                }
+            }
         }
-    }
-
-    fn poll_flush(
-        self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        std::task::Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        self.tx = None;
-        std::task::Poll::Ready(Ok(()))
-    }
+        let delta = demux.take_merged_delta();
+        if !delta.is_empty() {
+            let _ = tx.send(Ok(delta));
+        }
+    });
+    futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
 }
 
 #[cfg(test)]

@@ -14,7 +14,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use http_body::Body;use http_body_util::BodyExt;
+use http_body::Body;
+use futures::StreamExt;
+use http_body_util::BodyExt;
 use http_body_util::{Full, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
 use hyper::Request;
@@ -54,13 +56,6 @@ impl Service<hyper::Uri> for UnixConnector {
     }
 }
 
-/// exec stdin 注入用的流式请求体类型（mpsc → Frame 流）。
-type StdinStreamBody = StreamBody<
-    std::pin::Pin<
-        Box<dyn futures::Stream<Item = std::result::Result<Frame<Bytes>, std::convert::Infallible>> + Send>,
-    >,
->;
-
 /// podman unix-socket HTTP 客户端。
 ///
 /// `full` 用于常规一次性 JSON/字节请求；`stream` 用于请求体为流（exec stdin）
@@ -68,7 +63,7 @@ type StdinStreamBody = StreamBody<
 /// （连接器相同，行为一致）。
 pub(crate) struct HttpClient {
     full: Client<UnixConnector, Full<Bytes>>,
-    stream: Client<UnixConnector, StdinStreamBody>,
+    stream: Client<UnixConnector, Full<Bytes>>,
     api_prefix: String,
     /// 完整版本串（如 "5.4.2"）
     api_version: String,
@@ -219,72 +214,47 @@ impl HttpClient {
         method: &str,
         path_and_query: &str,
     ) -> Result<(u16, Incoming)> {
-        Self::raw_stream(&self.full, method, path_and_query, None).await
-    }
-
-    /// 打开带 stdin 注入的流式请求（exec PTY attach）。
-    ///
-    /// 返回 (status, 响应体流, stdin 写端)。调用方往写端写数据即注入容器
-    /// 进程 stdin；响应体即容器进程输出（tty 下 stdout/stderr 合流、无 demux 头）。
-    pub async fn open_stream_with_stdin(
-        &self,
-        method: &str,
-        path_and_query: &str,
-    ) -> Result<(
-        u16,
-        Incoming,
-        Arc<tokio::sync::Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
-    )> {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
-        let mut body_rx = rx;
-        let body: StdinStreamBody = StreamBody::new(Box::pin(futures::stream::poll_fn(
-            move |cx| {
-                body_rx
-                    .poll_recv(cx)
-                    .map(|opt| opt.map(|b| Ok::<_, std::convert::Infallible>(Frame::data(b))))
-            }
-        )));
         let method_m = hyper::Method::from_bytes(method.as_bytes())
             .map_err(|e| Error::Connect(format!("非法 HTTP 方法 {method}：{e}")))?;
         let req = Request::builder()
             .method(method_m)
             .uri(self.url(path_and_query))
-            .body(body)
-            .map_err(|e| Error::Connect(format!("构造流请求失败：{e}")))?;
-        let resp = self
-            .stream
-            .request(req)
-            .await
-            .map_err(|e| Error::Connect(format!("{method} {path_and_query} 流请求失败：{e}")))?;
-        let status = resp.status().as_u16();
-        let body: Incoming = resp.into_body();
-        // stdin 写端：mpsc::Sender 的 AsyncWrite 适配（exec.rs 的 SenderWriter）
-        let writer: Pin<Box<dyn tokio::io::AsyncWrite + Send>> = Box::pin(
-            super::exec::SenderWriter { tx: Some(tx) },
-        );
-        Ok((status, body, Arc::new(tokio::sync::Mutex::new(writer))))
-    }
-
-    /// 流式请求（空请求体），open_stream 的底层实现。
-    async fn raw_stream(
-        client: &Client<UnixConnector, Full<Bytes>>,
-        method: &str,
-        path_and_query: &str,
-        _body: Option<Bytes>,
-    ) -> Result<(u16, Incoming)> {
-        let method_m = hyper::Method::from_bytes(method.as_bytes())
-            .map_err(|e| Error::Connect(format!("非法 HTTP 方法 {method}：{e}")))?;
-        let req = Request::builder()
-            .method(method_m)
-            .uri(format!("http://podman{path_and_query}"))
             .body(Full::default())
             .map_err(|e| Error::Connect(format!("构造流请求失败：{e}")))?;
-        let resp = client
+        let resp = self
+            .full
             .request(req)
             .await
             .map_err(|e| Error::Connect(format!("{method} {path_and_query} 流请求失败：{e}")))?;
         let status = resp.status().as_u16();
         Ok((status, resp.into_body()))
+    }
+
+    /// 发送 upgrade 请求（exec start 的 hijack 语义），返回升级后的裸双向 IO。
+    pub async fn request_upgrade(
+        &self,
+        method: &str,
+        path_and_query: &str,
+    ) -> Result<(u16, hyper::upgrade::Upgraded)> {
+        let method_m = hyper::Method::from_bytes(method.as_bytes())
+            .map_err(|e| Error::Connect(format!("非法 HTTP 方法 {method}：{e}")))?;
+        let req = Request::builder()
+            .method(method_m)
+            .uri(self.url(path_and_query))
+            .header("connection", "upgrade")
+            .header("upgrade", "tcp")
+            .body(Full::default())
+            .map_err(|e| Error::Connect(format!("构造升级请求失败：{e}")))?;
+        let resp = self
+            .full
+            .request(req)
+            .await
+            .map_err(|e| Error::Connect(format!("{method} {path_and_query} 升级请求失败：{e}")))?;
+        let status = resp.status().as_u16();
+        let upgraded = hyper::upgrade::on(resp)
+            .await
+            .map_err(|e| Error::Connect(format!("连接升级失败：{e}")))?;
+        Ok((status, upgraded))
     }
 
     /// 容器日志 / exec 非 tty 输出等 Docker 多路复用流的解包读取：
