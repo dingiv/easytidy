@@ -121,14 +121,6 @@ impl Podman {
     /// - 服务随本进程脱离终端（setsid）存活，GUI/CLI 退出不杀服务；
     /// - seccomp：fork 已编入 libseccomp（系统级 deb 部署），无需特殊配置；
     /// - fork 二进制缺失或启动失败 → `Err`，由 [`connect`] 回退系统 socket。
-    /// libpod 直连复用的拉起入口（只需 socket 路径；二进制自行发现）。
-    pub(crate) fn ensure_fork_service_for(sock: &Path) -> Result<()> {
-        match Self::fork_bin() {
-            Some(bin) => Self::ensure_fork_service(&bin, sock),
-            None => Err(Error::Connect("easytidy fork podman 二进制未找到".to_string())),
-        }
-    }
-
     fn ensure_fork_service(bin: &Path, sock: &Path) -> Result<()> {
         if Self::socket_alive(sock) {
             return Ok(());
@@ -177,6 +169,7 @@ impl Podman {
     /// 1. fork socket（`$XDG_RUNTIME_DIR/easytidy/podman.sock`）——存在/可拉起则用；
     /// 2. 系统 rootless socket（`$XDG_RUNTIME_DIR/podman/podman.sock`）——fork 未
     ///    安装或启动失败时的回退，保持原有行为。
+    ///
     /// 连接后调用 ping 协商版本（Docker-v29 教训：永不硬编码 API 版本）。
     pub async fn connect() -> Result<Self> {
         // HttpClient::connect 内部完成 socket 选择 + /version 协商（路径前缀）
@@ -1577,8 +1570,7 @@ impl Podman {
             if force { "force=1" } else { "" }
         );
         match self.http.request_bytes("DELETE", &path, None).await {
-            Ok((status, _)) if (200..300).contains(&status) || status == 404 => {}
-            Ok((404, _)) => {}
+            Ok((status, _)) if (200..300).contains(&status) => {}
             // 容器本就不存在（被外部 Podman 客户端删过）——删除幂等，目标已达成，不报错
             Ok((404, _)) => {
                 tracing::info!("容器 {name_or_id} 本就不存在，视为已删除（外部删除）");
@@ -1987,12 +1979,6 @@ pub fn plan_rebuild_cleanup(images: &[ImageSummary]) -> Vec<RebuildImageEntry> {
 /// 非两元组项忽略（不 panic）。
 fn map_system_info(info: &Value) -> crate::models::EngineInfo {
     use crate::models::EngineInfo;
-    let s = |k: &str| {
-        info.get(k)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
     let opt_s = |k: &str| {
         info.get(k)
             .and_then(|v| v.as_str())

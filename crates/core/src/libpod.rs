@@ -16,7 +16,7 @@
 //! - 注意：/proc/self/uid_map 的字面映射（1000→0）不代表实际文件属主
 //!   行为——以 keep-id 层的真实身份为准（实测文件属主 = 宿主用户）
 
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::error::{Error, Result};
 use hyper::body::Bytes;
@@ -103,6 +103,7 @@ impl Libpod {
     ///   （podman handler 只识别 `changes` schema tag）。空切片不附加参数。
     ///
     /// 返回 commit 响应里的 `Id`(镜像 ID,与 `repo:tag` 解析到同一镜像)。
+    #[allow(clippy::too_many_arguments)]
     pub async fn commit(
         &self,
         container_name: &str,
@@ -156,6 +157,7 @@ impl Libpod {
 
 
 
+#[allow(clippy::too_many_arguments)]
 pub fn keep_id_create_body(
     name: &str,
     hostname: &str,

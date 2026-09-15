@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use http_body_util::BodyExt;
-use hyper::body::{Bytes, Incoming};
+use hyper::body::Bytes;
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -29,12 +29,6 @@ pub struct ExecPty {
     pub input: Arc<Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
     /// stdout/stderr 读侧（TTY 合流为单流）
     pub output: Pin<Box<dyn futures::Stream<Item = Result<Vec<u8>>> + Send>>,
-}
-
-/// exec 会话输出流的归一化条目（非 tty demux 后的 stdout/stderr 分路）。
-enum ExecChunk {
-    StdOut(Vec<u8>),
-    StdErr(Vec<u8>),
 }
 
 impl Podman {
@@ -83,40 +77,6 @@ impl Podman {
             .and_then(|i| i.as_str())
             .map(str::to_string)
             .ok_or_else(|| Error::Connect("exec create 响应缺少 Id".to_string()))
-    }
-
-    /// 启动 exec（attach 模式）：返回响应体字节流。
-    ///
-    /// - `tty=true`：原始字节流（无 demux 头）
-    /// - `tty=false`：Docker 多路复用流（8 字节帧头），由调用方 demux
-    async fn start_exec_stream(
-        &self,
-        exec_id: &str,
-        tty: bool,
-    ) -> Result<Incoming> {
-        let (status, body) = self
-            .http
-            .open_stream(
-                "POST",
-                &format!(
-                    "/exec/{}/start?tty={}",
-                    Self::urlquery_encode(exec_id),
-                    tty
-                ),
-            )
-            .await?;
-        if !(200..300).contains(&status) {
-            let bytes = body
-                .collect()
-                .await
-                .map_err(|e| Error::Connect(format!("exec start 读流失败：{e}")))?
-                .to_bytes();
-            return Err(Error::Connect(format!(
-                "exec start 失败：HTTP {status}：{}",
-                String::from_utf8_lossy(&bytes).trim()
-            )));
-        }
-        Ok(body)
     }
 
     /// 在容器内以指定用户起交互进程（**不分配 TTY**）并挂接 stdio。
@@ -352,7 +312,7 @@ pub(crate) struct SenderWriter {
 impl tokio::io::AsyncWrite for SenderWriter {
     fn poll_write(
         mut self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
+        _cx: &mut std::task::Context<'_>,
         data: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
         let Some(tx) = self.tx.as_mut() else {

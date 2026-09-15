@@ -17,11 +17,10 @@ use std::task::{Context, Poll};
 use http_body::Body;use http_body_util::BodyExt;
 use http_body_util::{Full, StreamBody};
 use hyper::body::{Bytes, Frame, Incoming};
-use hyper::{Method, Request};
+use hyper::Request;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tower_service::Service;
 
 use crate::error::{Error, Result};
@@ -70,7 +69,6 @@ type StdinStreamBody = StreamBody<
 pub(crate) struct HttpClient {
     full: Client<UnixConnector, Full<Bytes>>,
     stream: Client<UnixConnector, StdinStreamBody>,
-    socket_path: PathBuf,
     api_prefix: String,
     /// 完整版本串（如 "5.4.2"）
     api_version: String,
@@ -82,7 +80,7 @@ impl HttpClient {
     pub async fn connect() -> Result<Self> {
         let socket_path = crate::podman::Podman::connect_fork_or_system_socket()?;
         let connector = UnixConnector {
-            socket_path: socket_path.clone(),
+            socket_path,
         };
         let full = Client::builder(TokioExecutor::new()).build(connector.clone());
         let stream = Client::builder(TokioExecutor::new()).build(connector);
@@ -109,15 +107,9 @@ impl HttpClient {
         Ok(Self {
             full,
             stream,
-            socket_path,
             api_prefix,
             api_version,
         })
-    }
-
-    /// socket 路径（供 bootstrap 等宿主侧检查）。
-    pub fn socket_path(&self) -> &PathBuf {
-        &self.socket_path
     }
 
     /// 完整 API 版本串（如 "5.4.2"）。
@@ -243,7 +235,7 @@ impl HttpClient {
         Incoming,
         Arc<tokio::sync::Mutex<Pin<Box<dyn tokio::io::AsyncWrite + Send>>>>,
     )> {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
         let mut body_rx = rx;
         let body: StdinStreamBody = StreamBody::new(Box::pin(futures::stream::poll_fn(
             move |cx| {

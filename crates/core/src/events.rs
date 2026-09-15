@@ -50,7 +50,7 @@ async fn listen_events(
     tx: mpsc::Sender<EngineEvent>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (status, body) = podman.http().open_stream("GET", "/events").await?;
-    let mut body = body.into_data_stream();
+    let body = body.into_data_stream();
     if !(200..300).contains(&status) {
         return Err(format!("事件流 HTTP {status}").into());
     }
