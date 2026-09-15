@@ -200,14 +200,15 @@ GUI 全链路复验、labwc 构建链固化、PipeWire/IM/portal env、
   userns 呈现 inode 真实 id → 同一份磁盘编码在容器视图全面错位
   （/home/ubuntu 磁盘 real 100999 = 容器 c999，而用户是 c1000）；
 - 即 fuse 在此系统上一直承担着「视图语义适配器」角色，数据本身无损
-  （mtime/ctime 证据：无 chown/损坏；desk_pilot02 RW 层另有一晚 00:35 的
-  187k 文件批量重写，疑 GUI 快照/恢复操作，与存储切换无关）。
+  （无 chown 证据；desk 层曾观察到 187k 文件"近期 ctime"——复查为当晚
+  数小时容器内正常活动（openclaw 构建/chrome profile/nvidia-ctk+ldconfig
+  触发）的累计，并非一次性批量重写，初判有误）。
 
 回退步骤（已执行）：`.has-mount-program` 置 true + storage.conf 显式
 mount_program → 杀 socket 服务（驱动选择在服务生命周期内缓存）→ 重新拉起
 → 重启容器 → gui/chrome/desk 三容器 fuse 挂载 + 权限视图全部恢复；
-desk_pilot02 的 /home/node 额外被改为 root 属主（00:34，非存储切换所致），
-已在容器内 `chown -R node:node` 修复并验证可写。
+desk_pilot02 的 /home/node 曾被改为 root 属主（00:34，来源未最终定论，
+非存储切换所致），已在容器内 `chown -R node:node` 修复并验证可写。
 
 ### 7.3 若未来要真切 native（前置条件）
 
