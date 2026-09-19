@@ -1,0 +1,37 @@
+// =====================================================================
+// 主题 mixins
+//
+// var(--xxx) 太长，做成 mixin 让 SCSS 写起来像 native CSS：
+//   @include theme-bg('base');
+//   background: var(--bg-base);
+// =====================================================================
+
+@use 'tokens' as *;
+
+// 主题色（CSS 变量）通过 var() 取；混入仅缩短书写
+@mixin theme-bg($role) {
+  background: var(--bg-#{$role});
+}
+@mixin theme-fg($role) {
+  color: var(--fg-#{$role});
+}
+@mixin theme-accent($role) {
+  color: var(--accent-#{$role});
+}
+@mixin theme-border($role) {
+  border-color: var(--border-#{$role});
+}
+
+// 透明度修饰色（hover/active 用）：用 color-mix 让单色变量做透明度
+// 例：@include theme-bg-hover('surface') → var(--bg-surface) + 8% 白
+@mixin theme-bg-hover($role) {
+  background: color-mix(in srgb, var(--bg-#{$role}) 92%, #fff 8%);
+}
+@mixin theme-bg-active($role) {
+  background: color-mix(in srgb, var(--bg-#{$role}) 88%, #fff 12%);
+}
+
+// 字号工具类（任意主题共享，不受主题切换影响）
+.fs-lg { font-size: $fs-lg; }
+.fs-md { font-size: $fs-md; }
+.fs-sm { font-size: $fs-sm; }

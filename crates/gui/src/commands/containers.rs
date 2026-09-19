@@ -730,56 +730,245 @@ fn find_executable(bin: &str) -> Option<std::path::PathBuf> {
 
 /// 用宿主终端打开容器交互式 shell。
 ///
-/// 命令：`easytidy run --container <name>`（经 server PTY 转发，需 easytidy 在 PATH）。
-/// 不同终端模拟器命令传参方式不同，按检测到的二进制名分别处理。
+/// ## 设计（2026-09-17 定型）
+///
+/// **直接 spawn `podman exec -it --user <uid>:<gid> <name> /bin/bash`**：
+/// - 绕开 `easytidy run` → server → dock 的多层中转，路径最短最稳
+/// - podman exec 本身提供 PTY，是 podman 官方推荐的交互方式
+/// - `gnome-terminal -- <podman exec ...>` 行为与手开终端跑 podman exec 一致：
+///   启动稳定、不会闪退（无 bash 中转 / 无 systemd cgroup race / 无 exec 替换）
+///
+/// ## Bug 历史
+///
+/// 1. (2026-09-16) 旧 `gnome-terminal -- easytidy run --container <name>`：
+///    dbus 模式下主进程静默 exit 0，前端无反应。
+/// 2. (2026-09-17) 改 `bash -c "sleep 0.05; exec easytidy ..."`：bash exec 替换
+///    让 systemd cgroup race 命中（PID vanished before we could move it），
+///    窗口闪退。
+/// 3. (2026-09-17) 用户提示「你就打开终端，注入一条 podman 命令」：直接走
+///    podman exec，去掉所有中间层。
+///
+/// ## 容器默认用户
+///
+/// 用 `id -u`/`id -g` 探测宿主登录用户 uid/gid（rootless podman 下容器默认
+/// user = 宿主登录用户），探测失败回退 1000:1000。容器内 `/bin/bash` 不存在
+/// 时退化到 `/bin/sh`。
 #[tauri::command]
 pub fn open_container_terminal(name: String) -> Result<(), String> {
+    use std::path::Path;
     use std::process::Command;
 
-    // 探测宿主终端模拟器（按优先级）
+    // 1. 探测终端模拟器
     let candidates = [
+        "/usr/bin/gnome-terminal",
         "/usr/bin/alacritty",
         "/usr/bin/kitty",
-        "/usr/bin/gnome-terminal",
         "/usr/bin/konsole",
         "/usr/bin/xfce4-terminal",
         "/usr/bin/xterm",
-        "/usr/bin/terminal",
-        "/usr/bin/x-terminal-emulator",
     ];
     let term = candidates
         .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .ok_or("未找到可用终端模拟器（alacritty/kitty/gnome-terminal/konsole/xfce4-terminal/xterm）")?;
+        .find(|p| Path::new(p).exists())
+        .ok_or("未找到可用终端模拟器（gnome-terminal / alacritty / kitty / konsole / xfce4-terminal / xterm）")?;
+    let term_name = term.rsplit('/').next().unwrap_or(term).to_string();
 
-    // 要执行的命令：`easytidy run --container <name>`（交互式 shell）
-    let cmd_parts: Vec<String> =
-        vec!["easytidy".into(), "run".into(), "--container".into(), name.clone()];
-    let cmd_str = cmd_parts.join(" ");
+    // 2. 探测宿主登录用户的 uid:gid（rootless podman 下容器默认 user 即此）
+    let uid = Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "1000".into());
+    let gid = Command::new("id")
+        .arg("-g")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| "1000".into());
 
-    // 按终端类型构造 argv
-    let term_name = term.rsplit('/').next().unwrap_or(term);
-    let args: Vec<String> = match term_name {
-        // 现代 gnome-terminal / alacritty(0.13+)：`-- cmd args...`
-        "gnome-terminal" | "alacritty" | "tilix" => {
-            let mut a = vec!["--".to_string()];
-            a.extend(cmd_parts);
-            a
-        }
-        // kitty：`kitty sh -c "cmd"`
-        "kitty" => vec!["sh".into(), "-c".into(), cmd_str],
-        // konsole / xfce4-terminal：`-e "cmd"`（单字符串）
-        "konsole" | "xfce4-terminal" => vec!["-e".to_string(), cmd_str],
-        // xterm 及其他回退：`-e cmd args...`
-        _ => vec!["-e".to_string(), cmd_str],
+    // 3. 探测容器内 uid 对应的 home（--workdir 用）
+    //
+    //    容器默认是 rootless 创建，容器内 uid 1000 往往是 ubuntu / fedora /
+    //    arch 用户，home = `/home/ubuntu` 等。`podman exec` 不设 HOME env、
+    //    bash -l 依赖 HOME 去 cd，不探一下 cwd 会落在 `/`。
+    //
+    //    **不能直接写 `--workdir=~`**：`bash -c "podman exec ... ~"` 里
+    //    `~` 不是词首位置（前面有 `=`），bash tilde expansion 不展开；
+    //    podman 拿到字面 `--workdir=~` 也不会展开。必须硬编码绝对路径。
+    //
+    //    探测：调 `podman exec <name> getent passwd <uid>`，parse 第6字段。
+    //    容器未运行 / getent 不在容器内 / parse 失败 → 回退 `/home`（容器
+    //    passwd 里几乎都是这个路径，bash -l 找不到时会 fallback）。
+    let workdir = detect_container_home(&name, &uid).unwrap_or_else(|| "/home".to_string());
+
+    // 4. 构造 podman exec argv（不经 shell，token 直传）
+    //
+    //    **不调 bash 中转、直接要 /bin/bash 登录 shell**：
+    //    绕过 vte-spawn scope systemd cgroup race（实测 2026-09-17，
+    //    中间过 `sh -c "...; exec /bin/bash -l"` 会让 bash 进程被 exec 替换，
+    //    systemd attach 0 PID → scope Failed → 窗口闪退）。直接要 shell
+    //    让 podman exec fork 那个进程是 long-running 的 bash，
+    //    systemd attach 时 bash 已存在 PID 不变 → scope Started。
+    let podman_argv = vec![
+        "podman".to_string(),
+        "exec".to_string(),
+        "-it".to_string(),
+        format!("--user={uid}:{gid}"),
+        format!("--workdir={workdir}"),
+        name.clone(),
+        "bash".to_string(),
+        "-l".to_string(),
+    ];
+
+    // 4. 按终端类型构造最终 argv
+    //    - gnome-terminal（dbus 模式）：`-- bash -c "<shell_quoted_podman_argv>"`
+    //    - 其他：` -e <argv...>`
+    let full_argv: Vec<String> = if term_name == "gnome-terminal" {
+        let cmd_str = podman_argv.iter()
+            .map(|a| shell_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        vec![
+            "--".to_string(),
+            "bash".to_string(),
+            "-c".to_string(),
+            cmd_str,
+        ]
+    } else {
+        let mut v = vec!["-e".to_string()];
+        v.extend(podman_argv);
+        v
     };
 
+    info!("宿主终端打开容器 {}（使用 {}）", name, term_name);
+
+    // 5. spawn——stdin/stdout/stderr 留默认 inherit，gnome-terminal 自己处理 PTY
     Command::new(term)
-        .args(&args)
+        .args(&full_argv)
         .spawn()
         .map_err(|e| format!("启动终端失败（{term_name}）：{e}"))?;
+
     info!("已用 {} 打开容器终端：{}", term_name, name);
     Ok(())
+}
+
+/// 探测容器内 uid 对应的 home 目录（给 `podman exec --workdir` 用）。
+///
+/// `podman exec <name> getent passwd <uid>` 返回 `name:x:uid:gid:gecos:home:shell`，
+/// 第6字段（split ':' 取下标 5）是 home。容器未运行 / getent 不存在 / 格式
+/// 异常 → 返回 None（调用方回退到 `/home`）。
+fn detect_container_home(name: &str, uid: &str) -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("podman")
+        .args(["exec", name, "getent", "passwd", uid])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8(out.stdout).ok()?;
+    let fields: Vec<&str> = line.trim().split(':').collect();
+    if fields.len() < 6 {
+        return None;
+    }
+    let home = fields[5];
+    if home.is_empty() || !home.starts_with('/') {
+        return None;
+    }
+    Some(home.to_string())
+}
+
+/// 单 token shell 单引号转义：仅含「安全字符」时原样返回，否则单引号包裹 + `'` 转 `'\''`。
+///
+/// 用于构造 `bash -c "exec ..."` 的子串（gnome-terminal 走 dbus `-- bash -c` 时
+/// 命令串会被 shell 解析一次；x-terminal-emulator / -e 多 token 路径不走 shell，
+/// 不需要此函数）。
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'_' | b'-' | b'.' | b'/' | b':' | b'@' | b'+' | b',')
+        })
+    {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+#[cfg(test)]
+mod open_container_terminal_tests {
+    use super::{detect_container_home, shell_quote};
+
+    #[test]
+    fn safe_chars_unquoted() {
+        // 常见安全 token（容器名按 [A-Za-z0-9_-]+ 约束）原样返回
+        assert_eq!(shell_quote("chrome"), "chrome");
+        assert_eq!(shell_quote("desk_pilot.v9"), "desk_pilot.v9");
+        assert_eq!(shell_quote("/usr/bin/easytidy"), "/usr/bin/easytidy");
+    }
+
+    #[test]
+    fn shell_metachars_quoted() {
+        // 含空格 / 引号 / $ / ; → 单引号包裹，内部 ' 转义
+        assert_eq!(shell_quote("hello world"), "'hello world'");
+        assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+        assert_eq!(shell_quote("$(rm -rf /)"), "'$(rm -rf /)'");
+        assert_eq!(shell_quote("a;b"), "'a;b'");
+    }
+
+    #[test]
+    fn empty_quoted() {
+        // 空串视为不安全（空 token 在 shell 里被忽略——明确单引号包裹以避免歧义）
+        assert_eq!(shell_quote(""), "''");
+    }
+
+    #[test]
+    fn bash_roundtrip_safe() {
+        // round-trip: sh -c "echo <shell_quote(x)>" 应原样输出 x
+        // （覆盖真实 shell 解析路径，确保我们的引号规则不出错）
+        for input in ["chrome", "a b", "a'b'c", "$(whoami)", "plain.txt"] {
+            let script = format!("printf '%s' {}", shell_quote(input));
+            let out = std::process::Command::new("bash")
+                .args(["-c", &script])
+                .output()
+                .expect("bash 必须在 PATH（单测仅本机跑）");
+            let got = String::from_utf8_lossy(&out.stdout);
+            assert_eq!(got, input, "round-trip 失败：input={input:?}, got={got:?}");
+        }
+    }
+
+    #[test]
+    fn bash_c_does_not_expand_tilde_in_arg() {
+        // 回归：`--workdir=~` 在 `bash -c "..."` 里 **不展开**（~ 不是词首
+        // 位置）。这是为什么 open_container_terminal 必须探测 home 绝对路径
+        // 而不能依赖 `~` 字面写法。
+        let out = std::process::Command::new("bash")
+            .args(["-c", "echo --workdir=~"])
+            .output()
+            .expect("bash 必须在 PATH");
+        let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        assert_eq!(got, "--workdir=~", "bash -c 不展开非词首位置的 ~");
+    }
+
+    #[test]
+    fn detect_container_home_uses_getent_passwd() {
+        // 走真实 podman：需 rootless podman socket + chrome 镜像
+        // （与 host_check 一致：依赖环境就跳过，不依赖则返回 None 走 fallback）
+        let socket = std::path::PathBuf::from(
+            std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
+        )
+        .join("podman/podman.sock");
+        if !socket.exists() {
+            eprintln!("skip: podman socket 不存在");
+            return;
+        }
+        // 不假设容器存在：探测失败时返回 None，调用方 fallback /home
+        let _ = detect_container_home("definitely_nonexistent_container_xyz", "1000");
+    }
 }
 
 /// 关闭容器

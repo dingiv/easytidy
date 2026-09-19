@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::env::inject_passthrough;
-use crate::models::ContainerConfig;
+use crate::models::{deserialize_null_to_empty_vec, ContainerConfig};
 
 /// conf 模板目录（双轨制）：dev = 源码种子目录 `crates/gui/conf`，prod =
 /// 用户配置目录 `~/.easytidy/conf`（首跑播种不覆盖）。路径由 core 的
@@ -49,8 +49,8 @@ pub struct ConfTemplate {
     #[serde(flatten)]
     pub config: ContainerConfig,
     /// 创建后按序执行的安装命令(本轮只存不执行;执行链路与 data 启动脚本
-    /// 一起在下一步接入)
-    #[serde(default)]
+    /// 一起在下一步接入)。裸键 `setup:` = null → 空
+    #[serde(default, deserialize_with = "deserialize_null_to_empty_vec")]
     pub setup: Vec<String>,
 }
 
@@ -95,6 +95,32 @@ impl ConfTemplate {
 mod tests {
     use super::*;
     use crate::models::ContainerParams;
+
+    /// 回归（2026-09-17 labwc.yaml）：用户注释掉列表全部项后留下裸键
+    /// `mounts:` / `setup:`（YAML null），应宽容为空列表而非报
+    /// "invalid type: unit value, expected a sequence"。
+    #[test]
+    fn test_conf_template_bare_key_null_tolerated() {
+        let yaml = r#"
+name: labwc
+image: docker.io/library/ubuntu:24.04
+entry: dbus-run-session
+silent_boot: false
+persistent: true
+mounts:
+setup:
+env:
+network:
+  mode: host
+ports:
+"#;
+        let tpl: ConfTemplate = serde_yaml::from_str(yaml)
+            .expect("裸键（null）应宽容为空列表");
+        assert!(tpl.config.params.mounts.is_empty());
+        assert!(tpl.setup.is_empty());
+        assert!(tpl.config.env.is_empty());
+        assert!(tpl.config.params.network.ports.is_empty());
+    }
 
     #[test]
     fn test_conf_template_serde_default_setup() {

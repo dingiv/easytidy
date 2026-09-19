@@ -37,7 +37,7 @@ import {
   CopyOutlined,
 } from '@ant-design/icons';
 import type { ContainerConfig, EnvView } from '../types';
-import './ContainersPanel.css';
+import './ContainersPanel.scss';
 
 /** 扁平快照/扁平重建等统一下拉的 4 个动作（均不询问用户确认，点击即执行）。
  *  「快速」= 用普通 commit 代替默认 squash（保留分层、更快）：

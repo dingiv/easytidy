@@ -40,7 +40,7 @@
 }
 
 .env-card {
-  border-color: #45475a;
+  border-color: var(--border-subtle);
 }
 
 .env-card-body {
@@ -109,7 +109,7 @@
 }
 
 .form-field label {
-  color: #a6adc8;
+  color: var(--fg-muted);
 }
 
 .env-hint {

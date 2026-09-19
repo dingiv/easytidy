@@ -1,0 +1,88 @@
+// =====================================================================
+// 主题注册表（role → palette 颜色映射）
+//
+// 每个主题定义：把调色板的原始颜色按 UI 角色（用途）分配出去。
+// 角色命名遵循 antd 习惯：base / surface / text / primary / error / warning / success。
+//
+// 输出 CSS 变量到 [data-theme="<name>"] 选择器。
+// =====================================================================
+
+@use 'sass:map';
+@use 'sass:color';
+@use 'palette-mocha' as *;
+@use 'palette-latte' as *;
+@use 'palette-tokyo-night' as *;
+@use 'palette-nord' as *;
+@use 'tokens' as *;
+
+// 公共 mixin：把一个色板（map）展开为 CSS 变量
+@mixin emit-vars($palette) {
+  // 基底
+  --bg-base:    #{map.get($palette, base)};
+  --bg-mantle:  #{map.get($palette, mantle)};
+  --bg-crust:   #{map.get($palette, crust)};
+
+  // 语义背景（错误提示底色：红色低透明度叠在 base 上）
+  --bg-danger: color-mix(in srgb, #{map.get($palette, red)} 18%, #{map.get($palette, base)});
+
+  // 表面
+  --bg-surface:     #{map.get($palette, surface0)};
+  --bg-surface-1:   #{map.get($palette, surface1)};
+  --bg-surface-2:   #{map.get($palette, surface2)};
+
+  // 文本
+  --fg-default:  #{map.get($palette, text)};
+  --fg-muted:    #{map.get($palette, subtext0)};
+  --fg-subtle:   #{map.get($palette, subtext1)};
+
+  // 强调色（角色 → 颜色）
+  --accent-primary:    #{map.get($palette, blue)};
+  --accent-secondary:  #{map.get($palette, lavender)};
+  --accent-danger:     #{map.get($palette, red)};
+  // 暗红变种（原 #eba0ac maroon；用于错误 hover 等次要场景）
+  --accent-danger-alt: #{map.get($palette, maroon)};
+  --accent-warning:    #{map.get($palette, yellow)};
+  --accent-success:    #{map.get($palette, green)};
+  --accent-info:       #{map.get($palette, teal)};
+
+  // 边框/分隔线（surface1 在文本上看是「比表面更深一点」）
+  --border-subtle:  #{map.get($palette, surface1)};
+  --border-default: #{map.get($palette, surface2)};
+  --border-strong:  #{map.get($palette, overlay)};
+
+  // antd dark/light 模式判定（亮主题 → lightAlgorithm，暗 → darkAlgorithm）
+  color-scheme: if-light-dark($palette);
+}
+
+// 因 SCSS 不能按条件切换属性值，借助「两个色板对比度判亮暗」的 helper：
+// 简单做法：base 是「浅色系」时返回 light，否则 dark。判断方式：取 base
+// 的 R+G+B 平均，> 0x96 (≈150) → 浅。
+@function if-light-dark($palette) {
+  $base: map.get($palette, base);
+  $r: color.channel($base, 'red');
+  $g: color.channel($base, 'green');
+  $b: color.channel($base, 'blue');
+  @if ($r + $g + $b) > (0x96 * 3) {
+    @return light;
+  } @else {
+    @return dark;
+  }
+}
+
+// --- 各主题暴露 -----------------------------------------------
+
+[data-theme='mocha'] {
+  @include emit-vars($mocha);
+}
+
+[data-theme='latte'] {
+  @include emit-vars($latte);
+}
+
+[data-theme='tokyo-night'] {
+  @include emit-vars($tokyo-night);
+}
+
+[data-theme='nord'] {
+  @include emit-vars($nord);
+}

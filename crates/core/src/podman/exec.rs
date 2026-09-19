@@ -329,7 +329,7 @@ fn demux_read_stream<R>(
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>>>();
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<Vec<u8>>>();
     tokio::spawn(async move {
         let mut demux = super::http::Demuxer::default();
         let mut reader = read_half;

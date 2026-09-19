@@ -1142,7 +1142,6 @@ dependencies = [
  "dirs 5.0.1",
  "easytidy-core",
  "easytidy-protocol",
- "easytidy-server",
  "easytidy-shared",
  "futures",
  "rfd",

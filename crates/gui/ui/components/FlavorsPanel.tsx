@@ -33,7 +33,7 @@ import {
   RocketOutlined,
 } from '@ant-design/icons';
 import type { ConfTemplate } from '../types';
-import './FlavorsPanel.css';
+import './FlavorsPanel.scss';
 
 /** 生成不冲突的复制名：`base-copy`，冲突则 `base-copy2`、`base-copy3`… */
 function nextCopyName(base: string, existing: string[]): string {

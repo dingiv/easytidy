@@ -17,7 +17,7 @@ import {
 } from '@ant-design/icons';
 import { useFileBrowserStore } from '../stores/fileBrowserStore';
 import type { FsEntry } from '../types';
-import './FileBrowser.css'
+import './FileBrowser.scss'
 
 interface FileBrowserProps {
   /** 右键"打开"回调（文本编辑器面板） */

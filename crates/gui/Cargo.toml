@@ -38,8 +38,3 @@ tracing-appender = "0.2.5"
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# 让 Cargo 把 crates/server 纳入 GUI 的指纹图（没有这段 build.rs
-# 的 rerun-if-changed=../server/src 会警告"指向包外"）。dev-dep 不
-# 编进 cargo build，只编进 cargo test —— 零二进制膨胀，纯 file-watch
-# 触发（build.rs 自动 rebuild server）。详见 build.rs。
-easytidy-server = { path = "../server" }

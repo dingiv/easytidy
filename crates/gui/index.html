@@ -2,7 +2,19 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="stylesheet" href="/ui/styles.css" />
+    <!-- 防闪烁：React 加载前先从 localStorage 恢复主题（与 themeStore 默认值一致） -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('easytidy.theme');
+          var known = ['mocha', 'latte', 'tokyo-night', 'nord'];
+          document.documentElement.dataset.theme =
+            known.indexOf(t) >= 0 ? t : 'mocha';
+        } catch (e) {
+          document.documentElement.dataset.theme = 'mocha';
+        }
+      })();
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>easytidy GUI</title>
     <script type="module" src="/ui/main.tsx" defer></script>

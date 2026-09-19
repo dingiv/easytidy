@@ -11,7 +11,7 @@ import { PlayCircleOutlined } from '@ant-design/icons';
 import type { ConfTemplate, ContainerConfig } from '../types';
 import { BLANK_CONTAINER_CONFIG } from './config/ContainerConfigEditor';
 import { ConfigEditorPane } from './config/ConfigEditorPane';
-import './ContainerCreateForm.css';
+import './ContainerCreateForm.scss';
 
 interface ContainerCreateFormProps {
   /** 创建成功后回调（刷新列表并退出表单） */

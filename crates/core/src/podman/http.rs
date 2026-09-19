@@ -11,14 +11,11 @@
 
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use http_body::Body;
-use futures::StreamExt;
-use http_body_util::BodyExt;
-use http_body_util::{Full, StreamBody};
-use hyper::body::{Bytes, Frame, Incoming};
+use http_body_util::{BodyExt, Full};
+use hyper::body::{Bytes, Incoming};
 use hyper::Request;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -57,13 +54,8 @@ impl Service<hyper::Uri> for UnixConnector {
 }
 
 /// podman unix-socket HTTP 客户端。
-///
-/// `full` 用于常规一次性 JSON/字节请求；`stream` 用于请求体为流（exec stdin）
-/// 的场景——hyper_util Client 对 body 类型是单态的，两种 body 各持一个实例
-/// （连接器相同，行为一致）。
 pub(crate) struct HttpClient {
     full: Client<UnixConnector, Full<Bytes>>,
-    stream: Client<UnixConnector, Full<Bytes>>,
     api_prefix: String,
     /// 完整版本串（如 "5.4.2"）
     api_version: String,
@@ -77,8 +69,8 @@ impl HttpClient {
         let connector = UnixConnector {
             socket_path,
         };
-        let full = Client::builder(TokioExecutor::new()).build(connector.clone());
-        let stream = Client::builder(TokioExecutor::new()).build(connector);
+        let full: Client<UnixConnector, Full<Bytes>> =
+            Client::builder(TokioExecutor::new()).build(connector);
 
         // GET /version（无前缀）取 ApiVersion → /v{major}.{minor} 前缀
         let (status, body) = Self::raw_request(&full, "GET", "/version", None).await?;
@@ -101,7 +93,6 @@ impl HttpClient {
 
         Ok(Self {
             full,
-            stream,
             api_prefix,
             api_version,
         })
@@ -353,11 +344,17 @@ impl Demuxer {
 
 /// Docker 多路复用流的增量 demux 包装（exec 非 tty attach）：
 /// 把 Incoming 字节流解包为按到达顺序的 stdout/stderr 合并块流。
+///
+/// 当前未被使用（exec.rs 直接用 `Demuxer` 处理已读到的字节），保留供
+/// 未来「exec attach 流式转发」路径使用——避免每加一次流式路径就重新实现
+/// demux 循环（state machine + feed/take_merged_delta + finish）。
+#[allow(dead_code)]
 pub(crate) struct DemuxStream {
     body: Incoming,
     demux: Demuxer,
 }
 
+#[allow(dead_code)]
 impl DemuxStream {
     pub fn new(body: Incoming) -> Self {
         Self {
@@ -367,6 +364,7 @@ impl DemuxStream {
     }
 }
 
+#[allow(dead_code)]
 impl futures::Stream for DemuxStream {
     type Item = Result<Vec<u8>>;
 

@@ -10,7 +10,7 @@ import { errMsg } from '../lib/errors';
 import { App as AntApp, Alert, Button, Empty, Popconfirm, Space, Spin, Table, Tag, Typography } from 'antd';
 import { DeleteOutlined, PictureOutlined, ReloadOutlined } from '@ant-design/icons';
 import { mimeForPath } from './mime';
-import './DesktopIconsPanel.css';
+import './DesktopIconsPanel.scss';
 
 /** 后端 desktop_icons_scan 行（core::desktop::DesktopIconEntry） */
 interface DesktopIconEntry {

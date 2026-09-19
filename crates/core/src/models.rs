@@ -180,8 +180,8 @@ pub struct NetworkConfig {
     /// 网络模式（默认 Host）
     #[serde(default)]
     pub mode: NetworkMode,
-    /// 端口映射（仅 `Mapped` 模式生效；host 模式下忽略）
-    #[serde(default)]
+    /// 端口映射（仅 `Mapped` 模式生效；host 模式下忽略）。裸键 `ports:` = null → 空
+    #[serde(default, deserialize_with = "deserialize_null_to_empty_vec")]
     pub ports: Vec<PortMapping>,
 }
 
@@ -346,6 +346,26 @@ impl Serialize for ContainerParams {
     }
 }
 
+/// 序列字段读取：YAML 裸键（`key:` 后无值 = null）宽容为空列表。
+///
+/// 用户注释掉列表全部项后常留下裸 `key:`——serde 默认会报
+/// `invalid type: unit value, expected a sequence`（labwc.yaml 实测
+/// 2026-09-17：注释掉 mounts 项后留下裸 `mounts:`，解析直接失败）。
+/// 空值语义上就是「无条目」→ 返回空 Vec，不报错。
+fn null_to_empty_vec<'de, T: Deserialize<'de>, M: de::MapAccess<'de>>(
+    map: &mut M,
+) -> Result<Vec<T>, M::Error> {
+    Ok(map.next_value::<Option<Vec<T>>>()?.unwrap_or_default())
+}
+
+/// 同 [`null_to_empty_vec`]，供 `#[serde(deserialize_with)]`（derive 字段）用。
+pub(crate) fn deserialize_null_to_empty_vec<'de, T: Deserialize<'de>, D: Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<T>, D::Error> {
+    let opt: Option<Vec<T>> = Deserialize::deserialize(d)?;
+    Ok(opt.unwrap_or_default())
+}
+
 /// 手动 Deserialize：保留 `user_home`（旧版 keep_id 别名）以避免破坏老手写
 /// yaml/flavor，但 GPU 拆分后 `gpu: "<vendor>"` 字段直接忽略（程序未发布，
 /// 无迁移负担）。
@@ -424,14 +444,14 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             if seen.entry_args {
                                 return Err(de::Error::duplicate_field("entry_args"));
                             }
-                            entry_args = Some(map.next_value()?);
+                            entry_args = Some(null_to_empty_vec(&mut map)?);
                             seen.entry_args = true;
                         }
                         "mounts" => {
                             if seen.mounts {
                                 return Err(de::Error::duplicate_field("mounts"));
                             }
-                            mounts = Some(map.next_value()?);
+                            mounts = Some(null_to_empty_vec(&mut map)?);
                             seen.mounts = true;
                         }
                         "network" => {
@@ -452,14 +472,14 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             if seen.uidmaps {
                                 return Err(de::Error::duplicate_field("uidmaps"));
                             }
-                            uidmaps = Some(map.next_value()?);
+                            uidmaps = Some(null_to_empty_vec(&mut map)?);
                             seen.uidmaps = true;
                         }
                         "gidmaps" => {
                             if seen.gidmaps {
                                 return Err(de::Error::duplicate_field("gidmaps"));
                             }
-                            gidmaps = Some(map.next_value()?);
+                            gidmaps = Some(null_to_empty_vec(&mut map)?);
                             seen.gidmaps = true;
                         }
                         "user_uid" => {
@@ -515,7 +535,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             if seen.devices {
                                 return Err(de::Error::duplicate_field("devices"));
                             }
-                            devices = Some(map.next_value()?);
+                            devices = Some(null_to_empty_vec(&mut map)?);
                             seen.devices = true;
                         }
                         "extra_opts" | "security_opts" => {
@@ -524,7 +544,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             if seen.extra_opts {
                                 return Err(de::Error::duplicate_field("extra_opts"));
                             }
-                            extra_opts = Some(map.next_value()?);
+                            extra_opts = Some(null_to_empty_vec(&mut map)?);
                             seen.extra_opts = true;
                         }
                         "pid" => {
@@ -615,8 +635,8 @@ pub struct ContainerConfig {
     #[serde(flatten)]
     pub params: ContainerParams,
     /// 容器环境变量（"KEY=VALUE" 列表，GUI 透传时含宿主 DISPLAY/WAYLAND_DISPLAY/XAUTHORITY
-    /// ——创建期解析快照，随会话可能变化）
-    #[serde(default)]
+    /// ——创建期解析快照，随会话可能变化）。裸键 `env:` = null → 空
+    #[serde(default, deserialize_with = "deserialize_null_to_empty_vec")]
     pub env: Vec<String>,
     /// 静默启动标志（宿主开机自启）
     pub silent_boot: bool,

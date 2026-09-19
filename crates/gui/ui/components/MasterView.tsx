@@ -17,17 +17,22 @@ import React, { useCallback, useRef, useState } from 'react';
 import { App as AntApp, Tooltip } from 'antd';
 import {
   AppstoreOutlined,
+  BgColorsOutlined,
   CloseOutlined,
   DesktopOutlined,
   DatabaseOutlined,
   InfoCircleOutlined,
   PictureOutlined,
   PlusOutlined,
+  SettingOutlined,
 } from '@ant-design/icons';
+import { Dropdown } from 'antd';
+import { THEMES, useThemeStore } from '../stores/themeStore';
 import { useUiStore } from '../stores/uiStore';
 import { ContainerCreateForm } from './ContainerCreateForm';
 import { ContainersPanel, ContainerRef } from './ContainersPanel';
 import { DesktopIconsPanel } from './DesktopIconsPanel';
+import { SettingsPanel } from './SettingsPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { EngineInfoPanel } from './EngineInfoPanel';
 import { ImagesPanel } from './ImagesPanel';
@@ -35,7 +40,7 @@ import { TemplateEditorPane } from './TemplateEditorPane';
 import type { ConfTemplate, ContainerConfig } from '../types';
 import logo from '../assets/logo.png';
 
-type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info' | 'desktop-icons';
+type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info' | 'desktop-icons' | 'settings';
 
 interface Pane {
   id: string;
@@ -59,6 +64,7 @@ const PANE_TITLE: Record<PaneKind, string> = {
   'template-editor': '模板配置',
   'engine-info': '环境信息',
   'desktop-icons': '桌面图标',
+  settings: '配置管理',
 };
 
 /** 长 flavor 名截断(避免 tab 标题撑开) */
@@ -258,7 +264,18 @@ function MasterViewInner() {
               active={isActive('new-container')}
               onClick={() => openPane('new-container')}
             />
+            <hr className="master-sidebar-divider" />
+            <SidebarIcon
+              label="配置管理"
+              icon={<SettingOutlined />}
+              active={isActive('settings')}
+              onClick={() => openPane('settings')}
+            />
           </nav>
+          {/* 底部主题切换（不占侧栏中部位置，吸底） */}
+          <div className="master-sidebar-footer">
+            <ThemeSwitcher />
+          </div>
         </aside>
 
         {/* 右侧：健康横幅 + 标签栏 + 内容区 */}
@@ -302,6 +319,7 @@ function MasterViewInner() {
                 {p.kind === 'images' && <ImagesPanel />}
                 {p.kind === 'engine-info' && <EngineInfoPanel />}
                 {p.kind === 'desktop-icons' && <DesktopIconsPanel />}
+                {p.kind === 'settings' && <SettingsPanel />}
                 {p.kind === 'flavors' && (
                   <FlavorsPanel
                     onLaunch={handleLaunchFlavor}
@@ -344,5 +362,51 @@ export function MasterView() {
     <AntApp className='app'>
       <MasterViewInner />
     </AntApp>
+  );
+}
+
+/** 主题切换菜单（侧栏底部）。点击弹出下拉选主题项。 */
+function ThemeSwitcher() {
+  const theme = useThemeStore((s) => s.theme);
+  const setTheme = useThemeStore((s) => s.setTheme);
+  const current = THEMES.find((t) => t.id === theme);
+  return (
+    <Dropdown
+      trigger={['click']}
+      menu={{
+        items: THEMES.map((t) => ({
+          key: t.id,
+          label: (
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              {/* 颜色预览小色块：base + accent-primary */}
+              <span
+                aria-hidden
+                style={{
+                  width: 14,
+                  height: 14,
+                  borderRadius: 3,
+                  background: `linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))`,
+                  border: '1px solid var(--border-default)',
+                  display: 'inline-block',
+                }}
+              />
+              {t.label}
+              {t.id === theme && <span style={{ marginLeft: 'auto' }}>✓</span>}
+            </span>
+          ),
+          onClick: () => setTheme(t.id),
+        })),
+        selectedKeys: [theme],
+      }}
+      placement="topRight"
+    >
+      <button
+        className="master-sidebar-theme"
+        title={`主题：${current?.label ?? theme}`}
+        aria-label="切换主题"
+      >
+        <BgColorsOutlined />
+      </button>
+    </Dropdown>
   );
 }

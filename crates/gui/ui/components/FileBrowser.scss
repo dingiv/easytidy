@@ -17,7 +17,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 0.4rem 0.6rem;
-  border-bottom: 1px solid #313244;
+  border-bottom: 1px solid var(--bg-surface);
   flex-shrink: 0;
 }
 
@@ -27,8 +27,8 @@
   resize: none;
   border: none;
   outline: none;
-  background: #11111b;
-  color: #cdd6f4;
+  background: var(--bg-crust);
+  color: var(--fg-default);
   padding: 0.8rem;
   font-family: "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
   line-height: 1.6;
@@ -36,7 +36,7 @@
 }
 
 .file-editor-textarea::selection {
-  background: #45475a;
+  background: var(--border-subtle);
 }
 
 .file-browser-head {
@@ -51,7 +51,7 @@
 /* 拖入进度条（header 下方） */
 .import-progress {
   padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #313244;
+  border-bottom: 1px solid var(--bg-surface);
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -59,7 +59,7 @@
 
 .import-progress-file {
   font-size: var(--fs-sm);
-  color: #a6adc8;
+  color: var(--fg-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
