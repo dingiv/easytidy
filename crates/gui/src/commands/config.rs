@@ -78,9 +78,10 @@ pub async fn apply_container_config(
         serde_json::from_value(config).map_err(|e| format!("解析容器配置失败：{}", e))?;
     container_config.name = name.clone();
 
-    // 按 gui/gpu 意图注入宿主透传（幂等；已展开过的配置重复调用安全）——
-    // 让实例配置区里切换「GUI 透传 / GPU 透传」开关后,重建即生效。
-    inject_passthrough(&mut container_config);
+    // 透传注入不在命令层执行：统一由重建链路内的 `create_with_config_named`
+    // （core）注入（内存 clone）——重建成功后 register 的是用户原始配置，
+    // 注入产物（env/mounts/keep_id）不回写用户配置文件；gui/gpu 开关的变更
+    // 依然在重建后即生效（意图字段在 config 基座内，随 create 生效）。
 
     // 直接调用 core（不依赖 GuiSession）：快速重建（普通 commit + 安全流程）
     // commit → 保留旧容器 → 同名重建（新配置）→ 确认就绪 → 删旧（失败自动回滚）
@@ -295,20 +296,26 @@ pub fn conf_template_expand(name: String, container_name: String) -> Result<Cont
 ///   引用，由 `params.gpu_nvidia` 驱动；不注 NVIDIA_VISIBLE_DEVICES——与 nvidia
 ///   hook 的 void 冲突，GPU 走 CDI 设备节点）
 ///
-/// 返回的是**增量**：配置里已声明的同 destination 挂载 / 同 key 环境变量不重复出现
-/// （与两个 inject 函数的幂等去重一致——显式写的优先，引擎不再覆盖）。
-/// 宿主耦合值（DISPLAY 等）实时探测，与 `conf_template_expand` 展开结果完全一致。
+/// 返回的是**将注入全集**（含被用户显式配置遮蔽的项）：被遮蔽项照常列出，
+/// 并在 `shadowed_env_keys` / `shadowed_mount_targets` 中标注——用户显式声明
+/// 的同 key / 同 container_path 优先，这些注入项**不会实际生效**（失效），
+/// 前端展示时打「已失效」标让用户知道引擎想做的事被盖住了。
+/// 宿主耦合值（DISPLAY 等）实时探测，与 create 期注入完全一致。
 #[derive(Debug, Clone, Serialize)]
 pub struct PassthroughPreview {
-    /// 展开时注入的环境变量（"KEY=VALUE"；宿主实时探测值）
+    /// 展开时注入的环境变量（"KEY=VALUE"；宿主实时探测值；含被遮蔽项）
     pub env: Vec<String>,
-    /// 展开时注入的挂载（仅 gui 产生）
+    /// 展开时注入的挂载（仅 gui 产生；含被遮蔽项）
     pub mounts: Vec<MountConfig>,
+    /// 被用户显式配置遮蔽（失效）的注入 env key
+    pub shadowed_env_keys: Vec<String>,
+    /// 被用户显式配置遮蔽（失效）的注入挂载目标（container_path）
+    pub shadowed_mount_targets: Vec<String>,
 }
 
 #[tauri::command]
 pub fn passthrough_preview(config: ContainerConfig) -> Result<PassthroughPreview, String> {
-    let mut container = config;
+    let container = config;
     // 展开前的去重键（挂载按 container_path、env 按 key——与 inject 函数一致）
     let before_mount_targets: std::collections::HashSet<String> = container
         .params
@@ -322,26 +329,36 @@ pub fn passthrough_preview(config: ContainerConfig) -> Result<PassthroughPreview
         .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
         .collect();
 
-    // gui/gpu 意图在 config 基座内（与实例 apply 路径共用 inject_passthrough）
-    inject_passthrough(&mut container);
+    // 预览用「清空用户 env/mounts 的副本」跑注入：得到**注入全集**（含被用户
+    // 显式配置遮蔽的项，否则幂等去重会把它们藏起来）。实际 create 期注入仍
+    // 按用户优先跳过遮蔽项——前端展示全集并打「已失效」标。
+    let mut hypo = container.clone();
+    hypo.env.clear();
+    hypo.params.mounts.clear();
+    inject_passthrough(&mut hypo);
 
-    let mounts = container
+    // 遮蔽集：注入全集里 key / 挂载目标与用户显式配置撞车的项（这些不生效）
+    let shadowed_env_keys: Vec<String> = hypo
+        .env
+        .iter()
+        .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
+        .filter(|k| before_env_keys.contains(k))
+        .collect();
+    let shadowed_mount_targets: Vec<String> = hypo
         .params
         .mounts
         .iter()
-        .filter(|m| !before_mount_targets.contains(&m.container_path))
-        .cloned()
+        .map(|m| m.container_path.clone())
+        .filter(|t| before_mount_targets.contains(t))
         .collect();
-    let env = container
-        .env
-        .iter()
-        .filter(|kv| match kv.split_once('=') {
-            Some((k, _)) => !before_env_keys.contains(k),
-            None => true,
-        })
-        .cloned()
-        .collect();
-    Ok(PassthroughPreview { env, mounts })
+    let mounts = hypo.params.mounts;
+    let env = hypo.env;
+    Ok(PassthroughPreview {
+        env,
+        mounts,
+        shadowed_env_keys,
+        shadowed_mount_targets,
+    })
 }
 
 /// 查询容器内 server 运行时注入的环境变量（`server.env`）。
@@ -747,9 +764,14 @@ mod tests {
         .unwrap();
         let p = passthrough_preview(declared).unwrap();
         assert!(
-            !p.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
-            "已声明的 /tmp/.X11-unix 不应重复出现在注入增量：{:?}",
+            p.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
+            "被遮蔽的注入项仍应在预览中展示：{:?}",
             p.mounts
+        );
+        assert!(
+            p.shadowed_mount_targets.contains(&"/tmp/.X11-unix".to_string()),
+            "已声明的 /tmp/.X11-unix 对应注入项应标为失效：{:?}",
+            p.shadowed_mount_targets
         );
 
         // gui_x11 开 + 未声明 → 引擎恒注入 /tmp/.X11-unix，预览应含
@@ -759,11 +781,16 @@ mod tests {
             "silent_boot": false, "persistent": true
         }))
         .unwrap();
-        let p2 = passthrough_preview(bare.clone()).unwrap();
+        let p2 = passthrough_preview(bare).unwrap();
         assert!(
             p2.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
             "未声明时应注入 /tmp/.X11-unix：{:?}",
             p2.mounts
+        );
+        assert!(
+            !p2.shadowed_mount_targets.contains(&"/tmp/.X11-unix".to_string()),
+            "未声明时无遮蔽：{:?}",
+            p2.shadowed_mount_targets
         );
 
         // gpu_nvidia=true → NVIDIA_* env 增量（确定性，不依赖宿主）
@@ -788,6 +815,27 @@ mod tests {
         let p4 = passthrough_preview(both).unwrap();
         assert!(p4.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"));
         assert!(p4.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
+
+        // 用户显式声明意图 env（如 DISPLAY）→ 注入全集含 DISPLAY（宿主值或空），
+        // 且标为失效——引擎不覆盖用户显式值
+        let user_display: ContainerConfig = serde_json::from_value(serde_json::json!({
+            "name": "t5", "image": "alpine", "gui_x11": true,
+            "env": ["DISPLAY=:99"],
+            "mounts": [], "network": {"mode":"host","ports":[]},
+            "silent_boot": false, "persistent": true
+        }))
+        .unwrap();
+        let p5 = passthrough_preview(user_display).unwrap();
+        assert!(
+            p5.env.iter().any(|e| e.starts_with("DISPLAY=")),
+            "被遮蔽的 DISPLAY 注入仍应展示：{:?}",
+            p5.env
+        );
+        assert!(
+            p5.shadowed_env_keys.iter().any(|k| k == "DISPLAY"),
+            "DISPLAY 应标为失效（被用户声明遮蔽）：{:?}",
+            p5.shadowed_env_keys
+        );
     }
 
     #[test]

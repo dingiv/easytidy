@@ -169,9 +169,15 @@ async fn main() -> Result<()> {
         .unwrap_or_default();
     let xauth = ensure_xauthority(&auth_dir);
 
-    // XAUTHORITY 重探任务：会话轮换（auth 文件换随机名/注销重登）时重链稳定路径
-    if xauth.is_some() {
-        tokio::spawn(xauthority_watch_task(auth_dir));
+    // XAUTHORITY 重探任务：会话轮换（auth 文件换随机名/注销重登）时重链。
+    // 门控用 spec env 的 XAUTHORITY 非空（模式 2 稳定路径 / 模式 3 用户显式
+    // 指定都重链；模式 1 空/未设不感知）——即启动期探测失败也继续重试（auth
+    // 文件可能在 server 启动后才出现，如登录会话轮换）。
+    if std::env::var("XAUTHORITY")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        tokio::spawn(xauthority_watch_task());
     }
 
     // 汇总 server 运行时注入的 env（配置管理器「easytidy 注入」行来源）——记录

@@ -389,9 +389,10 @@ impl Podman {
     ) -> Result<String> {
         use std::collections::HashMap;
 
-        // 透传注入（幂等，同 key/同挂载目标去重）：创建入口统一兜底——模板路径
-        // build_config 已注入（此处重复无副作用）；存量实例重建（从 toml 加载
-        // 烘焙 env/mounts）必须经此处才能拿到新增规则（如 XAUTHORITY 稳定路径）。
+        // 透传注入（幂等，同 key/同挂载目标去重）：**创建期唯一注入点**——所有把配置
+        // 变成运行容器的路径（新建/模板/flavor/重建）都经此处；在内存 clone 上注入，
+        // 注入产物（env/mounts/keep_id）永不回写用户配置文件。用户/模板显式声明的
+        // env key/挂载目标优先（不覆盖，幂等跳过）。
         let mut config = config.clone();
         crate::env::inject_passthrough(&mut config);
 

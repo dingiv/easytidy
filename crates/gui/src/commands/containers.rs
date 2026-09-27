@@ -9,7 +9,6 @@ use tracing::{error, info, warn};
 
 use easytidy_core::configfile::ConfigFile;
 use easytidy_core::desktop;
-use easytidy_core::env::inject_passthrough;
 use easytidy_core::models::{
     ContainerConfig, ContainerSummary, RebuildCleanupResult, RebuildScanResult,
 };
@@ -446,9 +445,9 @@ pub async fn env_new(
     config.name = config.name.trim().to_string();
     let name = config.name.clone();
 
-    // 按 gui/gpu 意图注入宿主透传（幂等；模板展开已注入过则跳过）——
-    // 让创建表单里直接切换「GUI 透传 / GPU 透传」开关后创建即生效（不仅限于模板）。
-    inject_passthrough(&mut config);
+    // 透传注入不在命令层执行：统一由创建入口 `create_with_config`（core）内部
+    // 注入（内存 clone）——本函数随后 register 的是用户原始配置，注入产物
+    // （env/mounts/keep_id）不回写用户配置文件。
 
     // 失败即落盘：容器创建/启动链路多步易错，前端展示之外同时写
     // ~/.easytidy/logs/easytidy-gui.log（排障唯一持久出口）

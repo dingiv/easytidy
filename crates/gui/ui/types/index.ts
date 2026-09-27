@@ -310,13 +310,18 @@ export interface EngineInfo {
 
 /// GUI + GPU 直通预览（passthrough_preview）：`gui_x11`/`gui_wayland`/`gpu` 开启时
 /// 引擎会隐式注入的
-/// 增量 env / mounts（模板里已声明的同 destination / 同 key 项不重复）。
-/// 模板编辑器开启对应开关时以只读行展示，让用户看见引擎将注入什么。
+/// 全集 env / mounts（含被用户显式配置遮蔽的项）。用户显式声明优先：与用户
+/// 同 key / 同容器路径的注入项不会实际生效，在 `shadowed_*` 中标注（前端打
+/// 「已失效」标），让用户看见引擎想注入什么、哪些被盖住了。
 export interface PassthroughPreview {
-  /// 展开时注入的环境变量（"KEY=VALUE"）
+  /// 展开时注入的环境变量（"KEY=VALUE"；含被遮蔽项）
   env: string[];
-  /// 展开时注入的挂载（仅 GUI 直通产生）
+  /// 展开时注入的挂载（仅 GUI 直通产生；含被遮蔽项）
   mounts: MountConfig[];
+  /// 被用户显式配置遮蔽（失效）的注入 env key
+  shadowed_env_keys: string[];
+  /// 被用户显式配置遮蔽（失效）的注入挂载目标（container_path）
+  shadowed_mount_targets: string[];
 }
 
 /// 服务器运行时注入的环境变量（server.env）：容器内 server 启动时探测/修正的

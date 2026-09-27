@@ -1,7 +1,7 @@
 // 挂载（路径映射）面板：表格 + 添加行（宿主路径/容器路径/只读）。
 
 import { useEffect, useState } from 'react';
-import { App as AntApp, AutoComplete, Button, Empty, Input, Space, Switch, Table, Tooltip, Typography } from 'antd';
+import { App as AntApp, AutoComplete, Button, Empty, Input, Space, Switch, Table, Tag, Tooltip } from 'antd';
 import type { TableProps } from 'antd';
 import { DeleteOutlined, FolderOpenOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons';
 import { invoke } from '@tauri-apps/api/core';
@@ -39,13 +39,15 @@ const DIR_LABELS: Record<string, string> = {
 interface MountsPaneProps {
   mounts: MountConfig[];
   /** GUI 直通开启时引擎将隐式注入的挂载（只读展示；gui_x11/gui_wayland 任一开启时由
-   *  passthrough_preview 计算） */
+   *  passthrough_preview 计算；含被用户显式配置遮蔽的项） */
   readonlyMounts?: MountConfig[];
+  /** 被用户显式配置遮蔽（失效）的注入挂载目标（container_path；用户声明优先，不生效） */
+  shadowedMountTargets?: string[];
   onAdd(m: MountConfig): void;
   onRemove(idx: number): void;
 }
 
-export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: MountsPaneProps) {
+export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets = [], onAdd, onRemove }: MountsPaneProps) {
   const { message } = AntApp.useApp();
   const [newMount, setNewMount] = useState({
     host_path: '',
@@ -169,13 +171,56 @@ export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: Mou
     setNewMount({ host_path: '', container_path: '', read_only: false });
   };
 
-  const mountColumns: TableProps<MountConfig>['columns'] = [
+  // 合并表行：用户自定义（可删）+ GUI 透传注入（只读，含被遮蔽项）
+  type MountRow = MountConfig & {
+    kind: 'user' | 'gui';
+    /** 注入项被用户同容器路径声明遮蔽（不实际生效） */
+    shadowed?: boolean;
+  };
+  const rows: MountRow[] = [
+    ...mounts.map((m) => ({ ...m, kind: 'user' as const })),
+    ...readonlyMounts.map((m) => ({
+      ...m,
+      kind: 'gui' as const,
+      shadowed: shadowedMountTargets.includes(m.container_path),
+    })),
+  ];
+
+  const mountColumns: TableProps<MountRow>['columns'] = [
+    {
+      title: '类型',
+      key: 'kind',
+      width: 150,
+      render: (_: unknown, rec: MountRow) =>
+        rec.kind === 'user' ? (
+          <span className="env-src-user">用户自定义</span>
+        ) : (
+          <span className="env-src-easytidy">
+            GUI 透传
+            {rec.shadowed && (
+              <Tooltip title="你在上方已声明同容器路径的挂载，用户显式配置优先，此注入不会生效">
+                <Tag color="warning" style={{ marginLeft: 6 }}>
+                  已失效
+                </Tag>
+              </Tooltip>
+            )}
+          </span>
+        ),
+    },
     {
       title: '宿主路径',
       dataIndex: 'host_path',
       key: 'host_path',
       ellipsis: true,
-      render: (v: string) => <span className="path-cell">{v}</span>,
+      render: (v: string, rec: MountRow) => (
+        <span
+          className="path-cell"
+          style={rec.shadowed ? { textDecoration: 'line-through', opacity: 0.55 } : undefined}
+        >
+          {rec.kind === 'gui' && <LockOutlined className="readonly-badge-icon" />}
+          {v}
+        </span>
+      ),
     },
     {
       title: '容器路径',
@@ -195,15 +240,16 @@ export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: Mou
       title: '操作',
       key: 'actions',
       width: 70,
-      render: (_: unknown, _rec: MountConfig, idx: number) => (
-        <Button
-          type="text"
-          danger
-          size="small"
-          icon={<DeleteOutlined />}
-          onClick={() => onRemove(idx)}
-        />
-      ),
+      render: (_: unknown, rec: MountRow, idx: number) =>
+        rec.kind === 'user' ? (
+          <Button
+            type="text"
+            danger
+            size="small"
+            icon={<DeleteOutlined />}
+            onClick={() => onRemove(idx)}
+          />
+        ) : null,
     },
   ];
 
@@ -211,11 +257,17 @@ export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: Mou
     <div className="config-pane">
       <Table
         size="small"
-        rowKey={(_rec: MountConfig, i) => `mount-${i}`}
+        rowKey={(rec: MountRow) => `${rec.kind}-${rec.host_path}-${rec.container_path}`}
         columns={mountColumns}
-        dataSource={mounts}
+        dataSource={rows}
         pagination={false}
         locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无路径映射" /> }}
+        footer={() => (
+          <span className="section-hint">
+            GUI 透传开启时由引擎按宿主实时环境注入（X11/Wayland socket、$XDG_RUNTIME_DIR、字体图标），只读不可删；
+            标「已失效」的注入项：你已声明同容器路径的挂载，用户显式配置优先，不会生效。
+          </span>
+        )}
       />
 
       {resDirs.length > 0 && (
@@ -289,46 +341,6 @@ export function MountsPane({ mounts, readonlyMounts = [], onAdd, onRemove }: Mou
           添加
         </Button>
       </div>
-
-      {readonlyMounts.length > 0 && (
-        <div className="config-subsection">
-          <Typography.Text strong>
-            <LockOutlined className="readonly-badge-icon" /> GUI 透传注入（只读）
-          </Typography.Text>
-          <Table
-            size="small"
-            rowKey={(_rec: MountConfig, i) => `gui-mount-${i}`}
-            columns={[
-              {
-                title: '宿主路径',
-                dataIndex: 'host_path',
-                key: 'host_path',
-                ellipsis: true,
-                render: (v: string) => <span className="path-cell">{v}</span>,
-              },
-              {
-                title: '容器路径',
-                dataIndex: 'container_path',
-                key: 'container_path',
-                ellipsis: true,
-                render: (v: string) => <span className="path-cell">{v}</span>,
-              },
-              {
-                title: '只读',
-                dataIndex: 'read_only',
-                key: 'read_only',
-                width: 90,
-                render: (ro: boolean) => <Switch size="small" checked={ro} disabled />,
-              },
-            ]}
-            dataSource={readonlyMounts}
-            pagination={false}
-          />
-          <span className="section-hint">
-            GUI 透传开启时由引擎按宿主实时环境注入（X11/Wayland socket、$XDG_RUNTIME_DIR、字体图标），不可手动修改。
-          </span>
-        </div>
-      )}
     </div>
   );
 }

@@ -142,7 +142,7 @@ impl Flavor {
     /// 模板仅作**创建期预填**：展开为实例快照，容器创建后与模板彻底解耦
     /// （无血缘字段、无同步、无漂移检测）。
     pub fn build_config(&self, name: &str) -> Result<ContainerConfig> {
-        let mut config = ContainerConfig {
+        let config = ContainerConfig {
             name: name.to_string(),
             params: self.params.clone(),
             env: Vec::new(),
@@ -150,7 +150,8 @@ impl Flavor {
             persistent: true,
             icon: None,
         };
-        crate::env::host::inject_passthrough(&mut config);
+        // 不在此处注入透传：注入统一由创建入口 `create_with_config_named` 内部
+        // 执行（内存 clone，不落盘）——保证注入产物永不回写用户配置文件。
         Ok(config)
     }
 }

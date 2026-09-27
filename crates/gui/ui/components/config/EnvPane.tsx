@@ -12,7 +12,7 @@
 // 只读）；添加行固定在表下方。
 
 import { useState } from 'react';
-import { App as AntApp, Button, Empty, Input, Table, Tooltip, Typography } from 'antd';
+import { App as AntApp, Button, Empty, Input, Table, Tag, Tooltip, Typography } from 'antd';
 import type { TableProps } from 'antd';
 import { DeleteOutlined, LockOutlined, PlusOutlined } from '@ant-design/icons';
 import {
@@ -26,8 +26,10 @@ import type { ServerEnvItem } from '../../types';
 interface EnvPaneProps {
   env: string[];
   /** GUI/GPU 直通开启时引擎将隐式注入的 env（只读展示；gui 双开关/gpu 开启时由
-   *  passthrough_preview 计算） */
+   *  passthrough_preview 计算；含被用户显式配置遮蔽的项） */
   readonlyEnv?: string[];
+  /** 被用户显式配置遮蔽（失效）的注入 env key（同 key 用户声明优先，注入不生效） */
+  shadowedEnvKeys?: string[];
   /** 容器内 server 运行时注入的 env（server.env；只读；仅单容器且容器运行时可查） */
   serverEnv?: ServerEnvItem[];
   effectiveEnv: string[] | null; // null = 容器未创建
@@ -51,6 +53,8 @@ interface EnvRow {
   type: EnvRowType;
   /** 仅用户自定义行可删除 */
   removable: boolean;
+  /** 注入项被用户显式配置遮蔽（同 key 用户声明优先）→ 不实际生效，打失效标 */
+  shadowed?: boolean;
   /** env 配置中的下标（仅用户自定义行，删除用） */
   idx?: number;
   /** 注入原因（easytidy 注入行展示用，悬停提示） */
@@ -64,6 +68,7 @@ function buildEnvRows(
   readonlyEnv: string[],
   serverEnv: ServerEnvItem[],
   effectiveEnv: string[] | null,
+  shadowedEnvKeys: string[],
 ): EnvRow[] {
   const rows: EnvRow[] = [];
   const taken = new Set<string>();
@@ -84,10 +89,19 @@ function buildEnvRows(
     rows.push({ key: item.key, value: item.value, type: 'easytidy', removable: false, note: item.note });
   }
 
-  // GUI/GPU 透传注入（create-time 预览）
+  // GUI/GPU 透传注入（create-time 预览；含被用户遮蔽的项——照常展示并打失效标）
+  const shadowed = new Set(shadowedEnvKeys);
   for (const kv of readonlyEnv) {
     const { key, value } = parseEnv(kv);
-    if (taken.has(key)) continue;
+    if (taken.has(key)) {
+      if (shadowed.has(key)) {
+        rows.push({
+          key, value, type: 'easytidy', removable: false, shadowed: true,
+          note: '已失效：用户配置中已声明同名变量，用户显式配置优先，此注入不会生效',
+        });
+      }
+      continue;
+    }
     taken.add(key);
     rows.push({ key, value, type: 'easytidy', removable: false });
   }
@@ -113,12 +127,12 @@ function buildEnvRows(
 }
 
 export function EnvPane({
-  env, readonlyEnv = [], serverEnv = [], effectiveEnv, onAdd, onRemove,
+  env, readonlyEnv = [], shadowedEnvKeys = [], serverEnv = [], effectiveEnv, onAdd, onRemove,
 }: EnvPaneProps) {
   const { message } = AntApp.useApp();
   const [newEnv, setNewEnv] = useState({ key: '', value: '' });
 
-  const rows = buildEnvRows(env, readonlyEnv, serverEnv, effectiveEnv);
+  const rows = buildEnvRows(env, readonlyEnv, serverEnv, effectiveEnv, shadowedEnvKeys);
 
   const addEnv = () => {
     const key = newEnv.key.trim();
@@ -138,7 +152,7 @@ export function EnvPane({
       key: 'key',
       ellipsis: true,
       render: (v: string, rec: EnvRow) => (
-        <span className="env-key-cell">
+        <span className="env-key-cell" style={rec.shadowed ? { textDecoration: 'line-through', opacity: 0.55 } : undefined}>
           {rec.type !== 'user' && <LockOutlined className="readonly-badge-icon" />}
           {v}
         </span>
@@ -157,7 +171,16 @@ export function EnvPane({
       key: 'type',
       width: 130,
       render: (t: EnvRowType, rec: EnvRow) => {
-        const label = <span className={ENV_TYPE_META[t].cls}>{ENV_TYPE_META[t].label}</span>;
+        const label = (
+          <span className={ENV_TYPE_META[t].cls}>
+            {ENV_TYPE_META[t].label}
+            {rec.shadowed && (
+              <Tag color="warning" style={{ marginLeft: 6 }}>
+                已失效
+              </Tag>
+            )}
+          </span>
+        );
         return rec.note ? <Tooltip title={rec.note}>{label}</Tooltip> : label;
       },
     },

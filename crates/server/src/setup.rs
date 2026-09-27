@@ -123,23 +123,25 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
     }
 }
 
-/// 探测 X11 auth 文件并注入**稳定路径** `XAUTHORITY`（server 内置 GUI 透传）。
+/// 探测 X11 auth 文件并按**三态语义**处理 `XAUTHORITY`（server 内置 GUI 透传）。
 ///
-/// **X11 直通意图门控（2026-09-10 双半拆分）**：仅当容器 spec Env 含 `XAUTHORITY`
-/// 时才注入。core 只在 `gui_x11 = true` 时烘焙 `XAUTHORITY=<稳定路径>` 进容器 spec
-/// （单一真相源）；server 进程 env = spec env，故「XAUTHORITY 是否存在」即 X11 直通
-/// 意图信号。`gui_x11` 关（纯 Wayland / headless）→ spec 无 XAUTHORITY → 本函数
-/// 直接返回 `None`（不探测 / 不建软链 / 不 set_var），避免给 Wayland-only 容器
-/// 无谓注入 X11 auth。
+/// **三态语义（2026-09-17 用户显式配置支持）**，按容器 spec Env 的 `XAUTHORITY`
+/// 取值分派：
+/// 1. **空/未设**：`gui_x11` 关，或用户显式声明空值（用户声明空 = 显式不要
+///    X11 auth，引擎不注入、server 也不做感知）→ 直接返回 `None`（不探测 /
+///    不建软链 / 不 set_var）。
+/// 2. **core 稳定路径**（`<auth_dir>/xauthority`）：引擎注入的常规 X11 透传 →
+///    探测真实 auth 文件并维护稳定软链，进程 env 保持稳定路径不变。
+/// 3. **用户显式指定的其他路径**：用户配置优先——**不覆盖**进程 env（保持
+///    用户值）；感知改为维护「用户指定路径 → 真实 auth 文件」软链（会话
+///    轮换时随 [`xauthority_watch_task`] 重链），让用户路径跟住 session 变化。
 ///
-/// **为什么不让用户配 XAUTHORITY**:
-/// - 真实 auth 文件路径含随机后缀（典型 `/run/user/$uid/mutter-Xwaylandauth.<random>`
-///   或 `xauth_<random>`，compositor 登录会话时随机生成，会变）。
-/// - 用户写在 YAML/容器配置里的字面值无法跟住 session 变化——历史上因
-///   `.mutter-Xwaylandauth.XXXXXX` 字面占位符 + 文件不存在 → Chrome "Authorization
-///   required" 的 bug 链就是这条。
+/// **用户显式配置的路径风险（用户须知）**：真实 auth 文件路径含随机后缀
+/// （典型 `/run/user/$uid/mutter-Xwaylandauth.<random>`，compositor 登录
+/// 会话时随机生成）。用户写的固定路径无法直接跟住 session 变化——模式 3
+/// 用「用户路径作软链位」适配，而非硬指向。
 ///
-/// **稳定间接路径模型**（2026-09-03）：
+/// **稳定间接路径模型**（2026-09-03，模式 2）：
 /// - 创建期（gui-passthrough.yaml）注入 `XAUTHORITY=<socket 目录>/xauthority`
 ///   ——路径稳定、进容器 spec Env，**所有**容器内进程（含 `podman exec`、
 ///   `ets`）都拿到同一值；
@@ -147,25 +149,19 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
 /// - [`xauthority_watch_task`] 周期重探：会话轮换（新随机名/注销）时重链，
 ///   进程 env 恒定不变（只换链目标）。
 ///
-/// 本函数**忽略** podman create 时可能注入的任何 `XAUTHORITY`（包括 host 注入 +
-/// 用户模板声明）：进程 env 统一覆盖为稳定路径，全系统一个值。
-///
-/// 取不到时仅 warn——非 GUI 容器（纯 headless）不应被这条路径阻碍启动。
+/// 返回 `Some(稳定路径)` 仅限模式 2（确实发生了注入，供 `server.env` 申报）；
+/// 模式 3 返回 `None`（env 是用户自己配的，不算注入）。取不到真实文件时仅
+/// warn——非 GUI 容器（纯 headless）不应被这条路径阻碍启动。
 ///
 /// `auth_dir` = XAUTHORITY 稳定路径所在目录（server 的 socket 目录，容器内
 /// 即 `/run/easytidy`，bind-mount rw）。
 pub(crate) fn ensure_xauthority(auth_dir: &std::path::Path) -> Option<String> {
-    // X11 直通意图门控：spec env（= 进程初始 env）的 XAUTHORITY 为空/未设
-    // → gui_x11 关（纯 Wayland / headless，core 意图覆盖已置空），跳过一切 X11 auth 注入。
-    // 非空（core 烘焙的稳定路径）→ gui_x11 开，探到真实文件后维护软链。
-    let x11_requested = match std::env::var("XAUTHORITY") {
-        Ok(v) => !v.is_empty(),
-        Err(_) => false,
-    };
-    if !x11_requested {
-        tracing::debug!("spec env XAUTHORITY 空/未设（gui_x11 关），跳过 XAUTHORITY 自动注入");
-        return None;
-    }
+    // 三态门控：spec env（= 进程初始 env）的 XAUTHORITY 空/未设 → 模式 1：
+    // gui_x11 关或用户显式声明空值（用户声明空 = 不要 X11 auth）——不注入、
+    // 不做感知。
+    let env_value = std::env::var("XAUTHORITY")
+        .ok()
+        .filter(|v| !v.is_empty())?;
     let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
         tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
         return None;
@@ -178,36 +174,57 @@ pub(crate) fn ensure_xauthority(auth_dir: &std::path::Path) -> Option<String> {
         return None;
     };
     let path = std::path::PathBuf::from(path_str);
-    let stable = write_xauthority_link(auth_dir, &path);
+    let stable = auth_dir.join(XAUTHORITY_STABLE_FILE);
+    // 模式 3（用户显式指定非稳定路径）→ 用户配置优先：软链位用用户路径，
+    // 进程 env 保持用户值不覆盖；模式 2（core 稳定路径）→ 间接路径模型。
+    let user_specified = std::path::Path::new(&env_value) != stable;
+    let link_path = if user_specified {
+        tracing::info!(
+            "XAUTHORITY 用户显式指定（{}）：用户配置优先，感知软链维护到用户路径",
+            env_value
+        );
+        std::path::PathBuf::from(&env_value)
+    } else {
+        stable.clone()
+    };
+    if link_path == path {
+        // 用户路径即真实 auth 文件本身：无需软链，保持原样（也不申报注入）
+        return None;
+    }
+    write_xauthority_link(&link_path, &path);
     tracing::info!(
-        "server 注入 XAUTHORITY={} (真实文件 {})",
-        stable.display(),
+        "XAUTHORITY 软链 {} → 真实文件 {}",
+        link_path.display(),
         path.display()
     );
+    if user_specified {
+        // 用户值已在 env 里，不覆盖；返回 None = 不向 `server.env` 申报注入
+        //（env 是用户自己配的，不是 server 注入的）
+        return None;
+    }
     // 覆盖进程 env——后续 pty.open / apps.launch 经 std::env::vars() 取到的
     // 就是稳定路径。std::env::set_var 在多线程下是 unsafe(race),server 此时
     // 仍单线程(未启动 listener / accept 循环),安全。
-    let stable_str = stable.to_string_lossy().to_string();
+    let stable_str = stable.to_string_lossy().into_owned();
     std::env::set_var("XAUTHORITY", &stable_str);
     Some(stable_str)
 }
 
-/// 维护稳定软链 `<auth_dir>/xauthority → target`（存在则替换）。
+/// 维护软链 `link_path → target`（存在则替换）。
 ///
+/// `link_path` 为软链完整路径（core 稳定路径，或用户显式指定的路径——模式 3）。
 /// 失败（目录不可写等）仅 warn 不报错——X11 透传是增强项，不应阻断 server
-/// 启动。返回稳定路径（无论写入成败，调用方 set_var 用）。
-fn write_xauthority_link(auth_dir: &std::path::Path, target: &std::path::Path) -> std::path::PathBuf {
+/// 启动。
+fn write_xauthority_link(link_path: &std::path::Path, target: &std::path::Path) {
     use std::os::unix::fs::symlink;
-    let stable = auth_dir.join(XAUTHORITY_STABLE_FILE);
-    match std::fs::remove_file(&stable) {
+    match std::fs::remove_file(link_path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!("清理旧 {} 失败：{e}", stable.display()),
+        Err(e) => tracing::warn!("清理旧 {} 失败：{e}", link_path.display()),
     }
-    if let Err(e) = symlink(target, &stable) {
-        tracing::warn!("写 XAUTHORITY 软链 {} → {} 失败：{e}", stable.display(), target.display());
+    if let Err(e) = symlink(target, link_path) {
+        tracing::warn!("写 XAUTHORITY 软链 {} → {} 失败：{e}", link_path.display(), target.display());
     }
-    stable
 }
 
 /// XAUTHORITY 稳定文件名（与 gui-passthrough.yaml 注入的
@@ -220,11 +237,20 @@ pub(crate) const XAUTHORITY_STABLE_FILE: &str = "xauthority";
 /// 只动软链、**不写进程 env**——稳定路径值恒定，子进程经软链读到最新内容，
 /// 无 env race。探不到（注销中）保留旧链（无害，X11 本就失效）。
 /// 任务随进程退出自然终止（不 join）。
-pub(crate) async fn xauthority_watch_task(auth_dir: std::path::PathBuf) {
+pub(crate) async fn xauthority_watch_task() {
     let interval = XAUTHORITY_WATCH_INTERVAL;
     let mut last_target: Option<std::path::PathBuf> = None;
     loop {
         tokio::time::sleep(interval).await;
+        // 软链位 = 当前进程 env 的 XAUTHORITY（core 稳定路径或用户显式指定
+        // 的路径——三态模式 2/3 统一：env 值恒定不变，只换链目标）。
+        let Some(link) = std::env::var("XAUTHORITY")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+        else {
+            continue; // 模式 1（空/未设）：无 X11 auth 透传，不感知
+        };
         let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
             continue;
         };
@@ -232,13 +258,18 @@ pub(crate) async fn xauthority_watch_task(auth_dir: std::path::PathBuf) {
             continue; // 探不到：保留旧链
         };
         let path = std::path::PathBuf::from(path_str);
+        if link == path {
+            // 用户路径即真实文件本身：无需软链
+            last_target = Some(path);
+            continue;
+        }
         if last_target.as_ref() != Some(&path) {
             let prev = last_target
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "(首次)".to_string());
             info!("XAUTHORITY 重探：auth 文件变化 {prev} → {}", path.display());
-            write_xauthority_link(&auth_dir, &path);
+            write_xauthority_link(&link, &path);
             last_target = Some(path);
         }
     }
@@ -275,8 +306,9 @@ mod tests {
             std::env::set_var("XDG_RUNTIME_DIR", dir);
             let xauthority_prev = std::env::var("XAUTHORITY").ok();
             // 模拟 gui_x11=true 容器：core 烘焙 XAUTHORITY 稳定路径进 spec Env，
-            // server 进程 env 继承它——ensure_xauthority 的 X11 意图门控据此放行。
-            std::env::set_var("XAUTHORITY", "/run/easytidy/xauthority");
+            // server 进程 env 继承它——ensure_xauthority 的三态门控据此放行。
+            // 稳定路径 = <auth_dir>/xauthority（auth_dir 即传入的 tmp 目录）。
+            std::env::set_var("XAUTHORITY", dir.join("xauthority"));
             Self { prev, xauthority_prev }
         }
     }
@@ -358,32 +390,96 @@ mod tests {
         assert_eq!(result.as_deref(), Some(stable.to_str().unwrap()));
     }
 
+    /// 三态模式 1（2026-09-17）：用户显式声明**空值**（XAUTHORITY=""）→ 不注入、
+    /// 不做感知（返回 None，不建软链、不改 env）。
     #[test]
-    fn test_ensure_xauthority_overrides_user_config() {
+    fn test_ensure_xauthority_empty_user_value_skips() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var("XAUTHORITY").ok();
+        let prev_rt = std::env::var("XDG_RUNTIME_DIR").ok();
+        std::env::set_var("XDG_RUNTIME_DIR", tmp.path());
+        std::env::set_var("XAUTHORITY", "");
+        // runtime 下放真实 auth 文件——空值门控应直接短路，不碰它
+        std::fs::write(tmp.path().join("mutter-Xwaylandauth.real"), b"cookie").unwrap();
+
+        assert_eq!(ensure_xauthority(tmp.path()), None, "空值应短路");
+        assert_eq!(
+            std::env::var("XAUTHORITY").ok().as_deref(),
+            Some(""),
+            "空值不应被改写"
+        );
+        assert!(
+            !tmp.path().join(XAUTHORITY_STABLE_FILE).exists(),
+            "空值不应建稳定软链（不感知）"
+        );
+        // 还原
+        match prev_rt {
+            Some(v) => std::env::set_var("XDG_RUNTIME_DIR", v),
+            None => std::env::remove_var("XDG_RUNTIME_DIR"),
+        }
+        match prev {
+            Some(v) => std::env::set_var("XAUTHORITY", v),
+            None => std::env::remove_var("XAUTHORITY"),
+        }
+    }
+
+    /// 三态模式 3（2026-09-17）：用户显式指定非稳定路径 → 用户配置优先：
+    /// **不覆盖** env（保持用户值）；感知改为维护「用户路径 → 真实文件」软链。
+    #[test]
+    fn test_ensure_xauthority_user_path_wins() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let _g = RuntimeDirGuard::new(tmp.path());
 
-        // 用户在 YAML 里写的字面占位符(历史 bug 链)
-        std::env::set_var(
-            "XAUTHORITY",
-            "/run/user/1000/.mutter-Xwaylandauth.XXXXXX",
-        );
+        // 用户显式指定自己的 auth 路径（非 core 稳定路径）
+        let user_path = tmp.path().join("my-xauthority");
+        std::env::set_var("XAUTHORITY", &user_path);
 
-        // server 启动后自动发现真实 auth 文件,覆盖用户配的占位符（稳定路径）
         let real_auth = tmp.path().join("mutter-Xwaylandauth.real");
         std::fs::write(&real_auth, b"cookie").unwrap();
 
-        let stable = tmp.path().join(XAUTHORITY_STABLE_FILE);
-        ensure_xauthority(tmp.path());
+        let result = ensure_xauthority(tmp.path());
+        assert_eq!(result, None, "用户配置不算注入，不应向 server.env 申报");
         assert_eq!(
             std::env::var("XAUTHORITY").ok().as_deref(),
-            Some(stable.to_str().unwrap()),
-            "server 必须覆盖用户配的字面值（统一为稳定路径）"
+            Some(user_path.to_str().unwrap()),
+            "用户显式指定的 XAUTHORITY 不应被覆盖"
         );
+        // 感知软链位 = 用户路径（跟住 session 变化）
         assert_eq!(
-            std::fs::canonicalize(&stable).unwrap(),
-            std::fs::canonicalize(&real_auth).unwrap()
+            std::fs::canonicalize(&user_path).unwrap(),
+            std::fs::canonicalize(&real_auth).unwrap(),
+            "用户路径应被维护为指向真实 auth 文件的软链"
+        );
+        // core 稳定路径不应被动（用户优先，引擎不越权）
+        assert!(
+            !tmp.path().join(XAUTHORITY_STABLE_FILE).exists(),
+            "用户显式指定时不应另建稳定软链"
+        );
+    }
+
+    /// 三态模式 3 变体：用户路径即真实 auth 文件本身 → 无需软链，保持原样。
+    #[test]
+    fn test_ensure_xauthority_user_path_is_real_file() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _g = RuntimeDirGuard::new(tmp.path());
+
+        let real_auth = tmp.path().join("mutter-Xwaylandauth.real");
+        std::fs::write(&real_auth, b"cookie").unwrap();
+        std::env::set_var("XAUTHORITY", &real_auth);
+
+        let result = ensure_xauthority(tmp.path());
+        assert_eq!(result, None);
+        assert_eq!(
+            std::env::var("XAUTHORITY").ok().as_deref(),
+            Some(real_auth.to_str().unwrap()),
+            "用户直接指向真实文件时保持原样"
+        );
+        assert!(
+            !tmp.path().join(XAUTHORITY_STABLE_FILE).exists(),
+            "不应另建稳定软链"
         );
     }
 

@@ -28,12 +28,25 @@ use crate::models::{ContainerConfig, ContainerParams};
 /// 配置变成运行容器的路径上行为一致。
 pub fn inject_passthrough(config: &mut ContainerConfig) {
     let (x11, wayland) = (config.params.gui_x11, config.params.gui_wayland);
+    // 注入前先记录用户/模板**显式声明**的 env key：意图 env（DISPLAY 等）对显式
+    // 声明的 key 不覆盖（用户显式配置优先，见 inject_gui_passthrough 文档）。
+    let declared_env_keys: HashSet<String> = config
+        .env
+        .iter()
+        .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
+        .collect();
     // 至少一半开启才调：apply 内部按意图**覆盖** GUI 意图 env（开→宿主值，关→置空），
     // 故关一半（如 x11 关 wayland 开）时仍会覆盖清空镜像里烘焙的旧 X11 值（commit
     // 快照把容器 env 烘进镜像、重建继承）。两半均关 = 非 GUI 容器，不调 apply（避免给
     // 纯 headless 容器写空 env）；此场景下镜像若残留旧 X11 env 不再主动清除（边缘情况）。
     if x11 || wayland {
-        inject_gui_passthrough(&mut config.params, &mut config.env, x11, wayland);
+        inject_gui_passthrough(
+            &mut config.params,
+            &mut config.env,
+            x11,
+            wayland,
+            &declared_env_keys,
+        );
     }
     if config.params.gpu_nvidia || config.params.gpu_amd {
         inject_gpu_passthrough(
@@ -62,8 +75,9 @@ pub fn inject_gui_passthrough(
     env: &mut Vec<String>,
     x11: bool,
     wayland: bool,
+    declared_env_keys: &HashSet<String>,
 ) {
-    crate::env::gui::apply(params, env, x11, wayland);
+    crate::env::gui::apply(params, env, x11, wayland, declared_env_keys);
 }
 
 /// GPU env 注入（共享）：按 vendor 幂等追加对应 env。
@@ -564,6 +578,92 @@ mod tests {
         assert!(
             cfg.env.iter().any(|e| e.starts_with("XDG_DATA_DIRS=")),
             "shared 段应注入 XDG_DATA_DIRS：{:?}",
+            cfg.env
+        );
+    }
+
+    /// 回归（用户显式配置优先）：用户/模板显式声明的意图 env key（如 DISPLAY）
+    /// 不被注入覆盖、意图关时也不被置空；未声明的 key 仍按意图覆盖/置空。
+    #[test]
+    fn test_inject_respects_user_declared_env() {
+        let build = |env: Vec<String>| ContainerConfig {
+            name: "t".into(),
+            params: ContainerParams {
+                image: "alpine".into(),
+                gui_x11: true,
+                gui_wayland: false,
+                ..ContainerParams::default()
+            },
+            env,
+            silent_boot: false,
+            persistent: true,
+            icon: None,
+        };
+
+        // 用户显式声明 DISPLAY → 保留用户值，不覆盖为宿主实时值
+        let mut cfg = build(vec!["DISPLAY=:99".to_string()]);
+        inject_passthrough(&mut cfg);
+        assert_eq!(
+            cfg.env
+                .iter()
+                .find(|e| e.starts_with("DISPLAY="))
+                .map(String::as_str),
+            Some("DISPLAY=:99"),
+            "用户显式声明的 DISPLAY 不应被注入覆盖：{:?}",
+            cfg.env
+        );
+
+        // 用户未声明 DISPLAY → 按意图注入宿主实时值（存在宿主 DISPLAY 时非空）
+        let mut cfg = build(vec![]);
+        inject_passthrough(&mut cfg);
+        assert!(
+            cfg.env.iter().any(|e| e.starts_with("DISPLAY=")),
+            "未声明时应按意图注入 DISPLAY：{:?}",
+            cfg.env
+        );
+    }
+
+    /// 回归（注入不回写）：注入只发生在传入的可变引用上（内存），本测试锁定
+    /// inject 前后「除注入项外」的语义——调用方持有用户原始配置的副本注册时
+    /// 不含注入产物（由各注册路径保证传入的是注入前 clone，见 GUI env_new /
+    /// apply_container_config / CLI flavor apply；此处锁定核心前提：注入函数
+    /// 不触碰任何持久化 IO）。
+    #[test]
+    fn test_inject_no_user_value_overwrite() {
+        let mut cfg = ContainerConfig {
+            name: "t".into(),
+            params: ContainerParams {
+                image: "alpine".into(),
+                gui_x11: true,
+                ..ContainerParams::default()
+            },
+            // 用户显式声明全部三个意图 env → 注入后 env 应与用户声明完全一致
+            env: vec![
+                "DISPLAY=:1".to_string(),
+                "XAUTHORITY=/my/xauth".to_string(),
+                "WAYLAND_DISPLAY=wayland-9".to_string(),
+            ],
+            silent_boot: false,
+            persistent: true,
+            icon: None,
+        };
+        inject_passthrough(&mut cfg);
+        let user_only: Vec<&String> = cfg
+            .env
+            .iter()
+            .filter(|e| {
+                let k = e.split('=').next().unwrap_or("");
+                matches!(k, "DISPLAY" | "XAUTHORITY" | "WAYLAND_DISPLAY")
+            })
+            .collect();
+        assert_eq!(
+            user_only,
+            vec![
+                &"DISPLAY=:1".to_string(),
+                &"XAUTHORITY=/my/xauth".to_string(),
+                &"WAYLAND_DISPLAY=wayland-9".to_string(),
+            ],
+            "用户声明的意图 env 应原样保留：{:?}",
             cfg.env
         );
     }

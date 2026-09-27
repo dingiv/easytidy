@@ -299,6 +299,7 @@ export function ContainerConfigEditor({
         <MountsPane
           mounts={value.mounts}
           readonlyMounts={preview?.mounts ?? []}
+          shadowedMountTargets={preview?.shadowed_mount_targets ?? []}
           onAdd={(m: MountConfig) => update({ mounts: [...value.mounts, m] })}
           onRemove={(idx: number) =>
             update({ mounts: value.mounts.filter((_, i) => i !== idx) })
@@ -329,6 +330,7 @@ export function ContainerConfigEditor({
         <EnvPane
           env={value.env}
           readonlyEnv={preview?.env ?? []}
+          shadowedEnvKeys={preview?.shadowed_env_keys ?? []}
           serverEnv={serverEnv}
           effectiveEnv={effective?.env ?? null}
           onAdd={(key, v) => update({ env: [...value.env, `${key}=${v}`] })}

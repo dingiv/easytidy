@@ -124,8 +124,16 @@ pub fn load_rule() -> GuiPassthroughRule {
 /// 重建继承，故 GUI 意图相关 env（DISPLAY / XAUTHORITY / WAYLAND_DISPLAY）必须按
 /// 当前意图**覆盖**（非仅追加）：意图开 → 宿主实时值；意图关 → 置空（覆盖镜像里
 /// 的旧值）。两半均关时不注入任何段，但仍执行覆盖清空。
+/// **用户/模板显式声明的 key 不覆盖**（用户显式配置优先；`declared_env_keys`
+/// 由 [`crate::env::host::inject_passthrough`] 在注入前采集传入）。
 /// 供 [`crate::env::host::inject_gui_passthrough`] 调用。
-pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>, x11: bool, wayland: bool) {
+pub fn apply(
+    params: &mut ContainerParams,
+    env: &mut Vec<String>,
+    x11: bool,
+    wayland: bool,
+    declared_env_keys: &std::collections::HashSet<String>,
+) {
     let rule = load_rule();
     let vars = host_vars();
 
@@ -202,25 +210,35 @@ pub fn apply(params: &mut ContainerParams, env: &mut Vec<String>, x11: bool, way
     } else {
         String::new()
     };
-    set_env(env, "DISPLAY", &display);
+    set_env(env, "DISPLAY", &display, declared_env_keys);
     let xauth = if x11 {
         XAUTHORITY_STABLE_PATH.to_string()
     } else {
         String::new()
     };
-    set_env(env, "XAUTHORITY", &xauth);
+    set_env(env, "XAUTHORITY", &xauth, declared_env_keys);
     let wayland_display = if wayland {
         vars.get("WAYLAND_DISPLAY").cloned().unwrap_or_default()
     } else {
         String::new()
     };
-    set_env(env, "WAYLAND_DISPLAY", &wayland_display);
+    set_env(env, "WAYLAND_DISPLAY", &wayland_display, declared_env_keys);
 }
 
 /// 覆盖式设置 env（替换同 key 既有项；无则追加）。用于意图驱动覆盖——
 /// commit 快照把容器 env 烘焙进镜像、重建继承，故 GUI 意图 env 必须按意图
 /// 覆盖（而非仅幂等追加），关时置空以清除镜像里的旧值。
-fn set_env(env: &mut Vec<String>, key: &str, value: &str) {
+/// **例外**：用户/模板显式声明的 key（`declared_env_keys`）不覆盖、不清空——
+/// 用户显式配置优先，引擎注入不越权。
+fn set_env(
+    env: &mut Vec<String>,
+    key: &str,
+    value: &str,
+    declared_env_keys: &std::collections::HashSet<String>,
+) {
+    if declared_env_keys.contains(key) {
+        return;
+    }
     let prefix = format!("{key}=");
     env.retain(|e| !e.starts_with(&prefix));
     env.push(format!("{key}={value}"));
@@ -300,7 +318,8 @@ mod tests {
             read_only: false,
         });
         let mut env = Vec::new();
-        apply(&mut params, &mut env, true, false);
+        let declared = std::collections::HashSet::new();
+        apply(&mut params, &mut env, true, false, &declared);
         let run_count = params
             .mounts
             .iter()

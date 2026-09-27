@@ -9,13 +9,14 @@
 //!
 //! 与 [`Flavor`](crate::flavor::Flavor) 的关系:
 //! - flavor 偏 CLI(创建时执行 setup 安装、带 gui 展开逻辑),GUI 模板 tab 不再使用
-//! - 本模块只定义 [`ConfTemplate`] 类型与 `build_config`(展开语义,注入宿主
-//!   GUI 透传);YAML ⇄ 类型转换与目录 IO 都在 GUI 命令层完成。
+//! - 本模块只定义 [`ConfTemplate`] 类型与 `build_config`（纯展开语义；透传
+//!   注入由创建入口统一执行）；YAML ⇄ 类型转换与目录 IO 都在 GUI 命令层完成。
 
 use serde::{Deserialize, Serialize};
 
-use crate::env::inject_passthrough;
-use crate::models::{deserialize_null_to_empty_vec, ContainerConfig};
+use crate::models::{
+    deserialize_null_to_empty_vec, ContainerConfig,
+};
 
 /// conf 模板目录（双轨制）：dev = 源码种子目录 `crates/gui/conf`，prod =
 /// 用户配置目录 `~/.easytidy/conf`（首跑播种不覆盖）。路径由 core 的
@@ -82,11 +83,11 @@ impl ConfTemplate {
     /// （无血缘字段、无同步、无漂移检测）。
     ///
     /// - `name`：执行容器名（覆盖模板内 `config.name`）
-    /// - 按 config 内的 gui/gpu 意图注入宿主透传（与实例 apply/重建路径共用）
+    /// - 纯展开，不注入透传：注入统一由创建入口 `create_with_config_named`
+    ///   内部执行（内存 clone，不落盘）——保证注入产物永不回写用户配置文件。
     pub fn build_config(&self, name: &str) -> ContainerConfig {
         let mut config = self.config.clone();
         config.name = name.to_string();
-        inject_passthrough(&mut config);
         config
     }
 }
@@ -210,8 +211,9 @@ ports:
             "gpu_nvidia":true
         }"#;
         let t: ConfTemplate = serde_json::from_str(json).unwrap();
+        let mut cfg = t.build_config("c1");
+        crate::env::inject_passthrough(&mut cfg);
         assert!(t.config.params.gpu_nvidia);
-        let cfg = t.build_config("c1");
         assert!(cfg.params.gpu_nvidia);
         // 只注 NVIDIA_DRIVER_CAPABILITIES（NVIDIA_VISIBLE_DEVICES 不注——GPU 走 CDI）
         assert!(cfg
@@ -250,7 +252,8 @@ ports:
             "gpu_nvidia":true,"gpu_amd":true
         }"#;
         let tb: ConfTemplate = serde_json::from_str(json_both).unwrap();
-        let cfgb = tb.build_config("c5");
+        let mut cfgb = tb.build_config("c5");
+        crate::env::inject_passthrough(&mut cfgb);
         assert!(cfgb.params.gpu_nvidia);
         assert!(cfgb.params.gpu_amd);
         assert!(cfgb
