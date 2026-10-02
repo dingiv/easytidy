@@ -120,7 +120,6 @@ enum Commands {
         app_id: String,
     },
 
-
     /// 删除容器
     Rm {
         /// 容器名或 ID
@@ -322,9 +321,11 @@ async fn main() -> Result<()> {
             match cli.command {
                 Commands::List => cmd_list(podman).await,
                 Commands::Pull { image } => cmd_pull(podman, image).await,
-                Commands::Create { image, name, volume } => {
-                    cmd_create(podman, image, name, volume, cli.config_dir.clone()).await
-                }
+                Commands::Create {
+                    image,
+                    name,
+                    volume,
+                } => cmd_create(podman, image, name, volume, cli.config_dir.clone()).await,
                 Commands::Start { container } => cmd_start(podman, container).await,
                 Commands::Stop { container } => cmd_stop(podman, container).await,
                 Commands::Restart { container } => cmd_restart(podman, container).await,
@@ -341,12 +342,8 @@ async fn main() -> Result<()> {
                         name,
                         flavor,
                         image,
-                    } => {
-                        cmd_env_new(podman, name, flavor, image, cli.config_dir.clone()).await
-                    }
-                    EnvCmd::Rm { name } => {
-                        cmd_env_rm(podman, name, cli.config_dir.clone()).await
-                    }
+                    } => cmd_env_new(podman, name, flavor, image, cli.config_dir.clone()).await,
+                    EnvCmd::Rm { name } => cmd_env_rm(podman, name, cli.config_dir.clone()).await,
                     EnvCmd::Snapshot {
                         name,
                         snapshot,
@@ -360,13 +357,7 @@ async fn main() -> Result<()> {
                     // List 已在 podman 连接前处理（纯本地，无需 podman）——此处不可达
                     FlavorCmd::List => unreachable!("flavor list handled before podman connect"),
                     FlavorCmd::Apply { flavor, container } => {
-                        cmd_flavor_apply(
-                            podman,
-                            flavor,
-                            container,
-                            cli.config_dir.clone(),
-                        )
-                        .await
+                        cmd_flavor_apply(podman, flavor, container, cli.config_dir.clone()).await
                     }
                 },
                 // 外层已处理的变体（Run/Open/DockLogs/Unexport/Flavor::List）——
@@ -472,7 +463,7 @@ async fn cmd_create(
             // 容器内准备（fontconfig / useradd / 家目录补齐）：best-effort，
             // 失败不阻断创建（落日志，重建可重跑修复）
             if let Err(e) = podman
-                .prepare_container(&name, &container_config.params)
+                .prepare_container(&name, &container_config.params, true)
                 .await
             {
                 error!("容器内准备失败（忽略，重建可修复）：{e}");
@@ -524,7 +515,10 @@ async fn cmd_rebuild(
 
     // 容器内准备（对齐 GUI：重建后重跑 fontconfig / useradd / 家目录补齐）：
     // best-effort，失败不阻断（落日志）
-    if let Err(e) = podman.prepare_container(&container, &config.params).await {
+    if let Err(e) = podman
+        .prepare_container(&container, &config.params, false)
+        .await
+    {
         error!("容器内准备失败（忽略，再次重建可修复）：{e}");
     }
 
@@ -658,9 +652,7 @@ async fn cmd_env_new(
     config_dir: Option<PathBuf>,
 ) -> Result<()> {
     match flavor {
-        Some(f) => {
-            cmd_flavor_apply(podman, f, Some(name), config_dir.clone()).await
-        }
+        Some(f) => cmd_flavor_apply(podman, f, Some(name), config_dir.clone()).await,
         None => {
             let Some(image) = image else {
                 bail!("env new 需要 --flavor <f> 或 --image <img>");
@@ -680,10 +672,7 @@ async fn cmd_env_new(
             podman.start(&name).await?;
             // 容器内准备（fontconfig / useradd / 家目录补齐）：best-effort，失败
             // 不阻断（对齐 cmd_create / GUI env_new；core 契约见 podman/user.rs）
-            if let Err(e) = podman
-                .prepare_container(&name, &config.params)
-                .await
-            {
+            if let Err(e) = podman.prepare_container(&name, &config.params, true).await {
                 error!("容器内准备失败（忽略，重建可修复）：{e}");
             }
             let config_file = config_file_for(&config_dir)?;
@@ -791,10 +780,7 @@ async fn cmd_flavor_apply(
     // 容器内准备（fontconfig / useradd / 家目录补齐）：best-effort，失败不阻断。
     // flavor 的 setup 命令（装包等）依赖 fontconfig/用户建号已就绪——对齐
     // cmd_create / GUI（core 契约见 podman/user.rs）。
-    if let Err(e) = podman
-        .prepare_container(&name, &config.params)
-        .await
-    {
+    if let Err(e) = podman.prepare_container(&name, &config.params, true).await {
         error!("容器内准备失败（忽略，setup 可能受影响）：{e}");
     }
     println!(
@@ -928,9 +914,7 @@ async fn wait_socket_ready(name: &str) -> Result<PathBuf> {
     //（exists → 立即返回 → connect 被拒 Connection refused，而 server
     // 稍后才真正 listen）。连接成功即就绪（连接随即关闭，无害）。
     for _ in 0..40 {
-        if socket.exists()
-            && tokio::net::UnixStream::connect(&socket).await.is_ok()
-        {
+        if socket.exists() && tokio::net::UnixStream::connect(&socket).await.is_ok() {
             return Ok(socket);
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -943,7 +927,6 @@ async fn ensure_running_and_ready(podman: &Podman, name: &str) -> Result<PathBuf
     ensure_running(podman, name).await?;
     wait_socket_ready(name).await
 }
-
 
 /// 连接容器 server socket → hello → pty.open → 双向流式转发，
 /// 阻塞至应用退出，返回其退出码（server 侧有损 0/-1，见 server pty.rs）。
@@ -1313,7 +1296,9 @@ async fn cmd_open(
                 info!("已拉起 Worker GUI（{container}）");
             }
             None => {
-                warn!("找不到 easytidy-gui 可执行文件：容器 {container} 已保活，但无法打开管理窗口");
+                warn!(
+                    "找不到 easytidy-gui 可执行文件：容器 {container} 已保活，但无法打开管理窗口"
+                );
                 show_error_in_terminal(
                     "找不到 easytidy-gui 可执行文件（Worker GUI 未安装或不在 CLI 同目录/PATH）。\n\n\
                      容器已启动；请补齐 easytidy-gui 后重试，或用 easytidy GUI（Master）打开。",
@@ -1499,7 +1484,9 @@ async fn cmd_run_root_attach(podman: &Podman, container: &str) -> Result<i32> {
             ]
         }
     };
-    let exec = podman.exec_pty(container, "0", cols, rows, client_cmd).await?;
+    let exec = podman
+        .exec_pty(container, "0", cols, rows, client_cmd)
+        .await?;
     let exec_id = exec.exec_id.clone();
     let input = exec.input;
     let mut output = exec.output;
@@ -1627,11 +1614,7 @@ async fn cmd_dock_logs(container: &str, tail: usize) -> Result<()> {
 }
 
 /// 在容器内启动 easytidy-dock daemon（如未运行）。
-async fn bootstrap_dock_daemon(
-    podman: &Podman,
-    container: &str,
-    dock_bin: &str,
-) -> Result<()> {
+async fn bootstrap_dock_daemon(podman: &Podman, container: &str, dock_bin: &str) -> Result<()> {
     // 先探测：client ping 看 daemon 是否活着
     let ping_cmd = vec![
         dock_bin.to_string(),
@@ -1648,10 +1631,7 @@ async fn bootstrap_dock_daemon(
     }
 
     // 未跑 → bootstrap（spawn --daemon 子进程，bootstrap 本身 fire-and-forget 退出）
-    let boot_cmd = vec![
-        dock_bin.to_string(),
-        "bootstrap".to_string(),
-    ];
+    let boot_cmd = vec![dock_bin.to_string(), "bootstrap".to_string()];
     podman
         .exec_oneshot(container, "0", boot_cmd)
         .await

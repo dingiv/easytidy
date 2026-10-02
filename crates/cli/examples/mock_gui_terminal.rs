@@ -89,7 +89,9 @@ async fn main() -> anyhow::Result<()> {
                     let preview = String::from_utf8_lossy(&data[..data.len().min(60)]);
                     eprintln!(
                         "[MOCK-M1] frame: sid={} bytes={} preview={:?}",
-                        stream_id, data.len(), preview
+                        stream_id,
+                        data.len(),
+                        preview
                     );
                 }
                 Ok(Frame::Json(m)) => eprintln!("[MOCK-M1] json: op={}", m.op),
@@ -161,7 +163,10 @@ async fn main() -> anyhow::Result<()> {
                     let preview = String::from_utf8_lossy(&data[..data.len().min(60)]);
                     eprintln!(
                         "[MOCK-M2] {} frame: sid={} bytes={} preview={:?}",
-                        tag, stream_id, data.len(), preview
+                        tag,
+                        stream_id,
+                        data.len(),
+                        preview
                     );
                     replay_seen = true;
                 }

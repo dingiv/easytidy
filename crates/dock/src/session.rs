@@ -61,9 +61,8 @@ impl ReplayRing {
         const SYNC_END: &[u8] = b"\x1b[?2026l";
         const PREFIX: &[u8] = b"\x1b[2J\x1b[H";
         let ring = self.replay_bytes();
-        let mut out = Vec::with_capacity(
-            SYNC_START.len() + PREFIX.len() + ring.len() + SYNC_END.len(),
-        );
+        let mut out =
+            Vec::with_capacity(SYNC_START.len() + PREFIX.len() + ring.len() + SYNC_END.len());
         out.extend_from_slice(SYNC_START);
         out.extend_from_slice(PREFIX);
         out.extend_from_slice(&ring);
@@ -91,7 +90,11 @@ pub struct RootSession {
 }
 
 impl RootSession {
-    pub fn new(master: Box<dyn MasterPty + Send>, writer: Box<dyn std::io::Write + Send>, spawn_pid: u32) -> Self {
+    pub fn new(
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn std::io::Write + Send>,
+        spawn_pid: u32,
+    ) -> Self {
         Self {
             id: next_session_id(),
             master: Arc::new(Mutex::new(master)),

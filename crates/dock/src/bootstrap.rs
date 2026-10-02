@@ -49,7 +49,10 @@ pub async fn run_bootstrap() -> anyhow::Result<()> {
     // bootstrap 退出 → daemon 被 PID 1 收养，独立存活（容器死才死）。
     // stdio=/dev/null → daemon 日志只进共享文件 /run/easytidy/dock.log。
     let self_exe = std::env::current_exe().context("current_exe failed")?;
-    tracing::info!("spawning easytidy-dock daemon via setsid: {} daemon", self_exe.display());
+    tracing::info!(
+        "spawning easytidy-dock daemon via setsid: {} daemon",
+        self_exe.display()
+    );
     let spawned = std::process::Command::new("setsid")
         .arg(&self_exe)
         .arg("daemon")
@@ -63,9 +66,8 @@ pub async fn run_bootstrap() -> anyhow::Result<()> {
         }
         Err(e) => {
             tracing::error!("setsid spawn failed: {e} (is setsid installed?)");
-            return Err(anyhow::Error::new(e).context(
-                "setsid spawn failed (is setsid installed in the container?)",
-            ));
+            return Err(anyhow::Error::new(e)
+                .context("setsid spawn failed (is setsid installed in the container?)"));
         }
     }
 
@@ -74,10 +76,7 @@ pub async fn run_bootstrap() -> anyhow::Result<()> {
     loop {
         if socket.exists() {
             // 进一步验证可连
-            if tokio::net::UnixStream::connect(DAEMON_SOCKET)
-                .await
-                .is_ok()
-            {
+            if tokio::net::UnixStream::connect(DAEMON_SOCKET).await.is_ok() {
                 tracing::info!("easytidy-dock daemon ready");
                 return Ok(());
             }

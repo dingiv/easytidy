@@ -118,14 +118,21 @@ mod tests {
 
     #[test]
     fn test_rc_attach_serde() {
-        let op = RcAttach { cols: 80, rows: 24, session_id: 0 };
+        let op = RcAttach {
+            cols: 80,
+            rows: 24,
+            session_id: 0,
+        };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<RcAttach>(&json).unwrap(), op);
     }
 
     #[test]
     fn test_rc_resize_close_ping_serde() {
-        let r = RcResize { cols: 120, rows: 40 };
+        let r = RcResize {
+            cols: 120,
+            rows: 40,
+        };
         let j = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<RcResize>(&j).unwrap(), r);
 
@@ -137,7 +144,10 @@ mod tests {
         let j = serde_json::to_string(&p).unwrap();
         assert_eq!(j, "null");
 
-        let ack = RcAttachAck { stream_id: ROOT_STREAM_ID, alive: true };
+        let ack = RcAttachAck {
+            stream_id: ROOT_STREAM_ID,
+            alive: true,
+        };
         let j = serde_json::to_string(&ack).unwrap();
         assert_eq!(serde_json::from_str::<RcAttachAck>(&j).unwrap(), ack);
 

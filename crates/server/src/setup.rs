@@ -99,7 +99,10 @@ pub(crate) fn setup_user_identity() -> UserMap {
     let env_name = std::env::var("EASYTIDY_USER_NAME").ok();
     let identity = easytidy_core::env::resolve_identity(&passwd, uid, gid, env_name.as_deref());
     let _ = USER_MAP.set(identity.clone());
-    info!("身份自发现：{}({}:{}) home={}", identity.name, identity.uid, identity.gid, identity.home);
+    info!(
+        "身份自发现：{}({}:{}) home={}",
+        identity.name, identity.uid, identity.gid, identity.home
+    );
     identity
 }
 
@@ -159,14 +162,13 @@ pub(crate) fn ensure_xauthority(auth_dir: &std::path::Path) -> Option<String> {
     // 三态门控：spec env（= 进程初始 env）的 XAUTHORITY 空/未设 → 模式 1：
     // gui_x11 关或用户显式声明空值（用户声明空 = 不要 X11 auth）——不注入、
     // 不做感知。
-    let env_value = std::env::var("XAUTHORITY")
-        .ok()
-        .filter(|v| !v.is_empty())?;
+    let env_value = std::env::var("XAUTHORITY").ok().filter(|v| !v.is_empty())?;
     let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
         tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
         return None;
     };
-    let Some(path_str) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime)) else {
+    let Some(path_str) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime))
+    else {
         tracing::warn!(
             "未在 {runtime} 找到 X11 auth 文件([.]mutter-Xwaylandauth.* 或 xauth_*);\
              X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
@@ -223,7 +225,11 @@ fn write_xauthority_link(link_path: &std::path::Path, target: &std::path::Path) 
         Err(e) => tracing::warn!("清理旧 {} 失败：{e}", link_path.display()),
     }
     if let Err(e) = symlink(target, link_path) {
-        tracing::warn!("写 XAUTHORITY 软链 {} → {} 失败：{e}", link_path.display(), target.display());
+        tracing::warn!(
+            "写 XAUTHORITY 软链 {} → {} 失败：{e}",
+            link_path.display(),
+            target.display()
+        );
     }
 }
 
@@ -254,7 +260,8 @@ pub(crate) async fn xauthority_watch_task() {
         let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
             continue;
         };
-        let Some(path_str) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime)) else {
+        let Some(path_str) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime))
+        else {
             continue; // 探不到：保留旧链
         };
         let path = std::path::PathBuf::from(path_str);
@@ -309,7 +316,10 @@ mod tests {
             // server 进程 env 继承它——ensure_xauthority 的三态门控据此放行。
             // 稳定路径 = <auth_dir>/xauthority（auth_dir 即传入的 tmp 目录）。
             std::env::set_var("XAUTHORITY", dir.join("xauthority"));
-            Self { prev, xauthority_prev }
+            Self {
+                prev,
+                xauthority_prev,
+            }
         }
     }
     impl Drop for RuntimeDirGuard {
@@ -337,7 +347,11 @@ mod tests {
 
         let result = ensure_xauthority(tmp.path());
         let stable = tmp.path().join(XAUTHORITY_STABLE_FILE);
-        assert_eq!(result.as_deref(), Some(stable.to_str().unwrap()), "返回值应为稳定路径");
+        assert_eq!(
+            result.as_deref(),
+            Some(stable.to_str().unwrap()),
+            "返回值应为稳定路径"
+        );
         assert_eq!(
             std::env::var("XAUTHORITY").ok().as_deref(),
             Some(stable.to_str().unwrap()),
@@ -511,7 +525,11 @@ mod tests {
 
         // 但 spec env 无 XAUTHORITY（gui_x11 关）→ 门控拦截
         std::env::remove_var("XAUTHORITY");
-        assert_eq!(ensure_xauthority(tmp.path()), None, "gui_x11 关时不应注入 XAUTHORITY");
+        assert_eq!(
+            ensure_xauthority(tmp.path()),
+            None,
+            "gui_x11 关时不应注入 XAUTHORITY"
+        );
         assert!(
             !tmp.path().join(XAUTHORITY_STABLE_FILE).exists(),
             "gui_x11 关时不应创建稳定软链"
@@ -535,7 +553,10 @@ mod tests {
     fn test_finalize_injected_env_records_only_actual() {
         // 注意：INJECTED_ENV 是全局 OnceLock，进程内 set 一次后不可再 set——
         // 其它测试未调用 finalize_injected_env，故此测试独占该 static。
-        finalize_injected_env(None, Some("/run/user/1000/.mutter-Xwaylandauth.DE23U3".to_string()));
+        finalize_injected_env(
+            None,
+            Some("/run/user/1000/.mutter-Xwaylandauth.DE23U3".to_string()),
+        );
         let items = injected_env();
         assert_eq!(items.len(), 1, "未修正的 XDG_DATA_DIRS 不应产生条目");
         assert_eq!(items[0].key, "XAUTHORITY");

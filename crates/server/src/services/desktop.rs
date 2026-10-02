@@ -98,11 +98,16 @@ pub(crate) fn resolve_icon_path(icon: &str) -> Option<String> {
         return Some(icon.to_string());
     }
     let (base, exts): (&str, &[&str]) = if icon.ends_with(".svg") || icon.ends_with(".png") {
-        (icon.trim_end_matches(".svg").trim_end_matches(".png"), &["svg", "png"])
+        (
+            icon.trim_end_matches(".svg").trim_end_matches(".png"),
+            &["svg", "png"],
+        )
     } else {
         (icon, &["svg", "png"])
     };
-    let sizes = ["256x256", "128x128", "64x64", "48x48", "32x32", "24x24", "16x16"];
+    let sizes = [
+        "256x256", "128x128", "64x64", "48x48", "32x32", "24x24", "16x16",
+    ];
     for size in sizes {
         for ext in exts {
             for theme_root in ["/usr/share/icons/hicolor", "/usr/share/icons/Adwaita"] {
@@ -182,8 +187,7 @@ Exec=/usr/bin/google-chrome-stable --incognito
         let app = parse_desktop_file(&desktop_path).unwrap();
         assert_eq!(app.name, "Google Chrome", "Name 应取主入口，非最后 action");
         assert_eq!(
-            app.exec,
-            r#"/usr/bin/google-chrome-stable --profile-directory="Default" %U"#,
+            app.exec, r#"/usr/bin/google-chrome-stable --profile-directory="Default" %U"#,
             "Exec 应取主入口，非最后 action"
         );
         assert_eq!(app.comment, Some("Access the Internet".to_string()));

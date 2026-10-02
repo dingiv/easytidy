@@ -14,9 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{
-    deserialize_null_to_empty_vec, ContainerConfig,
-};
+use crate::models::{deserialize_null_to_empty_vec, ContainerConfig};
 
 /// conf 模板目录（双轨制）：dev = 源码种子目录 `crates/gui/conf`，prod =
 /// 用户配置目录 `~/.easytidy/conf`（首跑播种不覆盖）。路径由 core 的
@@ -115,8 +113,7 @@ network:
   mode: host
 ports:
 "#;
-        let tpl: ConfTemplate = serde_yaml::from_str(yaml)
-            .expect("裸键（null）应宽容为空列表");
+        let tpl: ConfTemplate = serde_yaml::from_str(yaml).expect("裸键（null）应宽容为空列表");
         assert!(tpl.config.params.mounts.is_empty());
         assert!(tpl.setup.is_empty());
         assert!(tpl.config.env.is_empty());

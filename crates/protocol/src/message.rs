@@ -165,8 +165,17 @@ mod tests {
         assert_eq!(serde_json::to_value(MsgKind::Resp).unwrap(), json!("resp"));
         assert_eq!(serde_json::to_value(MsgKind::Evt).unwrap(), json!("evt"));
 
-        assert_eq!(serde_json::from_str::<MsgKind>(r#""req""#).unwrap(), MsgKind::Req);
-        assert_eq!(serde_json::from_str::<MsgKind>(r#""resp""#).unwrap(), MsgKind::Resp);
-        assert_eq!(serde_json::from_str::<MsgKind>(r#""evt""#).unwrap(), MsgKind::Evt);
+        assert_eq!(
+            serde_json::from_str::<MsgKind>(r#""req""#).unwrap(),
+            MsgKind::Req
+        );
+        assert_eq!(
+            serde_json::from_str::<MsgKind>(r#""resp""#).unwrap(),
+            MsgKind::Resp
+        );
+        assert_eq!(
+            serde_json::from_str::<MsgKind>(r#""evt""#).unwrap(),
+            MsgKind::Evt
+        );
     }
 }

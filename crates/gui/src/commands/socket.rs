@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 
 use easytidy_core::podman::Podman;
 use easytidy_protocol::{
-    Frame, FrameCodec, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION, UiEdit,
+    Frame, FrameCodec, Handshake, HandshakeAck, Message, MsgKind, UiEdit, PROTOCOL_VERSION,
 };
 use tauri::Emitter;
 
@@ -48,7 +48,12 @@ fn is_not_ready_error(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
         cause
             .downcast_ref::<std::io::Error>()
-            .map(|io| matches!(io.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused))
+            .map(|io| {
+                matches!(
+                    io.kind(),
+                    ErrorKind::NotFound | ErrorKind::ConnectionRefused
+                )
+            })
             .unwrap_or(false)
     })
 }
@@ -238,8 +243,7 @@ fn spawn_shared_reader(
                     }
                     MsgKind::Evt => match msg.op.as_str() {
                         "ui.edit" => {
-                            let Ok(payload) =
-                                serde_json::from_value::<UiEdit>(msg.payload.clone())
+                            let Ok(payload) = serde_json::from_value::<UiEdit>(msg.payload.clone())
                             else {
                                 warn!("ui.edit 事件 payload 解析失败");
                                 continue;
@@ -250,7 +254,9 @@ fn spawn_shared_reader(
                                         warn!("emit server-ui-edit 失败：{e}");
                                     }
                                 }
-                                None => warn!("无 AppHandle（setup 未完成？），无法 emit server-ui-edit"),
+                                None => warn!(
+                                    "无 AppHandle（setup 未完成？），无法 emit server-ui-edit"
+                                ),
                             }
                         }
                         _ => debug!("忽略未处理的 Evt：{}", msg.op),
@@ -371,7 +377,11 @@ pub async fn try_send_json_request(session: &GuiSession, msg: &Message) -> Resul
             err.code,
             err.message
         );
-        return Err(anyhow::anyhow!("服务器错误：{} - {}", err.code, err.message));
+        return Err(anyhow::anyhow!(
+            "服务器错误：{} - {}",
+            err.code,
+            err.message
+        ));
     }
     Ok(resp)
 }
@@ -450,7 +460,10 @@ mod tests {
         assert!(is_not_ready_error(&e), "ENOENT 应判定为 server 未就绪");
         // ECONNREFUSED（文件存在但无监听）→ 可重试
         let e = wrap(io::Error::new(io::ErrorKind::ConnectionRefused, "refused"));
-        assert!(is_not_ready_error(&e), "ECONNREFUSED 应判定为 server 未就绪");
+        assert!(
+            is_not_ready_error(&e),
+            "ECONNREFUSED 应判定为 server 未就绪"
+        );
         // 非 io 错误（如握手帧异常）→ 不可重试，立即返回
         let e = anyhow::anyhow!("握手响应应为 JSON 帧");
         assert!(!is_not_ready_error(&e));

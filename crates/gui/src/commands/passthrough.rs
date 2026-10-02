@@ -5,8 +5,8 @@ use tracing::{info, warn};
 use base64::Engine as _;
 
 use easytidy_protocol::ops::{
-    AppKill, AppLogs, AppLogsResp, AppsPs, AppsPsResp, CfgGet, CfgGetResp, CfgSet, FsMkdir, FsWrite,
-    ManagedProcess, PassthroughList, PassthroughListResp, PassthroughSet, PtConfiguredApp,
+    AppKill, AppLogs, AppLogsResp, AppsPs, AppsPsResp, CfgGet, CfgGetResp, CfgSet, FsMkdir,
+    FsWrite, ManagedProcess, PassthroughList, PassthroughListResp, PassthroughSet, PtConfiguredApp,
 };
 
 use crate::commands::apps::AppInfoFrontend;
@@ -43,8 +43,8 @@ async fn read_container_config(sess: &GuiSession) -> Result<ContainerPtConfig, S
     if let Some(err) = resp.err {
         return Err(format!("{} {}", err.code, err.message));
     }
-    let list: PassthroughListResp =
-        serde_json::from_value(resp.payload).map_err(|e| format!("解析 passthrough.list 失败：{e}"))?;
+    let list: PassthroughListResp = serde_json::from_value(resp.payload)
+        .map_err(|e| format!("解析 passthrough.list 失败：{e}"))?;
     Ok(ContainerPtConfig {
         apps: list.apps,
         pinned: list.pinned,
@@ -123,7 +123,11 @@ pub(crate) fn cli_path() -> String {
         }
     }
     if let Some(data) = dirs::data_local_dir() {
-        candidates.push(data.join("easytidy/bin/easytidy").to_string_lossy().into_owned());
+        candidates.push(
+            data.join("easytidy/bin/easytidy")
+                .to_string_lossy()
+                .into_owned(),
+        );
     }
     candidates.push("easytidy".to_string());
 
@@ -141,7 +145,9 @@ pub(crate) fn cli_path() -> String {
             tracing::warn!("CLI 候选不支持 open 子命令（旧版安装残留？），跳过：{c}");
         }
     }
-    first_existing.cloned().unwrap_or_else(|| "easytidy".to_string())
+    first_existing
+        .cloned()
+        .unwrap_or_else(|| "easytidy".to_string())
 }
 
 /// 获取 passthrough 状态（已导出 .desktop 全文 + 配置的应用条目 + 收藏）。
@@ -344,9 +350,10 @@ pub async fn passthrough_launch(
         icon: app.icon.clone(),
     };
 
-    let results = easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&launch_app))
-        .await
-        .map_err(|e| e.to_string())?;
+    let results =
+        easytidy_core::passthrough::launch_apps(container, std::slice::from_ref(&launch_app))
+            .await
+            .map_err(|e| e.to_string())?;
     match results.first() {
         Some(r) => match r.pid {
             Some(pid) => {
@@ -390,7 +397,11 @@ pub async fn passthrough_launch_app(
         .map_err(|e| e.to_string())?;
     match resp.pid {
         Some(pid) => {
-            info!("应用已拉起：{} (id={}, pid={pid})", id_or_name, resp.id.unwrap_or_default());
+            info!(
+                "应用已拉起：{} (id={}, pid={pid})",
+                id_or_name,
+                resp.id.unwrap_or_default()
+            );
             // 拉起后检测即时退出（命令不存在 → 127 等，避免误报「启动成功」）
             detect_early_exit(container, pid).await?;
             Ok(pid)
@@ -613,7 +624,11 @@ pub async fn passthrough_update_custom(
     }
 
     // 保存 + 日志（此时所有可变借用已结束）
-    let final_id = if new_id != id { new_id.clone() } else { id.clone() };
+    let final_id = if new_id != id {
+        new_id.clone()
+    } else {
+        id.clone()
+    };
     save_container_config(sess, &cfg).await?;
     info!("自定义应用已更新（容器内）：{container} {id} → {final_id}");
     Ok(())
@@ -776,7 +791,9 @@ async fn container_icon_dir(sess: &GuiSession) -> Result<String, String> {
         .get("home_dir")
         .and_then(|v| v.as_str())
         .filter(|h| !h.is_empty())
-        .ok_or_else(|| "无法获取容器 home 目录（容器内 server 版本过旧，无 home_dir 字段）".to_string())?;
+        .ok_or_else(|| {
+            "无法获取容器 home 目录（容器内 server 版本过旧，无 home_dir 字段）".to_string()
+        })?;
     Ok(format!("{home}/{ICON_DIR_REL}"))
 }
 
@@ -823,7 +840,9 @@ pub async fn passthrough_pick_host_icon(
     let container_path = format!("{icon_dir}/{fname}");
 
     // fs.write 不建父目录：先 mkdir -p 再全量写入
-    let mkdir_req = FsMkdir { path: icon_dir.clone() };
+    let mkdir_req = FsMkdir {
+        path: icon_dir.clone(),
+    };
     send_json_request(
         sess,
         "fs.mkdir".to_string(),
@@ -947,28 +966,23 @@ pub async fn passthrough_export(
                         // 与扫描应用统一：经内置图标加工工具处理（品牌渐变边框 +
                         // 圆角内容 + 水印，输出 256×256 PNG）；加工失败（如 SVG
                         // 等 image 不支持的格式）保留原图（原扩展名）
-                        let (bytes, file_name) =
-                            match easytidy_core::icon::compose_app_icon(
-                                &icon_data,
-                                EASYTIDY_BRAND_ICON,
-                            ) {
-                                Ok(composed) => (
-                                    composed,
-                                    format!("easytidy-custom-{container}-icon.png"),
-                                ),
-                                Err(e) => {
-                                    tracing::warn!("自定义应用图标加工失败，保留原图：{e}");
-                                    let ext = std::path::Path::new(icon_path)
-                                        .extension()
-                                        .and_then(|e| e.to_str())
-                                        .filter(|e| !e.is_empty())
-                                        .unwrap_or("png");
-                                    (
-                                        icon_data,
-                                        format!("easytidy-custom-{container}-icon.{ext}"),
-                                    )
-                                }
-                            };
+                        let (bytes, file_name) = match easytidy_core::icon::compose_app_icon(
+                            &icon_data,
+                            EASYTIDY_BRAND_ICON,
+                        ) {
+                            Ok(composed) => {
+                                (composed, format!("easytidy-custom-{container}-icon.png"))
+                            }
+                            Err(e) => {
+                                tracing::warn!("自定义应用图标加工失败，保留原图：{e}");
+                                let ext = std::path::Path::new(icon_path)
+                                    .extension()
+                                    .and_then(|e| e.to_str())
+                                    .filter(|e| !e.is_empty())
+                                    .unwrap_or("png");
+                                (icon_data, format!("easytidy-custom-{container}-icon.{ext}"))
+                            }
+                        };
                         let icon_file = icons_dir.join(&file_name);
                         if std::fs::write(&icon_file, &bytes).is_ok() {
                             icon_attr = Some(icon_file.to_string_lossy().into_owned());
@@ -997,7 +1011,8 @@ pub async fn passthrough_export(
                                 }
                             })
                             .collect();
-                        let icon_file = icons_dir.join(format!("easytidy-pt-{container}-{safe}.png"));
+                        let icon_file =
+                            icons_dir.join(format!("easytidy-pt-{container}-{safe}.png"));
                         // 品牌化合成:208px 内容 + 天蓝→深蓝 45° 渐变圆角边框 +
                         // 右下角 easytidy 水印(96px);合成失败回退原始图标
                         let composed =
@@ -1065,8 +1080,8 @@ fn host_entry_icon(container: &str) -> Option<String> {
 
 /// 写入宿主 ConfigFile 的入口图标源（**主来源**；None = 清除）。
 fn set_host_entry_icon(container: &str, path: Option<&str>) -> Result<(), String> {
-    let config_file = easytidy_core::configfile::ConfigFile::default_instance()
-        .map_err(|e| e.to_string())?;
+    let config_file =
+        easytidy_core::configfile::ConfigFile::default_instance().map_err(|e| e.to_string())?;
     let mut cfg = config_file
         .get_container(container)
         .map_err(|e| e.to_string())?
@@ -1075,7 +1090,9 @@ fn set_host_entry_icon(container: &str, path: Option<&str>) -> Result<(), String
         .map(str::trim)
         .filter(|p| !p.is_empty())
         .map(|p| p.to_string());
-    config_file.register_container(cfg).map_err(|e| e.to_string())?;
+    config_file
+        .register_container(cfg)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1157,7 +1174,11 @@ pub async fn export_gui_shortcut(
     // 否则用主来源（宿主 ConfigFile.icon）。均经 server/宿主读取后品牌加工（未设置回退
     // 品牌图标），并把图标源写入主来源 + 镜像到容器 config.json（entry_icon，供 worker GUI）。
     // 每次导出都强制重写宿主图标 + .desktop（process_container_icon_bytes / write_gui_entry 均覆盖写）。
-    let icon = match icon_source.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let icon = match icon_source
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(src) if src.starts_with("data:") || src.starts_with("file://") => {
             return Err(format!(
                 "无效的图标路径：{src}（请拖入预选图标或手动填写路径，不要拖拽图片文件本身）"
@@ -1177,7 +1198,10 @@ pub async fn export_gui_shortcut(
                     let data = fetch_or_host_read(sess, &src).await?;
                     // 镜像到容器 config.json（entry_icon，供 worker GUI 经 server 查询）
                     register_entry_icon_in_container(sess, Some(&src)).await?;
-                    easytidy_core::desktop::process_container_icon_bytes(&sess.container_name, &data)
+                    easytidy_core::desktop::process_container_icon_bytes(
+                        &sess.container_name,
+                        &data,
+                    )
                 }
                 None => {
                     // 兒底种子 = 导出显示名（与 .desktop Name= 同源）：改名重导出
@@ -1246,8 +1270,12 @@ pub async fn container_entry_config(
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            if let Some(p) =
-                cfg.config.get("entry_icon").and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            if let Some(p) = cfg
+                .config
+                .get("entry_icon")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
             {
                 icon = Some(p);
             }

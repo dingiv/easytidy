@@ -21,8 +21,8 @@ mod storage;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::OpenOptions;
-use std::os::unix::io::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -83,7 +83,10 @@ where
 use connection::handle_connection;
 use services::apps::child_prune_task;
 use services::lifecycle::perform_graceful_shutdown;
-use setup::{ensure_xauthority, finalize_injected_env, fixup_xdg_data_dirs, setup_user_identity, xauthority_watch_task};
+use setup::{
+    ensure_xauthority, finalize_injected_env, fixup_xdg_data_dirs, setup_user_identity,
+    xauthority_watch_task,
+};
 use state::ServerState;
 
 #[derive(Parser, Debug)]
@@ -144,8 +147,16 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(fmt::layer().event_format(format.clone()).with_writer(std::io::stderr))
-        .with(fmt::layer().event_format(format).with_writer(std::io::stdout))
+        .with(
+            fmt::layer()
+                .event_format(format.clone())
+                .with_writer(std::io::stderr),
+        )
+        .with(
+            fmt::layer()
+                .event_format(format)
+                .with_writer(std::io::stdout),
+        )
         .init();
 
     // XDG_DATA_DIRS 防御性修正：旧版 flavor 注入纯覆盖值 /usr/share/easytidy-host，
@@ -222,7 +233,6 @@ async fn main() -> Result<()> {
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
-
     // FIXME: 不需要使用循环来包住 select! 吗? loop {}
     tokio::select! {
         _ = sigterm.recv() => {
@@ -273,16 +283,16 @@ fn redirect_stderr_to(path: &std::path::Path) -> Result<()> {
     // dup2 之后 file fd 可关闭(已 dup 到 fd=2)
     let r = unsafe { libc::dup2(fd, libc::STDERR_FILENO) };
     if r == -1 {
-        return Err(anyhow!("dup2 to STDERR failed: {}", std::io::Error::last_os_error()));
+        return Err(anyhow!(
+            "dup2 to STDERR failed: {}",
+            std::io::Error::last_os_error()
+        ));
     }
     Ok(())
 }
 
 /// Run the main server loop
-async fn run_server(
-    socket_path: PathBuf,
-    state: Arc<ServerState>,
-) -> Result<()> {
+async fn run_server(socket_path: PathBuf, state: Arc<ServerState>) -> Result<()> {
     // Remove socket if it exists
     if let Err(e) = fs::remove_file(&socket_path) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -307,8 +317,12 @@ async fn run_server(
     // 连不上（整个 GUI 失效）。安全性由外层路径保底：目录在用户私有
     // XDG_RUNTIME_DIR（0700）下，宿主其他用户不可达；容器内多用户场景下
     // 任意用户可连 server（以容器默认用户权限执行操作），当前模型可接受。
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o777))
-        .with_context(|| format!("Failed to set socket permissions: {}", socket_path.display()))?;
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o777)).with_context(|| {
+        format!(
+            "Failed to set socket permissions: {}",
+            socket_path.display()
+        )
+    })?;
 
     info!("Listening on {}", socket_path.display());
 

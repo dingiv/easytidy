@@ -20,8 +20,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use easytidy_protocol::rc::{RcListResp, SessionInfo};
 
-use crate::state::{GuiSession, PodmanState};
 use crate::state::PtyEvent;
+use crate::state::{GuiSession, PodmanState};
 
 /// 容器内 easytidy-dock 二进制路径（exec 目标）。
 ///
@@ -40,10 +40,7 @@ async fn bootstrap_dock(
     podman: &easytidy_core::podman::Podman,
     container: &str,
 ) -> anyhow::Result<()> {
-    let cmd = vec![
-        dock_bin().to_string(),
-        "bootstrap".to_string(),
-    ];
+    let cmd = vec![dock_bin().to_string(), "bootstrap".to_string()];
     let exec = podman
         .exec_no_tty(container, "0", cmd)
         .await
@@ -70,10 +67,7 @@ async fn bootstrap_dock(
 }
 
 /// 读取容器内 easytidy-dock 日志（best-effort；失败返回空串）。
-async fn read_root_logs(
-    podman: &easytidy_core::podman::Podman,
-    container: &str,
-) -> String {
+async fn read_root_logs(podman: &easytidy_core::podman::Podman, container: &str) -> String {
     use futures::StreamExt;
     let cmd = vec![
         "tail".to_string(),
@@ -147,10 +141,7 @@ async fn open_root_session(
     session: &GuiSession,
     on_event: tauri::ipc::Channel<PtyEvent>,
 ) -> anyhow::Result<()> {
-    let mut cmd = vec![
-        dock_bin().to_string(),
-        "client".to_string(),
-    ];
+    let mut cmd = vec![dock_bin().to_string(), "client".to_string()];
     match target {
         RootTarget::New => {
             cmd.push("new".to_string());
@@ -254,10 +245,7 @@ pub async fn root_terminal_attach(
     let p = podman.get().await.map_err(|e| e.to_string())?;
 
     // Step 1: bootstrap（如 daemon 未跑）
-    if !probe_dock(&p, &container_name)
-        .await
-        .unwrap_or(false)
-    {
+    if !probe_dock(&p, &container_name).await.unwrap_or(false) {
         if let Err(e) = bootstrap_dock(&p, &container_name).await {
             podman.return_podman(p).await;
             return Err(format!(
@@ -267,10 +255,7 @@ pub async fn root_terminal_attach(
         // 等 daemon 就绪（bootstrap 内部已等 socket，再 ping 一次保险）
         let mut ready = false;
         for _ in 0..20 {
-            if probe_dock(&p, &container_name)
-                .await
-                .unwrap_or(false)
-            {
+            if probe_dock(&p, &container_name).await.unwrap_or(false) {
                 ready = true;
                 break;
             }
@@ -536,7 +521,9 @@ pub async fn dock_logs(
             }
         }
         if buf.trim().is_empty() {
-            return Ok::<_, String>("(easytidy-dock 日志为空——daemon 可能未启动或无输出)".to_string());
+            return Ok::<_, String>(
+                "(easytidy-dock 日志为空——daemon 可能未启动或无输出)".to_string(),
+            );
         }
         Ok(buf)
     }
@@ -575,8 +562,8 @@ pub async fn root_session_list(
                 buf.push_str(&String::from_utf8_lossy(&bytes));
             }
         }
-        let r: RcListResp = serde_json::from_str(&buf)
-            .map_err(|e| format!("解析 rc.list 响应失败：{e}"))?;
+        let r: RcListResp =
+            serde_json::from_str(&buf).map_err(|e| format!("解析 rc.list 响应失败：{e}"))?;
         Ok::<_, String>(r.sessions)
     }
     .await;

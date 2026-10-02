@@ -93,7 +93,10 @@ pub async fn apply_container_config(
         .map_err(|e| e.to_string())?;
 
     // 容器内准备（fontconfig + 可选 useradd）：失败不阻断重建（落日志）
-    if let Err(e) = podman.prepare_container(&name, &container_config.params).await {
+    if let Err(e) = podman
+        .prepare_container(&name, &container_config.params, false)
+        .await
+    {
         tracing::error!("容器内准备失败（{name}）：{e}");
     }
 
@@ -212,13 +215,13 @@ impl ConfTemplateStore {
             return Err(format!("模板 {to_stem} 已存在，不能覆盖"));
         }
         let src = dir.join(format!("{from_stem}.yaml"));
-        let yaml = std::fs::read_to_string(&src)
-            .map_err(|e| format!("读取模板 {from_stem} 失败：{e}"))?;
+        let yaml =
+            std::fs::read_to_string(&src).map_err(|e| format!("读取模板 {from_stem} 失败：{e}"))?;
         let mut tpl: ConfTemplate =
             serde_yaml::from_str(&yaml).map_err(|e| format!("解析模板 {from_stem} 失败：{e}"))?;
         tpl.config.name = to_stem.clone();
-        let out = serde_yaml::to_string(&tpl)
-            .map_err(|e| format!("序列化模板 {to_stem} 失败：{e}"))?;
+        let out =
+            serde_yaml::to_string(&tpl).map_err(|e| format!("序列化模板 {to_stem} 失败：{e}"))?;
         Self::write_yaml_in(dir, &to_stem, &out)
     }
 }
@@ -235,8 +238,7 @@ pub fn conf_templates() -> Result<Vec<ConfTemplateInfo>, String> {
     ensure_conf_examples();
     let dir = conf_dir().map_err(|e| e.to_string())?;
     let mut out: Vec<ConfTemplateInfo> = Vec::new();
-    let entries = std::fs::read_dir(&dir)
-        .map_err(|e| format!("读取模板目录失败：{e}"))?;
+    let entries = std::fs::read_dir(&dir).map_err(|e| format!("读取模板目录失败：{e}"))?;
     for entry in entries.flatten() {
         let p = entry.path();
         let is_yaml = p
@@ -246,7 +248,9 @@ pub fn conf_templates() -> Result<Vec<ConfTemplateInfo>, String> {
         if !is_yaml {
             continue;
         }
-        let Ok(yaml) = std::fs::read_to_string(&p) else { continue };
+        let Ok(yaml) = std::fs::read_to_string(&p) else {
+            continue;
+        };
         match serde_yaml::from_str::<ConfTemplate>(&yaml) {
             Ok(t) => out.push(ConfTemplateInfo {
                 template: t,
@@ -277,7 +281,10 @@ pub fn conf_template_get(name: String) -> Result<ConfTemplate, String> {
 /// - `name`:模板文件名 stem(如 `chrome`)
 /// - `container_name`:执行容器名(覆盖模板内 `config.name` 默认值)
 #[tauri::command]
-pub fn conf_template_expand(name: String, container_name: String) -> Result<ContainerConfig, String> {
+pub fn conf_template_expand(
+    name: String,
+    container_name: String,
+) -> Result<ContainerConfig, String> {
     let yaml = ConfTemplateStore::read_yaml(&name).map_err(|e| e.to_string())?;
     let tpl: ConfTemplate =
         serde_yaml::from_str(&yaml).map_err(|e| format!("解析模板 {name} 失败：{e}"))?;
@@ -520,8 +527,8 @@ fn conf_examples_from_dir(dir: &std::path::Path) -> Vec<ExampleConf> {
 /// 序列化视图，前端只过 JSON。
 #[tauri::command]
 pub fn conf_parse(text: String) -> Result<serde_json::Value, String> {
-    let config: ContainerConfig = serde_yaml::from_str(&text)
-        .map_err(|e| format!("配置格式解析失败：{e}"))?;
+    let config: ContainerConfig =
+        serde_yaml::from_str(&text).map_err(|e| format!("配置格式解析失败：{e}"))?;
     serde_json::to_value(config).map_err(|e| format!("序列化配置失败：{e}"))
 }
 
@@ -537,16 +544,14 @@ pub async fn conf_load_dialog() -> Result<LoadConfResp, String> {
         if let Ok(dir) = conf_dir() {
             dialog = dialog.set_directory(dir);
         }
-        dialog
-            .pick_file()
-            .map(|p| p.to_string_lossy().into_owned())
+        dialog.pick_file().map(|p| p.to_string_lossy().into_owned())
     })
     .await
     .map_err(|e| format!("打开文件对话框失败：{e}"))?
     .ok_or_else(|| "已取消".to_string())?;
 
-    let text = std::fs::read_to_string(&picked)
-        .map_err(|e| format!("读取文件失败（{picked}）：{e}"))?;
+    let text =
+        std::fs::read_to_string(&picked).map_err(|e| format!("读取文件失败（{picked}）：{e}"))?;
     let config = conf_parse(text)?;
     Ok(LoadConfResp {
         path: picked,
@@ -646,9 +651,8 @@ pub async fn list_host_path_suggestions(prefix: String) -> Result<Vec<HostEntry>
         };
 
         let mut entries = Vec::new();
-        let read = std::fs::read_dir(&base_dir).map_err(|e| {
-            format!("读取目录 {} 失败：{}", base_dir.display(), e)
-        })?;
+        let read = std::fs::read_dir(&base_dir)
+            .map_err(|e| format!("读取目录 {} 失败：{}", base_dir.display(), e))?;
         for e in read.flatten() {
             // 跳过隐藏文件(避免 . / .. / .git 等噪声)
             let name = e.file_name().to_string_lossy().into_owned();
@@ -764,12 +768,15 @@ mod tests {
         .unwrap();
         let p = passthrough_preview(declared).unwrap();
         assert!(
-            p.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
+            p.mounts
+                .iter()
+                .any(|m| m.container_path == "/tmp/.X11-unix"),
             "被遮蔽的注入项仍应在预览中展示：{:?}",
             p.mounts
         );
         assert!(
-            p.shadowed_mount_targets.contains(&"/tmp/.X11-unix".to_string()),
+            p.shadowed_mount_targets
+                .contains(&"/tmp/.X11-unix".to_string()),
             "已声明的 /tmp/.X11-unix 对应注入项应标为失效：{:?}",
             p.shadowed_mount_targets
         );
@@ -783,12 +790,15 @@ mod tests {
         .unwrap();
         let p2 = passthrough_preview(bare).unwrap();
         assert!(
-            p2.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"),
+            p2.mounts
+                .iter()
+                .any(|m| m.container_path == "/tmp/.X11-unix"),
             "未声明时应注入 /tmp/.X11-unix：{:?}",
             p2.mounts
         );
         assert!(
-            !p2.shadowed_mount_targets.contains(&"/tmp/.X11-unix".to_string()),
+            !p2.shadowed_mount_targets
+                .contains(&"/tmp/.X11-unix".to_string()),
             "未声明时无遮蔽：{:?}",
             p2.shadowed_mount_targets
         );
@@ -803,7 +813,10 @@ mod tests {
         let p3 = passthrough_preview(gpu_cfg).unwrap();
         // 只注 NVIDIA_DRIVER_CAPABILITIES（NVIDIA_VISIBLE_DEVICES 不注——GPU 走 CDI）
         assert!(p3.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
-        assert!(!p3.env.iter().any(|e| e.starts_with("NVIDIA_VISIBLE_DEVICES=")));
+        assert!(!p3
+            .env
+            .iter()
+            .any(|e| e.starts_with("NVIDIA_VISIBLE_DEVICES=")));
 
         // gui_x11 + gpu_nvidia 同开 → 两类注入都在（mounts 来自 gui_x11，NVIDIA env 来自 gpu_nvidia）
         let both: ContainerConfig = serde_json::from_value(serde_json::json!({
@@ -813,7 +826,10 @@ mod tests {
         }))
         .unwrap();
         let p4 = passthrough_preview(both).unwrap();
-        assert!(p4.mounts.iter().any(|m| m.container_path == "/tmp/.X11-unix"));
+        assert!(p4
+            .mounts
+            .iter()
+            .any(|m| m.container_path == "/tmp/.X11-unix"));
         assert!(p4.env.iter().any(|e| e == "NVIDIA_DRIVER_CAPABILITIES=all"));
 
         // 用户显式声明意图 env（如 DISPLAY）→ 注入全集含 DISPLAY（宿主值或空），
@@ -857,13 +873,29 @@ mod tests {
         for seed in CONF_SEEDS.iter() {
             let config = parse_seed(seed);
             assert!(!config.name.trim().is_empty(), "{} 应含 name", seed.name);
-            assert!(!config.params.image.trim().is_empty(), "{} 应含 image", seed.name);
+            assert!(
+                !config.params.image.trim().is_empty(),
+                "{} 应含 image",
+                seed.name
+            );
             for m in &config.params.mounts {
-                assert!(!m.host_path.trim().is_empty(), "{} 挂载缺 host_path", seed.name);
-                assert!(!m.container_path.trim().is_empty(), "{} 挂载缺 container_path", seed.name);
+                assert!(
+                    !m.host_path.trim().is_empty(),
+                    "{} 挂载缺 host_path",
+                    seed.name
+                );
+                assert!(
+                    !m.container_path.trim().is_empty(),
+                    "{} 挂载缺 container_path",
+                    seed.name
+                );
             }
             for env in &config.env {
-                assert!(env.contains('='), "{} 的 env 项应是 KEY=VALUE（得到「{env}」）", seed.name);
+                assert!(
+                    env.contains('='),
+                    "{} 的 env 项应是 KEY=VALUE（得到「{env}」）",
+                    seed.name
+                );
             }
         }
     }
@@ -879,11 +911,7 @@ mod tests {
             let yaml = serde_yaml::to_string(&config).unwrap();
             let reloaded: ContainerConfig = serde_yaml::from_str(&yaml).unwrap();
             let reloaded_json = serde_json::to_value(&reloaded).unwrap();
-            assert_eq!(
-                json, reloaded_json,
-                "{} 导出→回读应与原配置一致",
-                seed.name
-            );
+            assert_eq!(json, reloaded_json, "{} 导出→回读应与原配置一致", seed.name);
         }
     }
 
@@ -945,7 +973,10 @@ mod tests {
             names.contains(&"my-project".to_string()),
             "用户自建模板应在列表中：{names:?}"
         );
-        assert!(!names.contains(&"notes".to_string()), ".txt 不应混入：{names:?}");
+        assert!(
+            !names.contains(&"notes".to_string()),
+            ".txt 不应混入：{names:?}"
+        );
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted, "列表应按名排序");
@@ -982,7 +1013,10 @@ mod tests {
 
         // 删「带 copy 的」→ 只删 chrome-copy.yaml，源文件保留
         ConfTemplateStore::delete_in(temp.path(), "chrome-copy").unwrap();
-        assert!(!temp.path().join("chrome-copy.yaml").exists(), "copy 应被删除");
+        assert!(
+            !temp.path().join("chrome-copy.yaml").exists(),
+            "copy 应被删除"
+        );
         assert!(
             temp.path().join("chrome.yaml").exists(),
             "源模板 chrome.yaml 不应被误删"

@@ -61,7 +61,9 @@ async fn listen_events(
     let mut buf: Vec<u8> = Vec::new();
     let mut body = body;
     while let Some(chunk) = StreamExt::next(&mut body).await {
-        let chunk = chunk.map_err(|e| -> Box<dyn std::error::Error> { format!("事件流读取失败：{e}").into() })?;
+        let chunk = chunk.map_err(|e| -> Box<dyn std::error::Error> {
+            format!("事件流读取失败：{e}").into()
+        })?;
         buf.extend_from_slice(&chunk);
         while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = buf.drain(..=pos).collect();
@@ -131,10 +133,7 @@ fn map_event(event: &Value) -> Option<EngineEvent> {
         .to_string();
 
     match action {
-        "create" => Some(EngineEvent::ContainerCreated {
-            container_id,
-            name,
-        }),
+        "create" => Some(EngineEvent::ContainerCreated { container_id, name }),
         "start" => Some(EngineEvent::ContainerStarted { container_id, name }),
         // 停止事件（podman 用 "died"）
         "died" => {

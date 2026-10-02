@@ -19,8 +19,8 @@
 //! 注：本模块只做**与格式无关**的文件/目录搬移（rename）；passthrough 配置里
 //! 绝对图标路径的**格式感知改写**由 `services::passthrough` 负责（它拥有该格式）。
 
-use std::sync::OnceLock;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 

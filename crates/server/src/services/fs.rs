@@ -8,14 +8,13 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use base64::Engine;
 use easytidy_protocol::{
-    Frame, FsEntry, FsEntryType,
-    FsCopy, FsCopyResp, FsMkdir, FsMkdirResp, FsList, FsListResp, FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp, Message, MsgKind,
+    Frame, FsCopy, FsCopyResp, FsEntry, FsEntryType, FsList, FsListResp, FsMkdir, FsMkdirResp,
+    FsRead, FsReadResp, FsStat, FsStatResp, FsWrite, FsWriteResp, Message, MsgKind,
 };
 
 /// Handle fs.list
 pub(crate) async fn handle_fs_list(msg: Message) -> Result<Frame> {
-    let req: FsList = serde_json::from_value(msg.payload)
-        .context("Failed to parse FsList")?;
+    let req: FsList = serde_json::from_value(msg.payload).context("Failed to parse FsList")?;
 
     let path = Path::new(&req.path);
 
@@ -68,13 +67,11 @@ pub(crate) async fn handle_fs_list(msg: Message) -> Result<Frame> {
 
 /// Handle fs.stat
 pub(crate) async fn handle_fs_stat(msg: Message) -> Result<Frame> {
-    let req: FsStat = serde_json::from_value(msg.payload)
-        .context("Failed to parse FsStat")?;
+    let req: FsStat = serde_json::from_value(msg.payload).context("Failed to parse FsStat")?;
 
     let path = Path::new(&req.path);
 
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("Failed to stat: {}", req.path))?;
+    let metadata = fs::metadata(path).with_context(|| format!("Failed to stat: {}", req.path))?;
     // 符号链接判定用 lstat（metadata 跟随链接，区分不了链接与目标）
     let is_symlink = fs::symlink_metadata(path)
         .map(|m| m.is_symlink())
@@ -96,19 +93,22 @@ pub(crate) async fn handle_fs_stat(msg: Message) -> Result<Frame> {
 
     let mode = Some(format!("{:o}", metadata.permissions().mode() & 0o777));
 
-    let mtime = metadata.modified()
+    let mtime = metadata
+        .modified()
         .unwrap_or(SystemTime::UNIX_EPOCH)
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs() as i64;
 
-    let atime = metadata.accessed()
+    let atime = metadata
+        .accessed()
         .unwrap_or(SystemTime::UNIX_EPOCH)
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
         .as_secs() as i64;
 
-    let ctime = metadata.created()
+    let ctime = metadata
+        .created()
         .unwrap_or(SystemTime::UNIX_EPOCH)
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or(Duration::from_secs(0))
@@ -118,26 +118,25 @@ pub(crate) async fn handle_fs_stat(msg: Message) -> Result<Frame> {
         id: msg.id,
         kind: MsgKind::Resp,
         op: "fs.stat".to_string(),
-            payload: serde_json::to_value(FsStatResp {
-                entry: FsEntry {
-                    name: req.path.clone(),
-                    entry_type,
-                    is_symlink,
-                    size,
-                    mode,
-                },
-                mtime,
-                atime,
-                ctime,
-            })?,
+        payload: serde_json::to_value(FsStatResp {
+            entry: FsEntry {
+                name: req.path.clone(),
+                entry_type,
+                is_symlink,
+                size,
+                mode,
+            },
+            mtime,
+            atime,
+            ctime,
+        })?,
         err: None,
     }))
 }
 
 /// Handle fs.read
 pub(crate) async fn handle_fs_read(msg: Message) -> Result<Frame> {
-    let req: FsRead = serde_json::from_value(msg.payload)
-        .context("Failed to parse FsRead")?;
+    let req: FsRead = serde_json::from_value(msg.payload).context("Failed to parse FsRead")?;
 
     let path = Path::new(&req.path);
 
@@ -146,8 +145,8 @@ pub(crate) async fn handle_fs_read(msg: Message) -> Result<Frame> {
     let offset = req.offset.unwrap_or(0);
     let data = if offset > 0 {
         use std::io::{Read as _, Seek, SeekFrom};
-        let mut file = fs::File::open(path)
-            .with_context(|| format!("Failed to open file: {}", req.path))?;
+        let mut file =
+            fs::File::open(path).with_context(|| format!("Failed to open file: {}", req.path))?;
         file.seek(SeekFrom::Start(offset))
             .with_context(|| format!("Failed to seek: {}", req.path))?;
         let mut buf = Vec::new();
@@ -164,8 +163,7 @@ pub(crate) async fn handle_fs_read(msg: Message) -> Result<Frame> {
         }
         buf
     } else {
-        let data = fs::read(path)
-            .with_context(|| format!("Failed to read file: {}", req.path))?;
+        let data = fs::read(path).with_context(|| format!("Failed to read file: {}", req.path))?;
         let len = req.len.unwrap_or(data.len() as u64) as usize;
         let end = std::cmp::min(len, data.len());
         data[..end].to_vec()
@@ -184,10 +182,10 @@ pub(crate) async fn handle_fs_read(msg: Message) -> Result<Frame> {
 
 /// Handle fs.write
 pub(crate) async fn handle_fs_write(msg: Message) -> Result<Frame> {
-    let req: FsWrite = serde_json::from_value(msg.payload)
-        .context("Failed to parse FsWrite")?;
+    let req: FsWrite = serde_json::from_value(msg.payload).context("Failed to parse FsWrite")?;
 
-    let data = base64::engine::general_purpose::STANDARD.decode(&req.data_b64)
+    let data = base64::engine::general_purpose::STANDARD
+        .decode(&req.data_b64)
         .context("Failed to decode base64 data")?;
     let bytes = data.len() as u64;
 
@@ -228,8 +226,7 @@ pub(crate) async fn handle_fs_write(msg: Message) -> Result<Frame> {
 
 /// Handle fs.mkdir（文件夹拖入上传时递归建目录）
 pub(crate) async fn handle_fs_mkdir(msg: Message) -> Result<Frame> {
-    let req: FsMkdir = serde_json::from_value(msg.payload)
-        .context("Failed to parse FsMkdir")?;
+    let req: FsMkdir = serde_json::from_value(msg.payload).context("Failed to parse FsMkdir")?;
 
     fs::create_dir_all(&req.path)
         .with_context(|| format!("Failed to create directory: {}", req.path))?;
@@ -245,8 +242,7 @@ pub(crate) async fn handle_fs_mkdir(msg: Message) -> Result<Frame> {
 
 /// Handle fs.copy（容器内文件复制：右键复制/粘贴菜单，server 直接 fs::copy）
 pub(crate) async fn handle_fs_copy(msg: Message) -> Result<Frame> {
-    let req: FsCopy = serde_json::from_value(msg.payload)
-        .context("Failed to parse FsCopy")?;
+    let req: FsCopy = serde_json::from_value(msg.payload).context("Failed to parse FsCopy")?;
 
     let bytes = fs::copy(&req.src, &req.dst)
         .with_context(|| format!("Failed to copy {} → {}", req.src, req.dst))?;
@@ -255,7 +251,9 @@ pub(crate) async fn handle_fs_copy(msg: Message) -> Result<Frame> {
         id: msg.id,
         kind: MsgKind::Resp,
         op: "fs.copy".to_string(),
-        payload: serde_json::to_value(FsCopyResp { bytes_copied: bytes })?,
+        payload: serde_json::to_value(FsCopyResp {
+            bytes_copied: bytes,
+        })?,
         err: None,
     }))
 }

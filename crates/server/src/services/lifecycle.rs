@@ -7,9 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use easytidy_protocol::{
-    Frame, LifecycleEntryLaunch, Message, MsgKind, ShutdownAck,
-};
+use easytidy_protocol::{Frame, LifecycleEntryLaunch, Message, MsgKind, ShutdownAck};
 use serde_json::json;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::mpsc;
@@ -21,16 +19,21 @@ pub(crate) async fn handle_lifecycle_entry_launch(
     state: &Arc<ServerState>,
     event_tx: mpsc::UnboundedSender<Frame>,
 ) -> Result<Frame> {
-    let req: LifecycleEntryLaunch = serde_json::from_value(msg.payload)
-        .context("Failed to parse LifecycleEntryLaunch")?;
+    let req: LifecycleEntryLaunch =
+        serde_json::from_value(msg.payload).context("Failed to parse LifecycleEntryLaunch")?;
 
     // TODO: Look up entry config and spawn the entry process。
     // 现阶段：登录 shell 占位；entry 已移入容器内由 server 管理
     // （宿主 --entry 被忽略，应用经 passthrough auto-start 拉起）
     info!("Entry launch requested: {}", req.entry_id);
-    let pid =
-        spawn_managed_process(state, "/bin/sh -l", "entry", req.entry_id.clone(), Some(event_tx.clone()))
-            .await?;
+    let pid = spawn_managed_process(
+        state,
+        "/bin/sh -l",
+        "entry",
+        req.entry_id.clone(),
+        Some(event_tx.clone()),
+    )
+    .await?;
 
     // Emit entry.started event
     let msg_id = state.next_msg_id.fetch_add(1, Ordering::SeqCst) as u64;
@@ -134,7 +137,8 @@ mod tests {
                                 server: "easytidy-server".to_string(),
                                 capabilities: vec!["pty".to_string()],
                                 session_id: "test-session".to_string(),
-                            }).unwrap(),
+                            })
+                            .unwrap(),
                             err: None,
                         });
                         let _ = framed.send(ack).await;
@@ -159,7 +163,8 @@ mod tests {
                 v: PROTOCOL_VERSION,
                 client: "test-client".to_string(),
                 wants: vec!["pty".to_string()],
-            }).unwrap(),
+            })
+            .unwrap(),
             err: None,
         });
 
@@ -183,9 +188,21 @@ mod tests {
         let temp_dir = tempfile::tempdir().unwrap();
         fs::create_dir(temp_dir.path().join("realdir")).unwrap();
         fs::write(temp_dir.path().join("real.txt"), b"hello").unwrap();
-        symlink(temp_dir.path().join("realdir"), temp_dir.path().join("dirlink")).unwrap();
-        symlink(temp_dir.path().join("real.txt"), temp_dir.path().join("filelink")).unwrap();
-        symlink(temp_dir.path().join("missing"), temp_dir.path().join("broken")).unwrap();
+        symlink(
+            temp_dir.path().join("realdir"),
+            temp_dir.path().join("dirlink"),
+        )
+        .unwrap();
+        symlink(
+            temp_dir.path().join("real.txt"),
+            temp_dir.path().join("filelink"),
+        )
+        .unwrap();
+        symlink(
+            temp_dir.path().join("missing"),
+            temp_dir.path().join("broken"),
+        )
+        .unwrap();
 
         let req = Message {
             id: 1,
@@ -193,7 +210,8 @@ mod tests {
             op: "fs.list".to_string(),
             payload: serde_json::to_value(FsList {
                 path: temp_dir.path().to_str().unwrap().to_string(),
-            }).unwrap(),
+            })
+            .unwrap(),
             err: None,
         };
 
@@ -204,33 +222,51 @@ mod tests {
             panic!("Expected JSON frame");
         };
 
-        let by_name: std::collections::HashMap<String, easytidy_protocol::ops::FsEntry> =
-            list_resp
-                .entries
-                .into_iter()
-                .map(|e| (e.name.clone(), e))
-                .collect();
+        let by_name: std::collections::HashMap<String, easytidy_protocol::ops::FsEntry> = list_resp
+            .entries
+            .into_iter()
+            .map(|e| (e.name.clone(), e))
+            .collect();
 
         assert!(
-            matches!(by_name["dirlink"].entry_type, easytidy_protocol::ops::FsEntryType::Dir),
+            matches!(
+                by_name["dirlink"].entry_type,
+                easytidy_protocol::ops::FsEntryType::Dir
+            ),
             "目录符号链接应分类为 Dir（GUI 可导航）"
         );
-        assert!(by_name["dirlink"].is_symlink, "目录链接应标记 is_symlink（图标区分）");
         assert!(
-            matches!(by_name["filelink"].entry_type, easytidy_protocol::ops::FsEntryType::File),
+            by_name["dirlink"].is_symlink,
+            "目录链接应标记 is_symlink（图标区分）"
+        );
+        assert!(
+            matches!(
+                by_name["filelink"].entry_type,
+                easytidy_protocol::ops::FsEntryType::File
+            ),
             "文件符号链接应分类为 File（GUI 可打开）"
         );
         assert_eq!(by_name["filelink"].size, Some(5), "文件链接应显示目标大小");
-        assert!(by_name["filelink"].is_symlink, "文件链接应标记 is_symlink（图标区分）");
         assert!(
-            matches!(by_name["broken"].entry_type, easytidy_protocol::ops::FsEntryType::Symlink),
+            by_name["filelink"].is_symlink,
+            "文件链接应标记 is_symlink（图标区分）"
+        );
+        assert!(
+            matches!(
+                by_name["broken"].entry_type,
+                easytidy_protocol::ops::FsEntryType::Symlink
+            ),
             "坏链接应保留 Symlink 类型"
         );
         assert!(by_name["broken"].is_symlink);
+        assert!(matches!(
+            by_name["realdir"].entry_type,
+            easytidy_protocol::ops::FsEntryType::Dir
+        ));
         assert!(
-            matches!(by_name["realdir"].entry_type, easytidy_protocol::ops::FsEntryType::Dir)
+            !by_name["realdir"].is_symlink,
+            "普通目录不应标记 is_symlink"
         );
-        assert!(!by_name["realdir"].is_symlink, "普通目录不应标记 is_symlink");
     }
 
     /// Test FS list
@@ -247,7 +283,8 @@ mod tests {
             op: "fs.list".to_string(),
             payload: serde_json::to_value(FsList {
                 path: temp_dir.path().to_str().unwrap().to_string(),
-            }).unwrap(),
+            })
+            .unwrap(),
             err: None,
         };
 
@@ -268,12 +305,8 @@ mod tests {
     #[test]
     fn test_identity_self_discovery() {
         let (uid, gid) = easytidy_core::env::self_uid_gid();
-        let id = easytidy_core::env::resolve_identity(
-            "root:x:0:0:root:/root:/bin/sh\n",
-            uid,
-            gid,
-            None,
-        );
+        let id =
+            easytidy_core::env::resolve_identity("root:x:0:0:root:/root:/bin/sh\n", uid, gid, None);
         assert_eq!(id.uid, uid);
         assert_eq!(id.gid, gid);
         assert!(!id.name.is_empty());

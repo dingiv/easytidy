@@ -66,6 +66,10 @@ enum Cmd {
         /// 配置用户名（缺省 = 不建号，仅 fontconfig + 家目录补齐）
         #[arg(long)]
         name: Option<String>,
+        /// 首次创建（仅此标志开启时执行家目录 root 属主归位——pull 压平修复，
+        /// 仅首次创建需要，重建/重启不重复执行）
+        #[arg(long, default_value_t = false)]
+        first_run: bool,
     },
     /// 长驻 daemon：bind socket、管理 session、桥流
     Daemon,
@@ -108,9 +112,15 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("easytidy-dock {mode} starting (pid={})", std::process::id());
 
     match args.cmd.unwrap_or(Cmd::Daemon) {
-        Cmd::Prepare { uid, gid, name } => {
-            let report = easytidy_core::env::prepare_in_container(uid, gid, name.as_deref())
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Cmd::Prepare {
+            uid,
+            gid,
+            name,
+            first_run,
+        } => {
+            let report =
+                easytidy_core::env::prepare_in_container(uid, gid, name.as_deref(), first_run)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
             if let Some(reason) = report.skip_reason {
                 eprintln!("{reason}");
             }
@@ -118,7 +128,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Cmd::Daemon => daemon::run_daemon().await,
         Cmd::Bootstrap => bootstrap::run_bootstrap().await,
-        Cmd::Client { cmd, session_id, cols, rows } => {
+        Cmd::Client {
+            cmd,
+            session_id,
+            cols,
+            rows,
+        } => {
             // 短命 client：桥结束后必须显式 exit——实测 bridge 返回后若靠
             // tokio runtime 自然退出会卡住（`tokio::io::stdin()` 的阻塞读
             // 线程不随 runtime 回收，进程残留）。显式 exit 保证 close 后
@@ -145,9 +160,7 @@ async fn main() -> anyhow::Result<()> {
 fn init_logging(to_stderr: bool) {
     use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
     let _ = tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(
             fmt::layer()
                 .with_writer(logfile::layered_writer(to_stderr))

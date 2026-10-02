@@ -7,7 +7,7 @@
 //! 无手写分帧歧义。
 
 use easytidy_protocol::{
-    Frame, FrameCodec, Handshake, Message, MsgKind, PROTOCOL_VERSION, ServerEnvResp,
+    Frame, FrameCodec, Handshake, Message, MsgKind, ServerEnvResp, PROTOCOL_VERSION,
 };
 use futures::{SinkExt, StreamExt};
 use tokio::net::UnixStream;

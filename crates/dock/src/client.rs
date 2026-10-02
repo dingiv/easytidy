@@ -99,14 +99,8 @@ pub async fn run_client(args: ClientArgs) -> anyhow::Result<()> {
 
     // 命令
     let (op, payload): (String, serde_json::Value) = match args.cmd {
-        ClientCmd::Ping => (
-            "rc.ping".into(),
-            serde_json::to_value(RcPing)?,
-        ),
-        ClientCmd::List => (
-            "rc.list".into(),
-            serde_json::Value::Null,
-        ),
+        ClientCmd::Ping => ("rc.ping".into(), serde_json::to_value(RcPing)?),
+        ClientCmd::List => ("rc.list".into(), serde_json::Value::Null),
         ClientCmd::Close => {
             let sid = args
                 .session_id

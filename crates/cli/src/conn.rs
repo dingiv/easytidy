@@ -16,10 +16,7 @@ use easytidy_protocol::{
 ///
 /// `client` = 握手 client 标识（"easytidy-cli" / "ets"）——server 侧连接
 /// 登记表据此识别客户端（ui.edit 事件路由等）。
-pub async fn connect_server(
-    socket: &Path,
-    client: &str,
-) -> Result<Framed<UnixStream, FrameCodec>> {
+pub async fn connect_server(socket: &Path, client: &str) -> Result<Framed<UnixStream, FrameCodec>> {
     let stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("连接 socket 失败（容器可能未就绪）：{}", socket.display()))?;

@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use hyper::body::Bytes;
-use serde_json::Value;
 use hyper_util::rt::TokioIo;
+use serde_json::Value;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result};
@@ -251,10 +251,7 @@ impl Podman {
             .http
             .read_demux_stream(
                 "POST",
-                &format!(
-                    "/exec/{}/start?tty=false",
-                    Self::urlquery_encode(&exec_id)
-                ),
+                &format!("/exec/{}/start?tty=false", Self::urlquery_encode(&exec_id)),
             )
             .await
             .map_err(|e| Error::Connect(format!("exec 输出读取失败：{e}")))?;
@@ -288,7 +285,6 @@ pub struct ExecOnce {
     pub stderr: String,
 }
 
-
 /// 实测（需真实 podman + 运行中容器 desk_pilot）：upgrade 语义下
 /// exec_no_tty 的输出 EOF 及时到达（回归：stdin 不关闭导致会话挂死）。
 #[tokio::test]
@@ -319,13 +315,10 @@ async fn test_exec_no_tty_eof_regression() {
     assert!(elapsed.as_secs() < 10, "EOF 应及时到达，实际 {elapsed:?}");
 }
 
-
 /// 把（upgrade 后的）容器进程输出读半解包为纯输出块流：
 /// 非 tty 时按 Docker 多路复用帧头 demux（stdout/stderr 按到达顺序合并），
 /// tty 时原样直通由调用方处理。
-fn demux_read_stream<R>(
-    read_half: R,
-) -> impl futures::Stream<Item = Result<Vec<u8>>> + Send
+fn demux_read_stream<R>(read_half: R) -> impl futures::Stream<Item = Result<Vec<u8>>> + Send
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
@@ -339,9 +332,7 @@ where
                 Ok(0) => break,
                 Ok(n) => demux.feed(&buf[..n]),
                 Err(e) => {
-                    let _ = tx.send(Err(Error::Connect(format!(
-                        "exec 输出流读取失败：{e}"
-                    ))));
+                    let _ = tx.send(Err(Error::Connect(format!("exec 输出流读取失败：{e}"))));
                     return;
                 }
             }

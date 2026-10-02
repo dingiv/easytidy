@@ -23,6 +23,6 @@ pub mod message;
 pub mod ops;
 pub mod rc;
 
-pub use frame::{Frame, encode_frame, decode_frame, FrameCodec};
-pub use message::{Message, MsgKind, RpcError, Handshake, HandshakeAck};
+pub use frame::{decode_frame, encode_frame, Frame, FrameCodec};
+pub use message::{Handshake, HandshakeAck, Message, MsgKind, RpcError};
 pub use ops::*;

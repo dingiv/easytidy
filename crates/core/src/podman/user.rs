@@ -30,7 +30,12 @@ impl Podman {
     ///
     /// 调用点：容器创建启动后 / 重建后 / 模板应用后（GUI 与 CLI 均调）。
     /// 幂等，重复调用无害（覆盖"用户改了 user_name 后重建"场景）。
-    pub async fn prepare_container(&self, name: &str, params: &ContainerParams) -> Result<()> {
+    pub async fn prepare_container(
+        &self,
+        name: &str,
+        params: &ContainerParams,
+        first_run: bool,
+    ) -> Result<()> {
         let (uid, gid) =
             crate::podman::resolve_container_user(params, crate::userenv::host_user().as_ref())?;
         let mut argv = vec![
@@ -44,6 +49,9 @@ impl Podman {
         if let Some(n) = &params.user_name {
             argv.push("--name".to_string());
             argv.push(n.clone());
+        }
+        if first_run {
+            argv.push("--first-run".to_string());
         }
         let argv2 = argv.clone();
         let exec = async {
@@ -71,6 +79,11 @@ impl Podman {
         }
         if !out.stderr.trim().is_empty() {
             tracing::warn!("容器内准备提示（{}）：{}", name, out.stderr.trim());
+        }
+        // 内置脚本注入（→ ${HOME}/.easytidy/）：best-effort，失败不阻断准备主链路。
+        // home 由 exec 阶段 ensure-home 保证已存在（上一步已返回成功）。
+        if let Err(e) = self.install_scripts(name, params).await {
+            tracing::warn!("内置脚本注入失败（忽略，{name}）：{e}");
         }
         Ok(())
     }

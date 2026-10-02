@@ -169,7 +169,10 @@ pub async fn pty_open(
                                     break;
                                 }
                                 match tokio::time::timeout(deadline, stream.next()).await {
-                                    Ok(Some(Ok(Frame::Raw { stream_id: sid2, data: more }))) if sid2 == stream_id => {
+                                    Ok(Some(Ok(Frame::Raw {
+                                        stream_id: sid2,
+                                        data: more,
+                                    }))) if sid2 == stream_id => {
                                         merged.extend_from_slice(&more);
                                     }
                                     _ => break,
@@ -177,7 +180,9 @@ pub async fn pty_open(
                             }
                             let event = PtyEvent {
                                 kind: "data".to_string(),
-                                data: Some(base64::engine::general_purpose::STANDARD.encode(&merged)),
+                                data: Some(
+                                    base64::engine::general_purpose::STANDARD.encode(&merged),
+                                ),
                                 code: None,
                                 cwd: None,
                             };

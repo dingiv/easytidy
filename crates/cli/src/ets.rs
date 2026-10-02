@@ -106,17 +106,14 @@ async fn run() -> Result<()> {
         .or_else(|| std::env::var("EASYTIDY_SOCKET").ok().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET));
 
-    let framed = conn::connect_server(&socket, "ets").await
+    let framed = conn::connect_server(&socket, "ets")
+        .await
         .with_context(|| format!("连接 server 失败（{socket:?}）：容器 server 是否在运行？"))?;
 
     let timeout = Duration::from_secs(cli.timeout);
     match cli.cmd {
         Cmd::Ping => {
-            let v = op(
-                timeout,
-                conn::send_json_op(framed, "ping", &Value::Null),
-            )
-            .await?;
+            let v = op(timeout, conn::send_json_op(framed, "ping", &Value::Null)).await?;
             print_json(&v);
         }
         Cmd::Launch { id_or_name } => {
@@ -127,17 +124,21 @@ async fn run() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Cmd::Pt {
-            cmd: PtCmd::List,
-        } => {
-            let v = op(timeout, conn::send_json_op(framed, "passthrough.list", &Value::Null))
-                .await?;
+        Cmd::Pt { cmd: PtCmd::List } => {
+            let v = op(
+                timeout,
+                conn::send_json_op(framed, "passthrough.list", &Value::Null),
+            )
+            .await?;
             print_json(&v);
         }
         Cmd::Edit { path } => cmd_edit(framed, timeout, path).await?,
-        Cmd::Raw { op: op_name, payload } => {
-            let payload: Value = serde_json::from_str(&payload)
-                .with_context(|| "payload 不是合法 JSON")?;
+        Cmd::Raw {
+            op: op_name,
+            payload,
+        } => {
+            let payload: Value =
+                serde_json::from_str(&payload).with_context(|| "payload 不是合法 JSON")?;
             let v = op(timeout, conn::send_json_op(framed, &op_name, &payload)).await?;
             print_json(&v);
         }
@@ -147,7 +148,11 @@ async fn run() -> Result<()> {
 
 /// edit：ui.edit 请求 → GUI 路由结果；无 GUI 时本地起默认编辑器（前台，
 /// 继承 stdio，退出码透传）。
-async fn cmd_edit(framed: Framed<UnixStream, FrameCodec>, timeout: Duration, path: String) -> Result<()> {
+async fn cmd_edit(
+    framed: Framed<UnixStream, FrameCodec>,
+    timeout: Duration,
+    path: String,
+) -> Result<()> {
     let path = expand_tilde(&path);
     if path.trim().is_empty() {
         bail!("路径为空");
@@ -215,13 +220,21 @@ fn choose_editor(visual: Option<&str>, editor: Option<&str>, available: &[&str])
     if let Some(v) = editor.filter(|v| !v.trim().is_empty()) {
         return Some(v.to_string());
     }
-    available.iter().copied().find(|a| !a.trim().is_empty()).map(|a| a.to_string())
+    available
+        .iter()
+        .copied()
+        .find(|a| !a.trim().is_empty())
+        .map(|a| a.to_string())
 }
 
 /// 默认编辑器选择：$VISUAL → $EDITOR（可含参数）→ vim → vi → nano（PATH 探测）。
 fn pick_editor() -> Result<String> {
-    let visual = std::env::var("VISUAL").ok().filter(|v| !v.trim().is_empty());
-    let editor = std::env::var("EDITOR").ok().filter(|v| !v.trim().is_empty());
+    let visual = std::env::var("VISUAL")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let editor = std::env::var("EDITOR")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     let available: Vec<&str> = ["vim", "vi", "nano"]
         .iter()
         .copied()
@@ -247,7 +260,10 @@ fn which(name: &str) -> bool {
 
 /// pretty JSON 输出。
 fn print_json(v: &Value) {
-    println!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
+    );
 }
 
 #[cfg(test)]
@@ -342,7 +358,9 @@ mod tests {
             Ok(f) => f,
             Err(e) => panic!("连接 mock server 失败：{e}"),
         };
-        let v = conn::send_json_op(framed, "ping", &Value::Null).await.unwrap();
+        let v = conn::send_json_op(framed, "ping", &Value::Null)
+            .await
+            .unwrap();
         assert_eq!(v, serde_json::json!({ "op": "ping" }));
     }
 

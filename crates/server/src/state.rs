@@ -84,7 +84,8 @@ impl PtySession {
     }
 }
 
-pub(crate) type Subscribers = std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<easytidy_protocol::Frame>)>>;
+pub(crate) type Subscribers =
+    std::sync::Mutex<Vec<(u64, mpsc::UnboundedSender<easytidy_protocol::Frame>)>>;
 
 /// 常驻终端输出回放缓冲上限（128KB，约覆盖 1000+ 行终端输出）
 pub(crate) const RING_MAX: usize = 128 * 1024;

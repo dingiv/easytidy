@@ -18,7 +18,7 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
@@ -364,7 +364,12 @@ pub fn apply_plan(plan: &PreparePlan, paths: &IncontainerPaths) -> Result<()> {
 ///
 /// 读 /etc/passwd + /etc/group → [`plan_prepare`]（纯）→ [`apply_plan`]（IO）。
 /// 幂等，重复调用无害。
-pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Result<PrepareReport> {
+pub fn prepare_in_container(
+    uid: u32,
+    gid: u32,
+    user_name: Option<&str>,
+    first_run: bool,
+) -> Result<PrepareReport> {
     // 登录 shell 容器内探测（/bin/bash 存在优先；dock 本身不依赖任何 shell）
     let shell = if Path::new("/bin/bash").exists() {
         "/bin/bash"
@@ -388,6 +393,23 @@ pub fn prepare_in_container(uid: u32, gid: u32, user_name: Option<&str>) -> Resu
         fontconf_dir: PathBuf::from(FONTCONF_DIR),
     };
     apply_plan(&plan, &paths)?;
+    // 首次创建专属：家目录内 root 属主条目归位（pull 压平修复）。纯净镜像
+    // rootless pull 时 blob 属主统一压平为 puller，用户家目录里的骨架文件
+    // （.bashrc 等，blob 属 ubuntu）落成 root——仅首次创建执行一次归位，
+    // 重建/重启（first_run=false）不重复执行。
+    if first_run {
+        // 已知属主集合 = passwd 账号 uid，**剔除 root(0)**：家目录里 root 属主
+        // 的条目没有合法来源（pull 属主压平：blob root 与 blob 用户一起被压平
+        // 后由 create 翻译成 c0），与悬空属主（如旧映射代次的 999，passwd 无
+        // 对应账号）一样归位到容器用户。
+        let mut known: std::collections::HashSet<u32> = passwd
+            .lines()
+            .filter_map(|l| l.split(':').nth(2))
+            .filter_map(|u| u.parse::<u32>().ok())
+            .collect();
+        known.remove(&0);
+        repair_home_dangling_ownership(Path::new(&plan.home), plan.uid, plan.gid, &known);
+    }
     // ets 命令软链（幂等；宿主未挂载 ets 时静默跳过）
     ensure_ets_symlink();
     // GNOME 窗口按钮（幂等；环境不满足时静默跳过）
@@ -533,6 +555,121 @@ fn chown(path: &CString, uid: u32, gid: u32) -> Result<()> {
         return Err(Error::Io(std::io::Error::last_os_error()));
     }
     Ok(())
+}
+
+/// 家目录悬空属主归位（首次创建专属）。
+///
+/// 递归扫描 `home` 子树，把属主不在 `known_uids`（容器 passwd 全部账号）
+/// 中的文件/目录 chown 为 uid:gid。两类来源：
+/// - rootless pull 属主压平：纯净镜像（骨架文件 blob 属 ubuntu(1000)）解包
+///   后统一压平为 puller，create 翻译后显示为 root；
+/// - 跨映射代次化石：旧映射代次落盘的编码（如 999）在新映射下视图错位，
+///   元数据层面不可翻译（bijection 恒等），只能按语义归位。
+///
+/// 判定可证明：属主不是容器 passwd 任何账号的文件，在用户家目录里没有
+/// 合法来源（合法属主必然对应某个容器账号）。范围严格限定在用户自己的
+/// home 子树（非 /home 全局）、跳过挂载点（宿主机 bind 内容不可触碰）与
+/// 符号链接；仅在首次创建（first_run）执行一次。失败逐条容错。
+fn repair_home_dangling_ownership(
+    home: &Path,
+    uid: u32,
+    gid: u32,
+    known_uids: &std::collections::HashSet<u32>,
+) {
+    let mut fixed = 0usize;
+    let mounts = mount_points_under(home);
+    if !mounts.is_empty() {
+        tracing::debug!(
+            "prepare: 家目录归位排除 {0} 个挂载点（宿主机映射内容不可触碰）",
+            mounts.len()
+        );
+    }
+    repair_home_dangling_ownership_walk(home, uid, gid, known_uids, &mounts, &mut fixed);
+    tracing::debug!("prepare: 家目录悬空属主归位完成（home={home:?}，修正 {fixed} 项）");
+}
+
+/// 解析 /proc/self/mountinfo，返回落在 `home` 子树内的挂载点集合。
+///
+/// 宿主机 bind-mount（如 `${HOME}/spark_notes`、`${HOME}/media`）的文件属主
+/// 是宿主机语义，归位绝不可触碰；walk 遇到这些路径整棵跳过（不下行）。
+fn mount_points_under(home: &Path) -> std::collections::HashSet<PathBuf> {
+    match fs::read_to_string("/proc/self/mountinfo") {
+        Ok(raw) => mount_points_under_raw(home, &raw),
+        Err(_) => std::collections::HashSet::new(),
+    }
+}
+
+/// 纯函数（便于测试）：从 mountinfo 文本解析落在 `home` 子树内的挂载点。
+fn mount_points_under_raw(home: &Path, raw: &str) -> std::collections::HashSet<PathBuf> {
+    let mut out = std::collections::HashSet::new();
+    for line in raw.lines() {
+        // mountinfo 字段：36ab 814 259:8 /root-of-mount /mount-point options ...
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(fields) = fields.get(..5) else {
+            continue;
+        };
+        // 挂载点含空格/特殊字符时以八进制转义（\040 等），还原常见空格
+        let mp = fields[4].replace(r"\040", " ");
+        let mp = PathBuf::from(mp);
+        if mp.starts_with(home) {
+            out.insert(mp);
+        }
+    }
+    out
+}
+
+fn repair_home_dangling_ownership_walk(
+    dir: &Path,
+    uid: u32,
+    gid: u32,
+    known_uids: &std::collections::HashSet<u32>,
+    mounts: &std::collections::HashSet<PathBuf>,
+    fixed: &mut usize,
+) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!("prepare: 家目录归位跳过 {dir:?}（读取失败：{e}）");
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // 宿主机 bind-mount：属主是宿主机语义，整棵跳过（不下行、不改属主）
+        if mounts.contains(&path) {
+            continue;
+        }
+        // 不跟随符号链接：链接本身属主不重要，目标更不能动
+        let md = match entry.metadata() {
+            Ok(m) if m.is_symlink() => continue,
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        // 悬空属主 = owner 不是容器 passwd 任何账号 → 逻辑上必是化石
+        // （合法文件属主必然对应某个容器账号），归位到容器用户
+        let dangling = !known_uids.contains(&md.uid());
+        if md.is_dir() {
+            if dangling {
+                chown_path(&path, uid, gid);
+                *fixed += 1;
+            }
+            repair_home_dangling_ownership_walk(&path, uid, gid, known_uids, mounts, fixed);
+        } else if dangling {
+            chown_path(&path, uid, gid);
+            *fixed += 1;
+        }
+    }
+}
+
+fn chown_path(path: &Path, uid: u32, gid: u32) {
+    match CString::new(path.as_os_str().to_string_lossy().as_bytes()) {
+        Ok(c) => {
+            if let Err(e) = chown(&c, uid, gid) {
+                tracing::warn!("prepare: 归位失败 {path:?}：{e}");
+            }
+        }
+        Err(e) => tracing::warn!("prepare: 归位路径非法 {path:?}：{e}"),
+    }
 }
 
 /// fontconfig 宿主字体接入（幂等覆写）。
@@ -833,6 +970,55 @@ mod tests {
         assert!(group.lines().any(|l| l.starts_with("tidy:x:1000:")));
     }
 
+    /// 家目录 root 属主归位：foreign（root）属主条目被选中并 chown，
+    /// 非 foreign 条目与符号链接不动。测试以当前 euid 充当 foreign uid
+    /// （chown 回自身 = 无害成功），生产调用 foreign_uid 恒传 0。
+    #[test]
+    fn test_repair_home_dangling_ownership_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let euid = unsafe { libc::geteuid() };
+        let egid = unsafe { libc::getegid() };
+        let home = tmp.path();
+        std::fs::write(home.join(".bashrc"), b"fossil").unwrap();
+        std::fs::create_dir(home.join("sub")).unwrap();
+        std::fs::write(home.join("sub").join("nested"), b"x").unwrap();
+        std::os::unix::fs::symlink("/etc/hostname", home.join("link")).unwrap();
+
+        // 模拟 bind-mount 挂在 home 内（如 ${HOME}/media）：整棵必须跳过
+        let mut mounts = std::collections::HashSet::new();
+        mounts.insert(home.join("sub"));
+
+        // 已知属主集合不含测试文件属主 → 全部视为悬空；sub/ 为挂载点整棵
+        // 跳过（含其内 nested）→ 仅 .bashrc 被选中
+        let known = std::collections::HashSet::from([euid.wrapping_add(1)]);
+        let mut fixed = 0usize;
+        repair_home_dangling_ownership_walk(home, euid, egid, &known, &mounts, &mut fixed);
+        assert_eq!(fixed, 1, "挂载点内条目不可触碰，仅 .bashrc 被归位");
+
+        // 已知属主包含全部条目 → 无悬空，零改动
+        let known_all = std::collections::HashSet::from([euid]);
+        let mut fixed2 = 0usize;
+        repair_home_dangling_ownership_walk(home, euid, egid, &known_all, &mounts, &mut fixed2);
+        assert_eq!(fixed2, 0, "属主都在 passwd 账号集合内时不应有任何改动");
+    }
+
+    /// mount_points_under：mountinfo 解析 + home 子树过滤（含八进制转义还原）
+    #[test]
+    fn test_mount_points_under_filters_subtree() {
+        let home = Path::new("/home/ubuntu");
+        let raw = concat!(
+            "36 814 259:8 /mnt/docs/media /home/ubuntu/media rw,relatime - ext4 nvme rw\n",
+            "40 814 259:8 /other /somewhere/else rw - ext4 nvme rw\n",
+            "42 814 259:8 /mnt/docs/mydocs /home/ubuntu/my\\040docs rw - ext4 nvme rw\n",
+        );
+        let got = mount_points_under_raw(home, raw);
+        assert!(got.contains(&PathBuf::from("/home/ubuntu/media")));
+        assert!(!got.contains(&PathBuf::from("/somewhere/else")));
+        // 八进制 \040 还原为空格
+        assert!(got.contains(&PathBuf::from("/home/ubuntu/my docs")));
+        let _ = raw;
+    }
+
     #[test]
     fn test_ensure_home_creates_with_mode() {
         let (tmp, _paths) = tmp_env();
@@ -852,5 +1038,4 @@ mod tests {
         assert!(ensure_home("/", uid, gid).is_err(), "home=/ 必须被拒绝");
         assert!(ensure_home("", uid, gid).is_err());
     }
-
 }

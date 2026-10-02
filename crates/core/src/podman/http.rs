@@ -37,7 +37,10 @@ impl Service<hyper::Uri> for UnixConnector {
     type Response = TokioIo<tokio::net::UnixStream>;
     type Error = std::io::Error;
     type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>,
+        Box<
+            dyn std::future::Future<Output = std::result::Result<Self::Response, Self::Error>>
+                + Send,
+        >,
     >;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<std::result::Result<(), Self::Error>> {
@@ -66,9 +69,7 @@ impl HttpClient {
     /// 并协商 API 版本。
     pub async fn connect() -> Result<Self> {
         let socket_path = crate::podman::Podman::connect_fork_or_system_socket()?;
-        let connector = UnixConnector {
-            socket_path,
-        };
+        let connector = UnixConnector { socket_path };
         let full: Client<UnixConnector, Full<Bytes>> =
             Client::builder(TokioExecutor::new()).build(connector);
 
@@ -200,11 +201,7 @@ impl HttpClient {
     }
 
     /// 打开一个流式响应（logs / pull / events / archive / exec start）。
-    pub async fn open_stream(
-        &self,
-        method: &str,
-        path_and_query: &str,
-    ) -> Result<(u16, Incoming)> {
+    pub async fn open_stream(&self, method: &str, path_and_query: &str) -> Result<(u16, Incoming)> {
         let method_m = hyper::Method::from_bytes(method.as_bytes())
             .map_err(|e| Error::Connect(format!("非法 HTTP 方法 {method}：{e}")))?;
         let req = Request::builder()
@@ -212,11 +209,10 @@ impl HttpClient {
             .uri(self.url(path_and_query))
             .body(Full::default())
             .map_err(|e| Error::Connect(format!("构造流请求失败：{e}")))?;
-        let resp = self
-            .full
-            .request(req)
-            .await
-            .map_err(|e| Error::Connect(format!("{method} {path_and_query} 流请求失败：{e}")))?;
+        let resp =
+            self.full.request(req).await.map_err(|e| {
+                Error::Connect(format!("{method} {path_and_query} 流请求失败：{e}"))
+            })?;
         let status = resp.status().as_u16();
         Ok((status, resp.into_body()))
     }
@@ -236,11 +232,10 @@ impl HttpClient {
             .header("upgrade", "tcp")
             .body(Full::default())
             .map_err(|e| Error::Connect(format!("构造升级请求失败：{e}")))?;
-        let resp = self
-            .full
-            .request(req)
-            .await
-            .map_err(|e| Error::Connect(format!("{method} {path_and_query} 升级请求失败：{e}")))?;
+        let resp =
+            self.full.request(req).await.map_err(|e| {
+                Error::Connect(format!("{method} {path_and_query} 升级请求失败：{e}"))
+            })?;
         let status = resp.status().as_u16();
         let upgraded = hyper::upgrade::on(resp)
             .await
@@ -301,9 +296,8 @@ impl Demuxer {
                 return;
             }
             let stream_kind = self.buf[0];
-            let size = u32::from_be_bytes([
-                self.buf[4], self.buf[5], self.buf[6], self.buf[7],
-            ]) as usize;
+            let size =
+                u32::from_be_bytes([self.buf[4], self.buf[5], self.buf[6], self.buf[7]]) as usize;
             let end = 8 + size;
             if self.buf.len() < end {
                 return;

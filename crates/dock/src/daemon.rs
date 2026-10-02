@@ -28,10 +28,12 @@ use tracing::{debug, error, info, warn};
 
 use easytidy_protocol::frame::FrameCodec;
 use easytidy_protocol::rc::{
-    RcAttach, RcAttachAck, RcCloseReq, RcListResp, RcNew, RcNewAck, RcPing, RcPingResp,
-    RcResize, SessionInfo, ROOT_STREAM_ID,
+    RcAttach, RcAttachAck, RcCloseReq, RcListResp, RcNew, RcNewAck, RcPing, RcPingResp, RcResize,
+    SessionInfo, ROOT_STREAM_ID,
 };
-use easytidy_protocol::{Frame, Handshake, HandshakeAck, Message, MsgKind, PROTOCOL_VERSION, RpcError};
+use easytidy_protocol::{
+    Frame, Handshake, HandshakeAck, Message, MsgKind, RpcError, PROTOCOL_VERSION,
+};
 
 use crate::session::{spawn_root_shell, RootSession};
 
@@ -116,11 +118,8 @@ pub async fn run_daemon() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(
-            DAEMON_SOCKET,
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .await;
+        let _ =
+            tokio::fs::set_permissions(DAEMON_SOCKET, std::fs::Permissions::from_mode(0o600)).await;
     }
     info!("easytidy-dock daemon ready at {}", DAEMON_SOCKET);
 
@@ -297,15 +296,23 @@ async fn handle_client(
                 })
                 .collect();
             framed
-                .send(resp(cmd.id, "rc.list", &RcListResp { sessions: list }, None))
+                .send(resp(
+                    cmd.id,
+                    "rc.list",
+                    &RcListResp { sessions: list },
+                    None,
+                ))
                 .await?;
             Ok(())
         }
         "rc.new" => {
             let req: RcNew = serde_json::from_value(cmd.payload)?;
-            info!("client (token={}) requests new session {}x{}", token, req.cols, req.rows);
-            let session = spawn_root_shell(req.cols, req.rows)
-                .context("spawn root shell failed")?;
+            info!(
+                "client (token={}) requests new session {}x{}",
+                token, req.cols, req.rows
+            );
+            let session =
+                spawn_root_shell(req.cols, req.rows).context("spawn root shell failed")?;
             let id = session.id;
             state.sessions.write().await.insert(id, session.clone());
             info!("session {} created (spawn_pid={})", id, session.spawn_pid);
@@ -350,7 +357,10 @@ async fn handle_client(
         }
         "rc.attach" => {
             let req: RcAttach = serde_json::from_value(cmd.payload)?;
-            info!("client (token={}) attaches session {}", token, req.session_id);
+            info!(
+                "client (token={}) attaches session {}",
+                token, req.session_id
+            );
             let session = {
                 let sessions = state.sessions.read().await;
                 sessions.get(&req.session_id).cloned()
@@ -398,7 +408,10 @@ async fn handle_client(
             // standalone 关闭指定 session（GUI 终端"关闭"按钮）：
             // kill bash → 从 map 移除 → 广播 exited → ack。
             let req: RcCloseReq = serde_json::from_value(cmd.payload)?;
-            info!("client (token={}) requests close session {}", token, req.session_id);
+            info!(
+                "client (token={}) requests close session {}",
+                token, req.session_id
+            );
             let removed = {
                 let mut sessions = state.sessions.write().await;
                 sessions.remove(&req.session_id)
@@ -570,9 +583,7 @@ async fn attach_session(
 }
 
 /// 读下一帧（握手/attach 阶段用——5s 超时）
-async fn next_frame_timed(
-    framed: &mut Framed<UnixStream, FrameCodec>,
-) -> anyhow::Result<Frame> {
+async fn next_frame_timed(framed: &mut Framed<UnixStream, FrameCodec>) -> anyhow::Result<Frame> {
     tokio::time::timeout(std::time::Duration::from_secs(5), framed.next())
         .await
         .context("frame read timeout")?

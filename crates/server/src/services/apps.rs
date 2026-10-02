@@ -1,7 +1,7 @@
 //! 桌面应用服务：.desktop 枚举/图标解析/launch + 托管进程（spawn/reaper）。
-use crate::state::{ChildInfo, ProcessStatus, ServerState, APP_LOG_MAX};
-use crate::setup::user_map;
 use crate::services::desktop::parse_desktop_file;
+use crate::setup::user_map;
+use crate::state::{ChildInfo, ProcessStatus, ServerState, APP_LOG_MAX};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -13,8 +13,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
 use easytidy_protocol::{
-    AppGetIcon, AppGetIconResp, AppKill, AppLaunchApp, AppLaunchAppResp, AppLogs, AppLogsResp,
-    AppsLaunch, AppsLaunchResp, AppsLaunchResult, AppsListResp, AppsPsResp, AppInfo,
+    AppGetIcon, AppGetIconResp, AppInfo, AppKill, AppLaunchApp, AppLaunchAppResp, AppLogs,
+    AppLogsResp, AppsLaunch, AppsLaunchResp, AppsLaunchResult, AppsListResp, AppsPsResp,
     ChildExited, Frame, ManagedProcess, Message, MsgKind,
 };
 use tokio::process::Command as TokioCommand;
@@ -222,8 +222,8 @@ pub(crate) async fn handle_apps_launch_app(
     state: &Arc<ServerState>,
     event_tx: mpsc::UnboundedSender<Frame>,
 ) -> Result<Frame> {
-    let req: AppLaunchApp = serde_json::from_value(msg.payload)
-        .context("Failed to parse AppLaunchApp")?;
+    let req: AppLaunchApp =
+        serde_json::from_value(msg.payload).context("Failed to parse AppLaunchApp")?;
 
     info!("apps.launch_app：{}", req.id_or_name);
     let resp = match resolve_app(&req.id_or_name) {
@@ -280,15 +280,16 @@ pub(crate) async fn handle_apps_launch_app(
 
 /// Handle apps.getIcon
 pub(crate) async fn handle_apps_get_icon(msg: Message) -> Result<Frame> {
-    let req: AppGetIcon = serde_json::from_value(msg.payload)
-        .context("Failed to parse AppGetIcon")?;
+    let req: AppGetIcon =
+        serde_json::from_value(msg.payload).context("Failed to parse AppGetIcon")?;
 
     let path = Path::new(&req.path);
 
-    let data = fs::read(path)
-        .with_context(|| format!("Failed to read icon: {}", path.display()))?;
+    let data =
+        fs::read(path).with_context(|| format!("Failed to read icon: {}", path.display()))?;
 
-    let format = path.extension()
+    let format = path
+        .extension()
         .and_then(|s| s.to_str())
         .unwrap_or("png")
         .to_string();
@@ -462,8 +463,8 @@ pub(crate) async fn handle_apps_launch(
     state: &Arc<ServerState>,
     event_tx: mpsc::UnboundedSender<Frame>,
 ) -> Result<Frame> {
-    let req: AppsLaunch = serde_json::from_value(msg.payload)
-        .context("Failed to parse AppsLaunch")?;
+    let req: AppsLaunch =
+        serde_json::from_value(msg.payload).context("Failed to parse AppsLaunch")?;
 
     info!("apps.launch：{} 个应用", req.apps.len());
     let mut results = Vec::with_capacity(req.apps.len());
@@ -538,8 +539,7 @@ pub(crate) async fn handle_apps_ps(msg: Message, state: &Arc<ServerState>) -> Re
 
 /// 获取某托管进程捕获的 stdio（有损 UTF-8；进程不存在返回空）
 pub(crate) async fn handle_apps_logs(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
-    let req: AppLogs = serde_json::from_value(msg.payload)
-        .context("Failed to parse AppLogs")?;
+    let req: AppLogs = serde_json::from_value(msg.payload).context("Failed to parse AppLogs")?;
     let children = state.children.read().await;
     let stdio = children
         .get(&req.pid)
@@ -552,15 +552,17 @@ pub(crate) async fn handle_apps_logs(msg: Message, state: &Arc<ServerState>) -> 
         id: msg.id,
         kind: MsgKind::Resp,
         op: "apps.logs".to_string(),
-        payload: serde_json::to_value(AppLogsResp { pid: req.pid, stdio })?,
+        payload: serde_json::to_value(AppLogsResp {
+            pid: req.pid,
+            stdio,
+        })?,
         err: None,
     }))
 }
 
 /// 终止托管进程（SIGTERM；退出由 wait 任务记录）。
 pub(crate) async fn handle_apps_kill(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
-    let req: AppKill = serde_json::from_value(msg.payload)
-        .context("Failed to parse AppKill")?;
+    let req: AppKill = serde_json::from_value(msg.payload).context("Failed to parse AppKill")?;
     let running = {
         let children = state.children.read().await;
         matches!(
@@ -635,7 +637,11 @@ mod tests {
     #[test]
     fn test_compute_app_id_stable_and_format() {
         let a = fixture_app("Foo", "foo --flag", "/usr/share/applications/foo.desktop");
-        let b = fixture_app("Foo", "foo --flag", "/usr/local/share/applications/foo.desktop");
+        let b = fixture_app(
+            "Foo",
+            "foo --flag",
+            "/usr/local/share/applications/foo.desktop",
+        );
         let id_a = compute_app_id(&a);
         // 同一内容跨目录：id 恒同（不含路径参与哈希）
         assert_eq!(id_a, compute_app_id(&b));
@@ -643,16 +649,30 @@ mod tests {
         // 格式：pt-<12 hex>
         assert!(id_a.starts_with("pt-"));
         assert_eq!(id_a.len(), 3 + 12);
-        assert!(id_a[3..].chars().all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f')));
+        assert!(id_a[3..]
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f')));
     }
 
     #[test]
     fn test_compute_app_id_content_change_different_id() {
         let a = fixture_app("Foo", "foo", "/usr/share/applications/foo.desktop");
-        let b = fixture_app("Foo", "foo --new-flag", "/usr/share/applications/foo.desktop");
-        assert_ne!(compute_app_id(&a), compute_app_id(&b), "exec 变化 = 新内容身份");
+        let b = fixture_app(
+            "Foo",
+            "foo --new-flag",
+            "/usr/share/applications/foo.desktop",
+        );
+        assert_ne!(
+            compute_app_id(&a),
+            compute_app_id(&b),
+            "exec 变化 = 新内容身份"
+        );
         let c = fixture_app("Bar", "foo", "/usr/share/applications/foo.desktop");
-        assert_ne!(compute_app_id(&a), compute_app_id(&c), "name 变化 = 新内容身份");
+        assert_ne!(
+            compute_app_id(&a),
+            compute_app_id(&c),
+            "name 变化 = 新内容身份"
+        );
     }
 
     #[test]
@@ -662,7 +682,11 @@ mod tests {
         let registry = AppRegistry {
             schema_version: 1,
             scanned_at: 1234567890,
-            apps: vec![fixture_app("Foo", "foo", "/usr/share/applications/foo.desktop")],
+            apps: vec![fixture_app(
+                "Foo",
+                "foo",
+                "/usr/share/applications/foo.desktop",
+            )],
         };
         write_registry_to(&path, &registry).unwrap();
         let loaded = read_registry_from(&path).expect("登记表应可解析");

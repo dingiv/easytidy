@@ -20,7 +20,6 @@ use easytidy_core::models::{
 };
 use easytidy_core::podman::Podman;
 
-
 /// 独立 unix-socket HTTP inspect（等价 podman inspect，独立于引擎实现）。
 async fn inspect_container_compat(name: &str) -> Result<serde_json::Value, String> {
     use http_body_util::BodyExt;
@@ -38,9 +37,8 @@ async fn inspect_container_compat(name: &str) -> Result<serde_json::Value, Strin
     impl Service<hyper::Uri> for Connector {
         type Response = TokioIo<tokio::net::UnixStream>;
         type Error = std::io::Error;
-        type Future = Pin<
-            Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
-        >;
+        type Future =
+            Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
         fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
@@ -61,12 +59,9 @@ async fn inspect_container_compat(name: &str) -> Result<serde_json::Value, Strin
         Client::builder(TokioExecutor::new()).build(Connector {
             path: std::path::PathBuf::from(socket),
         });
-    let req = Request::get(format!(
-        "http://podman/v5.0/containers/{}/json",
-        name
-    ))
-    .body(http_body_util::Full::new(bytes::Bytes::new()))
-    .map_err(|e| e.to_string())?;
+    let req = Request::get(format!("http://podman/v5.0/containers/{}/json", name))
+        .body(http_body_util::Full::new(bytes::Bytes::new()))
+        .map_err(|e| e.to_string())?;
     let resp = client.request(req).await.map_err(|e| e.to_string())?;
     let bytes = resp
         .into_body()
@@ -76,7 +71,6 @@ async fn inspect_container_compat(name: &str) -> Result<serde_json::Value, Strin
         .to_bytes();
     serde_json::from_slice(&bytes).map_err(|e| format!("解析 inspect 失败：{e}"))
 }
-
 
 fn unique_name(prefix: &str) -> String {
     let ts = SystemTime::now()
@@ -266,12 +260,18 @@ async fn rebuild_applies_mounts_and_ports() {
             "mount /data 的宿主源路径不匹配",
         )?;
         check(
-            data_mount.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
+            data_mount
+                .get("RW")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             "mount /data 应为可写",
         )?;
         let tmp_mount = get_mount("/tmp-e2e")?;
         check(
-            !tmp_mount.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
+            !tmp_mount
+                .get("RW")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
             "mount /tmp-e2e 应为只读",
         )?;
 
@@ -315,7 +315,10 @@ async fn rebuild_applies_mounts_and_ports() {
             .and_then(|u| u.as_str())
             .unwrap_or_default();
         println!("[inspect] Config.User = {user}");
-        check(user == "1000:1000", "inspect Config.User 应回显配置的 1000:1000")?;
+        check(
+            user == "1000:1000",
+            "inspect Config.User 应回显配置的 1000:1000",
+        )?;
 
         Ok(())
     }
@@ -376,7 +379,9 @@ async fn identity_prepare_user_and_root_exec() {
         ..Default::default()
     };
     let config_file = ConfigFile::with_base_dir(tmp.path().to_path_buf());
-    config_file.register_container(config.clone()).expect("注册容器配置失败");
+    config_file
+        .register_container(config.clone())
+        .expect("注册容器配置失败");
 
     let result: Result<(), String> = async {
         podman
@@ -384,13 +389,16 @@ async fn identity_prepare_user_and_root_exec() {
             .await
             .map_err(|e| format!("创建容器失败：{e}"))?;
         println!("[create] 容器 {name}");
-        podman.start(&name).await.map_err(|e| format!("启动容器失败：{e}"))?;
+        podman
+            .start(&name)
+            .await
+            .map_err(|e| format!("启动容器失败：{e}"))?;
         // 等待 server/容器就绪（alpine 镜像首启需拉取/解压）
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
         // 1. 容器内准备（fontconfig + useradd 建号）
         podman
-            .prepare_container(&name, &config.params)
+            .prepare_container(&name, &config.params, false)
             .await
             .map_err(|e| format!("prepare_container 失败：{e}"))?;
         println!("[prepare] 容器内用户准备完成");
@@ -408,7 +416,11 @@ async fn identity_prepare_user_and_root_exec() {
             )
             .await
             .map_err(|e| format!("getent exec 失败：{e}"))?;
-        println!("[getent] 退出码={} stdout={:?}", getent.code, getent.stdout.trim());
+        println!(
+            "[getent] 退出码={} stdout={:?}",
+            getent.code,
+            getent.stdout.trim()
+        );
         check(getent.code == 0, "getent passwd 退出码应为 0（用户已建号）")?;
         // getent 行格式：name:passwd:uid:gid:gecos:home:shell
         let fields: Vec<&str> = getent.stdout.trim().split(':').collect();
@@ -416,11 +428,14 @@ async fn identity_prepare_user_and_root_exec() {
         check(fields[0] == user_name, "passwd 条目名应匹配 user_name")?;
         check(fields[2] == uid.to_string(), "passwd 条目 uid 应匹配配置")?;
         check(fields[3] == gid.to_string(), "passwd 条目 gid 应匹配配置")?;
-        check(fields[5] == format!("/home/{user_name}"), "passwd 条目 home 应为 /home/<name>")?;
+        check(
+            fields[5] == format!("/home/{user_name}"),
+            "passwd 条目 home 应为 /home/<name>",
+        )?;
 
         // 3. 幂等：二次 prepare 不报错、不改变建号结果
         podman
-            .prepare_container(&name, &config.params)
+            .prepare_container(&name, &config.params, false)
             .await
             .map_err(|e| format!("二次 prepare_container（幂等）失败：{e}"))?;
         let getent2 = podman

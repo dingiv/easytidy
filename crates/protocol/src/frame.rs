@@ -113,8 +113,7 @@ impl Encoder<Frame> for FrameCodec {
             Frame::Json(msg) => {
                 // JSON 帧：判别符 + JSON 文本
                 payload.put_u8(FRAME_JSON);
-                let json_bytes = serde_json::to_vec(&msg)
-                    .map_err(std::io::Error::other)?;
+                let json_bytes = serde_json::to_vec(&msg).map_err(std::io::Error::other)?;
                 payload.extend_from_slice(&json_bytes);
             }
             Frame::Raw { stream_id, data } => {
@@ -134,7 +133,9 @@ impl Encoder<Frame> for FrameCodec {
 pub fn encode_frame(frame: Frame) -> BytesMut {
     let mut codec = FrameCodec::new();
     let mut dst = BytesMut::new();
-    codec.encode(frame, &mut dst).expect("frame encoding failed");
+    codec
+        .encode(frame, &mut dst)
+        .expect("frame encoding failed");
     dst
 }
 
@@ -166,7 +167,9 @@ mod tests {
 
         let encoded = encode_frame(frame.clone());
         let mut decoded_src = encoded.clone();
-        let decoded = decode_frame(&mut decoded_src).unwrap().expect("decode failed");
+        let decoded = decode_frame(&mut decoded_src)
+            .unwrap()
+            .expect("decode failed");
 
         assert_eq!(frame, decoded);
     }
@@ -180,7 +183,9 @@ mod tests {
 
         let encoded = encode_frame(frame.clone());
         let mut decoded_src = encoded.clone();
-        let decoded = decode_frame(&mut decoded_src).unwrap().expect("decode failed");
+        let decoded = decode_frame(&mut decoded_src)
+            .unwrap()
+            .expect("decode failed");
 
         assert_eq!(frame, decoded);
     }
@@ -194,7 +199,9 @@ mod tests {
 
         let encoded = encode_frame(frame.clone());
         let mut decoded_src = encoded.clone();
-        let decoded = decode_frame(&mut decoded_src).unwrap().expect("decode failed");
+        let decoded = decode_frame(&mut decoded_src)
+            .unwrap()
+            .expect("decode failed");
 
         assert_eq!(frame, decoded);
     }
@@ -246,8 +253,12 @@ mod tests {
         encoded.extend(encode_frame(frame2.clone()));
 
         let mut buffer = encoded;
-        let decoded1 = decode_frame(&mut buffer).unwrap().expect("decode frame1 failed");
-        let decoded2 = decode_frame(&mut buffer).unwrap().expect("decode frame2 failed");
+        let decoded1 = decode_frame(&mut buffer)
+            .unwrap()
+            .expect("decode frame1 failed");
+        let decoded2 = decode_frame(&mut buffer)
+            .unwrap()
+            .expect("decode frame2 failed");
 
         assert_eq!(frame1, decoded1);
         assert_eq!(frame2, decoded2);
@@ -256,7 +267,7 @@ mod tests {
 
     #[test]
     fn test_decode_frame_insufficient_vs_violation() {
-        use crate::message::{MsgKind, Message};
+        use crate::message::{Message, MsgKind};
         // 数据不足 → Ok(None)（不是 Err）
         let mut partial = BytesMut::from(&[0u8, 0, 0, 10][..]); // 声称 10 字节但没给够
         assert_eq!(decode_frame(&mut partial).unwrap(), None);

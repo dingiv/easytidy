@@ -19,8 +19,8 @@
 use serde_json::Value;
 
 use crate::error::{Error, Result};
-use hyper::body::Bytes;
 use crate::podman::http::HttpClient;
+use hyper::body::Bytes;
 
 /// libpod 客户端（仅覆盖我们用到的端点）。
 ///
@@ -153,9 +153,63 @@ impl Libpod {
             .map(|s| s.to_string())
             .ok_or_else(|| Error::Connect(format!("libpod commit 响应缺少 Id：{text}")))
     }
+
+    /// easytidy 原生重建端点（fork 扩展，docs/22-23 方案链路）：
+    ///
+    /// `POST /v<version>/libpod/containers/{old}/easytidy-rebuild`
+    /// `?new_name=<tmp>&image=<新镜像引用>&easytidy_fast=true`
+    ///
+    /// 引擎在**服务端单进程内**原子完成：stop 旧容器 → commit RW 层为镜像 →
+    /// 用请求 body（与 create 相同的 spec 形状，走完整 CreateContainer 语义：
+    /// 运行时默认值 / rlimits / CompleteSpec / ExecuteCreate）创建替代容器
+    /// （base = 该镜像）→ start → 删旧容器 → rename 为正式名。
+    ///
+    /// 与「宿主侧 commit + create 两步拼接」的本质区别：整条链在引擎进程内
+    /// 顺序执行，commit 层的 parent 与新容器的挂载链由引擎自身保证一致——
+    /// 不存在跨请求时序导致的中间层跳过（历史断链/数据丢失的根源）。
+    ///
+    /// 失败语义（端点保证）：删除旧容器**之前**的任何失败 → 旧容器被自动
+    /// 重启（若调用时它在运行），新容器不会残留运行态；删除**之后**的失败
+    /// 不可回滚——commit 镜像即数据兑底，错误信息带 `podman rename` 恢复指引。
+    ///
+    /// 返回新容器 ID（响应 `Id` 字段）。非 2xx 直接报出引擎错误原文。
+    pub async fn easytidy_rebuild(
+        &self,
+        old_name: &str,
+        new_name: &str,
+        image_ref: &str,
+        body: Value,
+    ) -> Result<String> {
+        let url = format!(
+            "/v{}/libpod/containers/{}/easytidy-rebuild?new_name={}&image={}&easytidy_fast=true",
+            self.api_version,
+            urlencoding(old_name),
+            urlencoding(new_name),
+            urlencoding(image_ref)
+        );
+        let body_bytes = serde_json::to_vec(&body)
+            .map(Bytes::from)
+            .map_err(|e| Error::Connect(format!("序列化 rebuild body 失败：{e}")))?;
+        let (status, resp) = self
+            .http
+            .request_bytes("POST", &url, Some(body_bytes))
+            .await
+            .map_err(|e| Error::Connect(format!("easytidy-rebuild 请求失败：{e}")))?;
+        let text = String::from_utf8_lossy(&resp).to_string();
+        if !(200..300).contains(&status) {
+            return Err(Error::Connect(format!(
+                "easytidy-rebuild 失败（HTTP {status}）：{}",
+                text.trim()
+            )));
+        }
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| Error::Connect(format!("解析 easytidy-rebuild 响应失败：{e}：{text}")))?;
+        v.get("Id")
+            .and_then(|x| x.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| Error::Connect(format!("easytidy-rebuild 响应缺少 Id：{text}")))
+    }
 }
-
-
 
 #[allow(clippy::too_many_arguments)]
 pub fn keep_id_create_body(
@@ -217,7 +271,11 @@ pub fn keep_id_create_body(
             let source = m.get("Source").cloned().unwrap_or(Value::Null);
             let target = m.get("Target").cloned().unwrap_or(Value::Null);
             let ro = m.get("ReadOnly").and_then(|v| v.as_bool()).unwrap_or(false);
-            let options = if ro { serde_json::json!(["ro"]) } else { serde_json::json!([]) };
+            let options = if ro {
+                serde_json::json!(["ro"])
+            } else {
+                serde_json::json!([])
+            };
             serde_json::json!({
                 "type": typ,
                 "source": source,

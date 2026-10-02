@@ -8,9 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use easytidy_protocol::{
-    Frame, MsgKind, PtyClose, PtyExited, PtyOpenResp,
-};
+use easytidy_protocol::{Frame, MsgKind, PtyClose, PtyExited, PtyOpenResp};
 use futures::{SinkExt, StreamExt};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -19,10 +17,7 @@ use tokio_util::codec::Framed;
 use tracing::{error, info, warn};
 
 /// Handle a single connection
-pub(crate) async fn handle_connection(
-    stream: UnixStream,
-    state: Arc<ServerState>,
-) -> Result<()> {
+pub(crate) async fn handle_connection(stream: UnixStream, state: Arc<ServerState>) -> Result<()> {
     // FIXME: 将该函数中的状态都放在 ConnectionState 中
     let mut framed = Framed::new(stream, easytidy_protocol::frame::FrameCodec::new());
 
@@ -206,6 +201,9 @@ pub(crate) async fn close_conn_ptys(
         }
     }
     if unsubscribed > 0 || !to_remove.is_empty() {
-        info!("连接退出：退订 {unsubscribed} 个常驻终端，清理 {} 个会话", to_remove.len());
+        info!(
+            "连接退出：退订 {unsubscribed} 个常驻终端，清理 {} 个会话",
+            to_remove.len()
+        );
     }
 }

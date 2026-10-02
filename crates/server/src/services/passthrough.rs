@@ -22,9 +22,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
 
+use crate::services::apps::spawn_managed_process;
 use crate::setup::user_map;
 use crate::state::ServerState;
-use crate::services::apps::spawn_managed_process;
 
 /// 进程内一次性守卫（旧 XDG 图标目录前缀 → 新 `.easytidy/icons` 的配置改写）。
 static LEGACY_ICONS_MIGRATED: std::sync::Once = std::sync::Once::new();
@@ -84,9 +84,7 @@ fn rewrite_icon_paths(path: &std::path::Path, legacy_dir: &str, new_dir: &str) {
             Ok(s) => match std::fs::write(path, s) {
                 Ok(()) => info!(
                     "passthrough 图标路径已迁移：{} → {}（{} 个）",
-                    legacy_dir,
-                    new_dir,
-                    changed
+                    legacy_dir, new_dir, changed
                 ),
                 Err(e) => warn!("图标路径改写写回失败：{e}"),
             },
@@ -135,8 +133,7 @@ fn write_container_config(
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, &content)
         .with_context(|| format!("写 passthrough 配置失败：{}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("原子替换失败：{}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("原子替换失败：{}", path.display()))?;
     Ok(())
 }
 
@@ -199,10 +196,7 @@ pub(crate) async fn launch_auto_start(state: &Arc<ServerState>) {
     if to_launch.is_empty() {
         return;
     }
-    info!(
-        "auto-start：{} 个应用待拉起（容器内配置）",
-        to_launch.len()
-    );
+    info!("auto-start：{} 个应用待拉起（容器内配置）", to_launch.len());
     for app in to_launch {
         match spawn_managed_process(state, &app.cmd, "passthrough", app.name.clone(), None).await {
             Ok(pid) => info!("auto-start 拉起成功：{} (pid={pid})", app.name),
@@ -271,10 +265,9 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"custom:chrome\"\n\n"
-                .to_string() +
-                "name = \"Chrome\"\ncmd = \"google-chrome\"\n"
-                    + "icon = \"/home/node/.local/share/icons/easytidy/phoebe.png\"\n",
+            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"custom:chrome\"\n\n".to_string()
+                + "name = \"Chrome\"\ncmd = \"google-chrome\"\n"
+                + "icon = \"/home/node/.local/share/icons/easytidy/phoebe.png\"\n",
         )
         .unwrap();
 
@@ -300,9 +293,8 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
-            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"a\"\nname = \"A\"\n"
-                .to_string() +
-                "cmd = \"x\"\nicon = \"/usr/share/icons/hicolor/256x256/apps/x.png\"\n",
+            "schema_version = 2\napps = []\n\n[[pinned]]\nid = \"a\"\nname = \"A\"\n".to_string()
+                + "cmd = \"x\"\nicon = \"/usr/share/icons/hicolor/256x256/apps/x.png\"\n",
         )
         .unwrap();
 

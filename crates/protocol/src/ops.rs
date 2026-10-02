@@ -816,8 +816,7 @@ mod tests {
     #[test]
     fn test_fs_write_offset_serde() {
         // 旧格式（无 offset）→ None（全量覆盖）
-        let old: FsWrite =
-            serde_json::from_str(r#"{"path":"/tmp/a","data_b64":"aGk="}"#).unwrap();
+        let old: FsWrite = serde_json::from_str(r#"{"path":"/tmp/a","data_b64":"aGk="}"#).unwrap();
         assert_eq!(old.offset, None);
         // 新格式带 offset（分块续写）
         let op = FsWrite {
@@ -854,11 +853,16 @@ mod tests {
 
     #[test]
     fn test_ui_edit_serde() {
-        let op = UiEdit { path: "/home/div/.bashrc".to_string() };
+        let op = UiEdit {
+            path: "/home/div/.bashrc".to_string(),
+        };
         let json = serde_json::to_string(&op).unwrap();
         assert_eq!(serde_json::from_str::<UiEdit>(&json).unwrap(), op);
 
-        let resp = UiEditResp { routed: true, target: "gui".to_string() };
+        let resp = UiEditResp {
+            routed: true,
+            target: "gui".to_string(),
+        };
         let json = serde_json::to_string(&resp).unwrap();
         assert_eq!(serde_json::from_str::<UiEditResp>(&json).unwrap(), resp);
     }
@@ -877,9 +881,18 @@ mod tests {
     #[test]
     fn test_fs_entry_type() {
         use serde_json::json;
-        assert_eq!(serde_json::to_value(FsEntryType::File).unwrap(), json!("file"));
-        assert_eq!(serde_json::to_value(FsEntryType::Dir).unwrap(), json!("dir"));
-        assert_eq!(serde_json::to_value(FsEntryType::Symlink).unwrap(), json!("symlink"));
+        assert_eq!(
+            serde_json::to_value(FsEntryType::File).unwrap(),
+            json!("file")
+        );
+        assert_eq!(
+            serde_json::to_value(FsEntryType::Dir).unwrap(),
+            json!("dir")
+        );
+        assert_eq!(
+            serde_json::to_value(FsEntryType::Symlink).unwrap(),
+            json!("symlink")
+        );
 
         assert_eq!(
             serde_json::from_str::<FsEntryType>(r#""file""#).unwrap(),

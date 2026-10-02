@@ -1,8 +1,8 @@
 //! 配置服务：config.get / config.set（数据源 = 持久层 /home/easytidy/config.json）。
 
 use anyhow::{Context, Result};
-use serde_json::json;
 use easytidy_protocol::{CfgGetResp, CfgSet, CfgSetResp, Frame, Message, MsgKind};
+use serde_json::json;
 use tracing::info;
 
 use crate::storage;
@@ -34,8 +34,7 @@ pub(crate) async fn handle_config_get(msg: Message) -> Result<Frame> {
 }
 
 pub(crate) async fn handle_config_set(msg: Message) -> Result<Frame> {
-    let req: CfgSet = serde_json::from_value(msg.payload.clone())
-        .context("解析 CfgSet 失败")?;
+    let req: CfgSet = serde_json::from_value(msg.payload.clone()).context("解析 CfgSet 失败")?;
 
     // 读-合并-写：键级覆盖（原版 TODO 未实现，只回写旧内容）
     let mut config = match storage::read_config()? {
@@ -47,7 +46,11 @@ pub(crate) async fn handle_config_set(msg: Message) -> Result<Frame> {
         obj.insert(req.key.clone(), req.value);
     }
     storage::write_config(&serde_json::to_string_pretty(&config)?)?;
-    info!("配置已更新：{}[{}]", storage::config_path().display(), req.key);
+    info!(
+        "配置已更新：{}[{}]",
+        storage::config_path().display(),
+        req.key
+    );
 
     Ok(Frame::Json(Message {
         id: msg.id,

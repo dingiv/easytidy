@@ -1,6 +1,6 @@
 //! PTY 服务：open/attach/回放/resize/close/枚举/cwd 跟随。
-use crate::state::{PtySession, RING_MAX, ServerState};
 use crate::setup::user_map;
+use crate::state::{PtySession, ServerState, RING_MAX};
 
 use std::collections::HashMap;
 use std::io::Read;
@@ -11,10 +11,10 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use easytidy_protocol::{
-    Frame, Message, MsgKind, PtyClose, PtyCwd, PtyCwdResp,
-    PtyListResp, PtyOpen, PtyOpenResp, PtyResize, PtyTerminalInfo, RpcError,
+    Frame, Message, MsgKind, PtyClose, PtyCwd, PtyCwdResp, PtyListResp, PtyOpen, PtyOpenResp,
+    PtyResize, PtyTerminalInfo, RpcError,
 };
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde_json::json;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{error, info, warn};
@@ -39,7 +39,10 @@ pub(crate) async fn attach_to_session(
 ) -> Result<Option<Frame>> {
     let sessions = state.sessions.read().await;
     let Some(session) = sessions.get(&stream_id) else {
-        eprintln!("[SRV-DBG] attach_to_session: sid={} conn_token={} → SESSION NOT FOUND", stream_id, conn_token);
+        eprintln!(
+            "[SRV-DBG] attach_to_session: sid={} conn_token={} → SESSION NOT FOUND",
+            stream_id, conn_token
+        );
         return Ok(None);
     };
     eprintln!(
@@ -81,7 +84,11 @@ pub(crate) async fn attach_to_session(
             data: pending,
         });
     }
-    session.subs.lock().unwrap().push((conn_token, (*event_tx).clone()));
+    session
+        .subs
+        .lock()
+        .unwrap()
+        .push((conn_token, (*event_tx).clone()));
     info!("PTY attach: stream_id={}", stream_id);
     Ok(Some(Frame::Json(Message {
         id: msg_id,
@@ -99,11 +106,9 @@ pub(crate) async fn handle_pty_open(
     event_tx: mpsc::UnboundedSender<Frame>,
     conn_token: u64,
 ) -> Result<Frame> {
-
     info!("div: handle_pty_open enter {}", conn_token);
 
-    let req: PtyOpen = serde_json::from_value(msg.payload)
-        .context("Failed to parse PtyOpen")?;
+    let req: PtyOpen = serde_json::from_value(msg.payload).context("Failed to parse PtyOpen")?;
 
     // 接线常驻终端：server 按身份各持一个 attach 终端（persistent 会话，
     // 不随连接断开清理；key 恒 "user"（新模型 server 即容器默认用户，无
@@ -120,8 +125,10 @@ pub(crate) async fn handle_pty_open(
         .copied();
     // 多终端：按 stream_id 附接已有会话（GUI 重开窗口恢复面板）
     if let Some(sid) = req.attach_stream {
-        if let Some(resp) =
-            attach_to_session(state, sid, req.cols, req.rows, &event_tx, conn_token, msg.id).await?
+        if let Some(resp) = attach_to_session(
+            state, sid, req.cols, req.rows, &event_tx, conn_token, msg.id,
+        )
+        .await?
         {
             return Ok(resp);
         }
@@ -154,9 +161,7 @@ pub(crate) async fn handle_pty_open(
         pixel_height: 0,
     };
 
-    let pty_pair = pty_system
-        .openpty(pty_size)
-        .context("Failed to open PTY")?;
+    let pty_pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
     // ⚠️ 模型（2026-08-27 定案）：终端不指定用户——server 进程本身即容器
     // 默认用户（容器 User 字段 = 配置 uid:gid，宿主侧 create_with_config），
@@ -165,7 +170,11 @@ pub(crate) async fn handle_pty_open(
     // （协议 v2 删 as_root，root 走容器内 easytidy-dock）。
     let (cmd, argv) = if req.cmd.is_empty() {
         // 默认终端 = 登录 shell（-l 读 /etc/profile，HOME 由下方 env 注入）
-        let shell = if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" };
+        let shell = if Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        };
         (shell.to_string(), vec![shell.to_string(), "-l".to_string()])
     } else {
         (
@@ -200,7 +209,14 @@ pub(crate) async fn handle_pty_open(
         cmd_builder.env("HOME", &user.home);
         cmd_builder.env("USER", &user.name);
         cmd_builder.env("LOGNAME", &user.name);
-        cmd_builder.env("SHELL", if Path::new("/bin/bash").exists() { "/bin/bash" } else { "/bin/sh" });
+        cmd_builder.env(
+            "SHELL",
+            if Path::new("/bin/bash").exists() {
+                "/bin/bash"
+            } else {
+                "/bin/sh"
+            },
+        );
     }
     // TERM 注入：交互 shell 必需（clear 等依赖），客户端 env 未必携带
     // （实测 "TERM environment variable not set"）
@@ -228,11 +244,11 @@ pub(crate) async fn handle_pty_open(
     let master = pty_pair.master;
 
     // Take writer BEFORE we wrap master in Arc<Mutex<>>
-    let writer = master.take_writer()
-        .context("Failed to take PTY writer")?;
+    let writer = master.take_writer().context("Failed to take PTY writer")?;
 
     // Clone reader for the reader thread
-    let reader = master.try_clone_reader()
+    let reader = master
+        .try_clone_reader()
         .context("Failed to clone PTY reader")?;
 
     // Wrap master in Arc<Mutex<>> for resize operations
@@ -371,10 +387,7 @@ pub(crate) fn pty_reader_thread(
                 }
 
                 // 广播订阅者（send 失败 = 连接断开 → 退订）
-                let frame = Frame::Raw {
-                    stream_id,
-                    data,
-                };
+                let frame = Frame::Raw { stream_id, data };
                 let mut subs = session.subs.lock().unwrap();
                 let subs_count = subs.len();
                 let mut sent_ok = 0usize;
@@ -411,7 +424,11 @@ pub(crate) fn pty_reader_thread(
     // 短暂等待子进程自然退出（否则 kill 会吞掉输出/退出码，实测快速命令丢输出）
     let exit_code = match child.try_wait() {
         Ok(Some(status)) => {
-            if status.success() { 0 } else { -1 }
+            if status.success() {
+                0
+            } else {
+                -1
+            }
         }
         Ok(None) => {
             // EOF 后给子进程一个自然退出的宽限窗口
@@ -434,14 +451,22 @@ pub(crate) fn pty_reader_thread(
             };
             match exit {
                 Some(status) => {
-                    if status.success() { 0 } else { -1 }
+                    if status.success() {
+                        0
+                    } else {
+                        -1
+                    }
                 }
                 None => {
                     info!("PTY child still running at EOF, killing");
                     let _ = child.kill();
                     match child.wait() {
                         Ok(status) => {
-                            if status.success() { 0 } else { -1 }
+                            if status.success() {
+                                0
+                            } else {
+                                -1
+                            }
                         }
                         Err(_) => -1,
                     }
@@ -491,7 +516,10 @@ pub(crate) fn pty_reader_thread(
         }
     }
 
-    info!("PTY reader thread ended: stream_id={}, exit_code={}", stream_id, exit_code);
+    info!(
+        "PTY reader thread ended: stream_id={}, exit_code={}",
+        stream_id, exit_code
+    );
 }
 
 /// 读取进程 cwd：直接 readlink（新模型下 server 与子进程同 uid，
@@ -533,8 +561,7 @@ pub(crate) async fn handle_pty_list(msg: Message, state: &Arc<ServerState>) -> R
 /// /proc/<child-pid>/cwd（symlink，实时反映 cd 结果）；无子进程（root
 /// 终端直接 spawn bash）则直接读 spawn pid 的 cwd。
 pub(crate) async fn handle_pty_cwd(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
-    let req: PtyCwd = serde_json::from_value(msg.payload)
-        .context("Failed to parse PtyCwd")?;
+    let req: PtyCwd = serde_json::from_value(msg.payload).context("Failed to parse PtyCwd")?;
 
     let sessions = state.sessions.read().await;
     let Some(session) = sessions.get(&req.stream_id) else {
@@ -562,22 +589,21 @@ pub(crate) async fn handle_pty_cwd(msg: Message, state: &Arc<ServerState>) -> Re
 }
 
 /// Handle PTY resize
-pub(crate) async fn handle_pty_resize(
-    msg: Message,
-    state: &Arc<ServerState>,
-) -> Result<Frame> {
-    let req: PtyResize = serde_json::from_value(msg.payload)
-        .context("Failed to parse PtyResize")?;
+pub(crate) async fn handle_pty_resize(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: PtyResize =
+        serde_json::from_value(msg.payload).context("Failed to parse PtyResize")?;
 
     let sessions = state.sessions.read().await;
     if let Some(session) = sessions.get(&req.stream_id) {
         let master = session.master.lock().unwrap();
-        master.resize(PtySize {
-            rows: req.rows,
-            cols: req.cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        }).context("Failed to resize PTY")?;
+        master
+            .resize(PtySize {
+                rows: req.rows,
+                cols: req.cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to resize PTY")?;
 
         Ok(Frame::Json(Message {
             id: msg.id,
@@ -601,12 +627,8 @@ pub(crate) async fn handle_pty_resize(
 }
 
 /// Handle PTY close
-pub(crate) async fn handle_pty_close(
-    msg: Message,
-    state: &Arc<ServerState>,
-) -> Result<Frame> {
-    let req: PtyClose = serde_json::from_value(msg.payload)
-        .context("Failed to parse PtyClose")?;
+pub(crate) async fn handle_pty_close(msg: Message, state: &Arc<ServerState>) -> Result<Frame> {
+    let req: PtyClose = serde_json::from_value(msg.payload).context("Failed to parse PtyClose")?;
 
     // 显式关闭（pty.close）：常驻终端也一并终结并清除登记
     {
@@ -614,7 +636,10 @@ pub(crate) async fn handle_pty_close(
         if let Some((key, _)) = def.iter().find(|(_, v)| **v == req.stream_id) {
             let key = key.clone();
             def.remove(&key);
-            info!("常驻终端已显式关闭并清除登记：{key} → stream_id={}", req.stream_id);
+            info!(
+                "常驻终端已显式关闭并清除登记：{key} → stream_id={}",
+                req.stream_id
+            );
         }
     }
 
@@ -666,7 +691,8 @@ pub(crate) async fn handle_raw_data(
                 error!("Failed to write to PTY writer: {}", e);
             }
             let _ = writer_guard.flush();
-        }).await
+        })
+        .await
         .context("spawn_blocking join error")?;
 
         // TTY 事件驱动 cwd 检测（"高人方案"机制三：TTY 事件触发 + /proc 读取）。
@@ -705,9 +731,11 @@ pub(crate) async fn handle_raw_data(
 pub(crate) async fn session_cwd(session: &Arc<PtySession>) -> Option<String> {
     let spawn_pid = session.spawn_pid;
     let children_path = format!("/proc/{spawn_pid}/task/{spawn_pid}/children");
-    let child_pid = std::fs::read_to_string(children_path)
-        .ok()
-        .and_then(|c| c.split_whitespace().next().map(|s| s.parse::<u32>().unwrap_or(0)));
+    let child_pid = std::fs::read_to_string(children_path).ok().and_then(|c| {
+        c.split_whitespace()
+            .next()
+            .map(|s| s.parse::<u32>().unwrap_or(0))
+    });
     match child_pid {
         Some(pid) => read_cwd(pid),
         None => read_cwd(spawn_pid),

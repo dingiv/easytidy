@@ -96,8 +96,7 @@ pub async fn remove_container(
         .map_err(|e| ferr(&format!("删除容器 {name}"), e))?;
 
     // 从配置文件注销
-    let config_file =
-        ConfigFile::default_instance().map_err(|e| ferr("解析容器配置目录", e))?;
+    let config_file = ConfigFile::default_instance().map_err(|e| ferr("解析容器配置目录", e))?;
     config_file
         .unregister_container(&name)
         .map_err(|e| ferr("注销容器配置", e))?;
@@ -174,7 +173,9 @@ async fn fetch_failure_info_inner(
             running: false,
             status: "missing".into(),
             exit_code: None,
-            error: Some(format!("容器 {name} 在 podman 中不存在（可能已被清理或创建失败后未保留）")),
+            error: Some(format!(
+                "容器 {name} 在 podman 中不存在（可能已被清理或创建失败后未保留）"
+            )),
             logs: String::new(),
         });
     };
@@ -271,10 +272,7 @@ pub async fn images_used_by(
     images: Vec<String>,
 ) -> Result<std::collections::HashMap<String, Vec<String>>, String> {
     let p = podman.get().await.map_err(|e| e.to_string())?;
-    let result = p
-        .images_used_by(&images)
-        .await
-        .map_err(|e| e.to_string())?;
+    let result = p.images_used_by(&images).await.map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
     Ok(result)
 }
@@ -295,7 +293,11 @@ pub async fn rebuild_images_scan(
     let mut candidates = Vec::new();
     let mut skipped_in_use = Vec::new();
     for entry in redundant {
-        if usage.get(&entry.tag).map(|v| !v.is_empty()).unwrap_or(false) {
+        if usage
+            .get(&entry.tag)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             skipped_in_use.push(entry);
         } else {
             candidates.push(entry);
@@ -353,7 +355,12 @@ pub async fn rebuild_images_cleanup(
         }
     }
     podman.return_podman(p).await;
-    Ok(RebuildCleanupResult { deleted, skipped, failures, freed })
+    Ok(RebuildCleanupResult {
+        deleted,
+        skipped,
+        failures,
+        freed,
+    })
 }
 
 // ============================================================================
@@ -476,7 +483,10 @@ pub async fn env_new(
 
     // 容器内准备：fontconfig（恒执行）+ useradd（仅 user_name 配置时）。
     // 失败不阻断创建（装包等可后续重建补齐；错误落日志），但给出提示。
-    if let Err(e) = p.prepare_container(&config.name, &config.params).await {
+    if let Err(e) = p
+        .prepare_container(&config.name, &config.params, true)
+        .await
+    {
         error!("容器内准备失败（{name}）：{e}");
     }
 
@@ -557,7 +567,10 @@ pub async fn env_snapshot(
         .map_err(|e| e.to_string())?;
     podman.return_podman(p).await;
 
-    info!("环境 {} 扁平快照完成（squash={}）：{}", name, squash, image_ref);
+    info!(
+        "环境 {} 扁平快照完成（squash={}）：{}",
+        name, squash, image_ref
+    );
     Ok(image_ref)
 }
 
@@ -603,11 +616,14 @@ pub async fn env_rebuild(
             .map_err(|e| format!("重建失败：{e}"))?;
     }
     // 容器内准备（fontconfig + 可选 useradd）：失败不阻断重建（落日志）
-    if let Err(e) = p.prepare_container(&name, &config.params).await {
+    if let Err(e) = p.prepare_container(&name, &config.params, false).await {
         tracing::error!("容器内准备失败（{name}）：{e}");
     }
     podman.return_podman(p).await;
-    info!("环境 {name} 已按注册配置重建并启动（quick={}）", quick.unwrap_or(false));
+    info!(
+        "环境 {name} 已按注册配置重建并启动（quick={}）",
+        quick.unwrap_or(false)
+    );
     Ok(())
 }
 
@@ -702,8 +718,7 @@ fn find_executable(bin: &str) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     let is_exec = |p: &std::path::Path| -> bool {
         p.is_file()
-            && p
-                .metadata()
+            && p.metadata()
                 .map(|md| md.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
     };
@@ -826,7 +841,8 @@ pub fn open_container_terminal(name: String) -> Result<(), String> {
     //    - gnome-terminal（dbus 模式）：`-- bash -c "<shell_quoted_podman_argv>"`
     //    - 其他：` -e <argv...>`
     let full_argv: Vec<String> = if term_name == "gnome-terminal" {
-        let cmd_str = podman_argv.iter()
+        let cmd_str = podman_argv
+            .iter()
             .map(|a| shell_quote(a))
             .collect::<Vec<_>>()
             .join(" ");
@@ -957,10 +973,8 @@ mod open_container_terminal_tests {
     fn detect_container_home_uses_getent_passwd() {
         // 走真实 podman：需 rootless podman socket + chrome 镜像
         // （与 host_check 一致：依赖环境就跳过，不依赖则返回 None 走 fallback）
-        let socket = std::path::PathBuf::from(
-            std::env::var("XDG_RUNTIME_DIR").unwrap_or_default(),
-        )
-        .join("podman/podman.sock");
+        let socket = std::path::PathBuf::from(std::env::var("XDG_RUNTIME_DIR").unwrap_or_default())
+            .join("podman/podman.sock");
         if !socket.exists() {
             eprintln!("skip: podman socket 不存在");
             return;
