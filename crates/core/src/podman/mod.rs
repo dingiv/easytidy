@@ -25,6 +25,7 @@ pub(crate) mod http;
 pub(crate) use http::HttpClient;
 /// 宿主侧 exec（PTY 会话 + 非 tty 一次性；见 exec.rs）
 pub mod exec;
+pub mod scripts;
 pub use exec::{ExecOnce, ExecPty};
 /// 容器内用户准备（root 一次性 exec：useradd/fontconfig；见 user.rs）
 pub mod user;
@@ -106,7 +107,30 @@ impl Podman {
             candidates.push(home.join(".local/lib/easytidy/podman"));
         }
         candidates.push(PathBuf::from("/usr/local/bin/podman"));
-        candidates.into_iter().find(|p| p.exists())
+        let chosen = candidates.into_iter().find(|p| p.exists());
+        // 部署遮蔽告警：开发位与 deb 二进制并存且不同时，开发位会静默遮蔽
+        // deb 的修复（2026-10-01 事故：9-27 的旧开发位让 easytidy10 修复
+        // 从未生效）。响亮提示，避免"装了新包行为纹丝不动"的假象。
+        if let (Some(path), Some(home)) = (&chosen, dirs::home_dir()) {
+            if path.starts_with(home.join(".local/lib/easytidy")) {
+                let deb = PathBuf::from("/usr/local/bin/podman");
+                if deb.exists() {
+                    match (std::fs::metadata(path), std::fs::metadata(&deb)) {
+                        (Ok(a), Ok(b)) if a.modified().ok() != b.modified().ok() => {
+                            tracing::warn!(
+                                "fork 二进制使用开发位 {}（与 deb {} 不一致）。\
+                                 若已安装新版 deb，请删除开发位或以 EASYTIDY_PODMAN_BIN 显式指定，\
+                                 否则 deb 的修复不会生效",
+                                path.display(),
+                                deb.display()
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        chosen
     }
 
     /// 探测 unix socket 是否有服务监听（connect 即断）。
@@ -138,15 +162,36 @@ impl Podman {
         let sock_str = sock
             .to_str()
             .ok_or_else(|| Error::Connect("engine socket 路径非法 UTF-8".to_string()))?;
+        // service 日志落盘（append）：fork 内的 et-probe 探针 / logrus info 走
+        // stderr，Stdio::null 会全部丢弃——2026-10-02 真机取证 vanilla-idmap
+        // 时发现无从抓取。与 sock 同目录：$XDG_RUNTIME_DIR/easytidy/
+        // podman-service.log。ET_PROBE 从 GUI/CLI 进程环境继承（spawn 默认），
+        // 取证流程：ET_PROBE=vanilla-idmap,ulmapc 启动 GUI。
+        let log_path = sock.with_file_name("podman-service.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .map_err(|e| {
+                Error::Connect(format!("打开 service 日志 {} 失败：{e}", log_path.display()))
+            })?;
         std::process::Command::new("setsid")
             .arg(bin)
             .args(["system", "service", "--time=0"])
             .arg(format!("unix://{sock_str}"))
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(
+                log_file
+                    .try_clone()
+                    .map_err(|e| Error::Connect(format!("克隆 service 日志句柄失败：{e}")))?,
+            )
+            .stderr(log_file)
             .spawn()
             .map_err(|e| Error::Connect(format!("拉起 easytidy podman service 失败：{e}")))?;
+        tracing::info!(
+            "easytidy podman service 日志：{}（ET_PROBE 探针标签同 GUI 环境继承）",
+            log_path.display()
+        );
 
         // 等 socket 出现并可连（最长 5s）
         for _ in 0..50 {
@@ -363,7 +408,7 @@ impl Podman {
         bins: &crate::ContainerBins,
         config: &ContainerConfig,
     ) -> Result<String> {
-        self.create_with_config_named(name, name, image, bins, config, false)
+        self.create_with_config_named(name, name, image, bins, config, false, false)
             .await
     }
 
@@ -386,6 +431,7 @@ impl Podman {
         bins: &crate::ContainerBins,
         config: &ContainerConfig,
         fast: bool,
+        rebuild: bool,
     ) -> Result<String> {
         use std::collections::HashMap;
 
@@ -397,7 +443,8 @@ impl Podman {
         crate::env::inject_passthrough(&mut config);
 
         // 检查镜像是否存在，不存在则直接报错（不自动拉取——拉取是显式用户动作）
-        if !self.image_exists(image).await? {
+        // rebuild 模式：image = 端点即将 commit 出的新镜像（尚不存在，跳过检查）
+        if !rebuild && !self.image_exists(image).await? {
             return Err(Error::Config(format!(
                 "镜像不存在：{image}\n请先拉取镜像（如：podman pull {image}）"
             )));
@@ -430,12 +477,24 @@ impl Podman {
         // bind mounts
         let mut mounts = vec![
             // Server 二进制（只读）
-            bind(bins.server.to_string_lossy().to_string(), Self::SERVER_TARGET, true),
+            bind(
+                bins.server.to_string_lossy().to_string(),
+                Self::SERVER_TARGET,
+                true,
+            ),
             // dock 二进制（只读）：容器内 root 工具（prepare 容器准备 + root
             // 终端通道 daemon/client；musl 静态，零容器内命令依赖）
-            bind(bins.dock.to_string_lossy().to_string(), Self::DOCK_TARGET, true),
+            bind(
+                bins.dock.to_string_lossy().to_string(),
+                Self::DOCK_TARGET,
+                true,
+            ),
             // Socket 目录（可写）
-            bind(socket_host_dir.to_string_lossy().to_string(), "/run/easytidy", false),
+            bind(
+                socket_host_dir.to_string_lossy().to_string(),
+                "/run/easytidy",
+                false,
+            ),
         ];
         // ets 二进制（只读，可选）：宿主未安装时跳过（容器内无 ets 命令，
         // prepare 不建软链）
@@ -456,9 +515,56 @@ impl Podman {
         // 相关）：占位符 → 具体路径，随后 validate_mount 校验。容器侧 HOME/USER
         // 且未配 user_name 时探测镜像 /etc/passwd（缓存）解析容器用户 home/name。
         // 无 ${} 的挂载走快速路径（零探测零成本）。
+        //
+        // easytidy (2026-10-02 rebuild 探测镜像修正): rebuild 模式下 `image`
+        // 是「端点即将 commit 出的产物名」（此刻不存在）——探测容器从它创建
+        // 必 404，pull 也无源可拉，${HOME} 只能退化 /home/uid<uid> 并随挂载
+        // 固化（desktop 2026-10-02 二次案例）。改用「被替换容器」的现役镜像
+        // 探测（此刻仍在，正式名可查；端点内部才 stop/commit）——同源
+        // passwd，展开与容器实际身份一致。
+        let probe_image = if rebuild {
+            // libpod inspect（ImageName=镜像名）优先；compat（Config.Image）回退。
+            let from_libpod = self
+                .http
+                .json_ok("GET", &format!("/libpod/containers/{name}/json"), None)
+                .await
+                .ok()
+                .and_then(|v| {
+                    let obj = if v.is_array() {
+                        v.get(0).cloned().unwrap_or(serde_json::Value::Null)
+                    } else {
+                        v
+                    };
+                    obj.get("ImageName")
+                        .and_then(|x| x.as_str())
+                        .map(|s| s.to_string())
+                });
+            let cur = match from_libpod {
+                Some(name) => name,
+                None => {
+                    match self
+                        .http
+                        .json_ok("GET", &format!("/containers/{name}/json"), None)
+                        .await
+                    {
+                        Ok(v) => v
+                            .get("Config")
+                            .and_then(|c| c.get("Image"))
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| image.to_string()),
+                        Err(_) => image.to_string(),
+                    }
+                }
+            };
+            Self::et_log_probe_image(&cur, image);
+            cur
+        } else {
+            image.to_string()
+        };
         let user_mounts = self
             .expand_user_mounts(
-                image,
+                &probe_image,
                 &config.params.mounts,
                 host.as_ref(),
                 user_uid,
@@ -643,7 +749,10 @@ impl Podman {
                 env.clone(),
                 labels.clone(),
                 mounts_json.as_array().cloned().unwrap_or_default(),
-                host_config.get("NetworkMode").and_then(|v| v.as_str()).map(str::to_string),
+                host_config
+                    .get("NetworkMode")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 exposed_ports.clone(),
                 port_bindings_json,
                 None,
@@ -657,7 +766,15 @@ impl Podman {
                 config.params.pid.as_deref(),
                 config.params.extra_opts.clone(),
             );
-            let id = libpod.create_container(container_name, body, fast).await?;
+            let id = if rebuild {
+                // 原生重建端点：服务端原子完成 stop → commit → create(tmp) →
+                // start → 删旧 → rename（docs/23；body 即本函数构造的 create body）
+                libpod
+                    .easytidy_rebuild(name, container_name, image, body)
+                    .await?
+            } else {
+                libpod.create_container(container_name, body, fast).await?
+            };
             tracing::info!("容器 {container_name}（身份 {name}）创建成功（ID: {id}，keep-id）");
             return Ok(id);
         }
@@ -674,7 +791,10 @@ impl Podman {
             env,
             labels,
             mounts_json.as_array().cloned().unwrap_or_default(),
-            host_config.get("NetworkMode").and_then(|v| v.as_str()).map(str::to_string),
+            host_config
+                .get("NetworkMode")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             exposed_ports,
             port_bindings_json,
             None,
@@ -688,7 +808,13 @@ impl Podman {
             config.params.pid.as_deref(),
             config.params.extra_opts.clone(),
         );
-        let id = libpod.create_container(container_name, body, fast).await?;
+        let id = if rebuild {
+            libpod
+                .easytidy_rebuild(name, container_name, image, body)
+                .await?
+        } else {
+            libpod.create_container(container_name, body, fast).await?
+        };
         tracing::info!("容器 {container_name}（身份 {name}）创建成功（ID: {id}，libpod）");
         Ok(id)
     }
@@ -743,6 +869,17 @@ impl Podman {
     /// 容器侧 HOME/USER 且未配 user_name 时探测镜像 /etc/passwd 解析容器用户
     /// home/name（与容器内运行时 `$HOME` 精确一致）；探测失败退化为 uid 默认
     /// （告警，不阻断创建）。
+    /// easytidy 探针：rebuild 探测镜像的选择结果（产物名 = fallback 失效信号）。
+    fn et_log_probe_image(cur: &str, requested: &str) {
+        if cur == requested {
+            tracing::warn!(
+                "rebuild 挂载探测镜像回退到产物名 {cur}（探测将 404）——inspect 旧容器失败，请检查"
+            );
+        } else {
+            tracing::info!("rebuild 挂载探测镜像：{cur}（旧容器现役，同源 passwd）");
+        }
+    }
+
     async fn expand_user_mounts(
         &self,
         image: &str,
@@ -779,16 +916,18 @@ impl Podman {
         };
 
         // 容器侧：HOME/USER 且未配 user_name → 探测镜像 /etc/passwd（缓存）
+        // easytidy (2026-10-02 阻断制): 探测失败不得静默退化 /home/uid<uid>——
+        // 退化值会随挂载生效并被 commit 固化（desktop 案例：/home/uid1000 毒化
+        // 两代镜像）。失败即阻断创建，错误信息携带原因；瞬态失败重试即可。
         let image_passwd = if needs_image_passwd(mounts, user_name) {
-            match self.image_passwd(image).await {
-                Ok(pw) => Some(pw),
-                Err(e) => {
-                    tracing::warn!(
-                        "探测镜像 {image} 的 /etc/passwd 失败，容器侧 ${{HOME}}/${{USER}} 退化为 uid 默认：{e}"
-                    );
-                    None
-                }
-            }
+            Some(
+                self.image_passwd(image).await.map_err(|e| {
+                    Error::Config(format!(
+                        "挂载路径含 ${{HOME}}/${{USER}}，探测镜像 {image} 的 /etc/passwd 失败：{e}；\
+                         为避免挂载落到错误退化路径（/home/uid<uid>）已中止创建——请重试，或在容器配置显式指定 user_name"
+                    ))
+                })?,
+            )
         } else {
             None
         };
@@ -811,18 +950,28 @@ impl Podman {
         }
 
         let probe_name = format!("easytidy-probe-{}", uuid::Uuid::new_v4().simple());
-        let created = self
-            .http
-            .json_ok(
-                "POST",
-                &format!("/containers/create?name={probe_name}"),
-                Some(serde_json::json!({ "Image": image })),
-            )
-            .await
-            .map_err(|e| Error::Connect(format!("探测容器创建失败（{image}）：{e}")))?;
+        let image_owned = image.to_string();
+        let create_probe = |name: String| async move {
+            self.http
+                .json_ok(
+                    "POST",
+                    &format!("/containers/create?name={name}"),
+                    Some(serde_json::json!({ "Image": image_owned })),
+                )
+                .await
+                .map_err(|e| Error::Connect(format!("探测容器创建失败：{e}")))
+        };
+        // 首选直接创建；失败时 pull 一次再重试——首建容器场景镜像可能尚未
+        // 入 store（挂载展开先于主流程 pull 生效，探测单点失败会让 ${HOME}
+        // 退化 /home/uid<uid> 并随挂载固化；desktop 2026-10-02 案例根因）。
+        let created = create_probe(probe_name).await?;
 
         // 读 /etc/passwd（archive）；无论读成功与否都清理探测容器
-        let probe_id = created.get("Id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let probe_id = created
+            .get("Id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         let read = self.read_container_file(&probe_id, "/etc/passwd").await;
         if let Err(e) = self.remove(&probe_id, false).await {
             tracing::warn!("探测容器清理失败（忽略）：{e}");
@@ -840,7 +989,10 @@ impl Podman {
             .http
             .request_bytes(
                 "GET",
-                &format!("/containers/{id}/archive?path={}", Self::urlquery_encode(path)),
+                &format!(
+                    "/containers/{id}/archive?path={}",
+                    Self::urlquery_encode(path)
+                ),
                 None,
             )
             .await
@@ -922,7 +1074,12 @@ impl Podman {
                 false,
             )
             .await?;
-        tracing::info!("环境 {} 扁平快照完成（squash={}）:{}", name, squash, image_ref);
+        tracing::info!(
+            "环境 {} 扁平快照完成（squash={}）:{}",
+            name,
+            squash,
+            image_ref
+        );
         Ok(image_ref)
     }
 
@@ -967,16 +1124,20 @@ impl Podman {
         self.rebuild_with_commit(name, config, bins, true).await
     }
 
-    /// 快速重建：与 [`Self::rebuild`] 安全流程完全相同（保留旧容器、确认
-    /// 新容器就绪、失败自动回滚），唯一差异是 commit 用**普通 commit**
-    /// （只写 upperdir 增量、复用 base 共享层，亚秒级且更省盘；无需像 squash
-    /// 那样把全部层合并重写）。「快速」指 commit 速度，不是跳过安全流程。
-    /// 这是**推荐**的常规重建路径。
+    /// 快速重建：**引擎原生重建端点**路径（fork 扩展，推荐的常规重建）。
     ///
-    /// **fork 语义（魔改 podman，easytidy_fast 参数）**：commit 附加
-    /// `easytidy_fast=true`（跳 pause/unpause）、tmp 容器 create 附加
-    /// `easytidy_fast=true`（跳 RW 层全树 chown）。同映射直通前提：commit
-    /// 镜像源自同 uidmap 容器。系统 podman 会忽略该参数（慢但正确，优雅降级）。
+    /// 整条链在引擎进程内原子完成：stop → commit RW 层（fork 快语义：raw
+    /// 同映射增量 diff、层映射记录）→ create 替代容器（完整 CreateContainer
+    /// 语义，RW 层跳全树 chown）→ start → 删旧 → rename。相比宿主侧拼接
+    /// commit + create 两步：无跨请求时序、不跳中间层、亚秒级且更省盘。
+    ///
+    /// **失败语义**：删旧容器之前的失败 → 引擎自动重启旧容器（若它在运行），
+    /// 环境不中断；**删旧之后**（rename 等）的失败不可自动回滚——commit 镜像
+    /// 即数据兑底，错误信息带恢复指引。端点成功后的 `start_and_confirm`
+    /// 只记录不报错（旧容器已删，无回滚目标）。
+    ///
+    /// 同映射直通前提：commit 镜像源自同 uidmap 容器。系统 podman 无该端点
+    /// （404，显式报错，不会静默降级为慢路径）。
     pub async fn rebuild_quick(
         &self,
         name: &str,
@@ -986,17 +1147,19 @@ impl Podman {
         self.rebuild_with_commit(name, config, bins, false).await
     }
 
-    /// 两种形态共用的安全重建（`squash` 决定 commit 方式）。
+    /// 两种形态共用的重建（`squash` 决定走哪条路径）。
     ///
-    /// 「先起 tmp 确认就绪，再删原容器改名」的安全流程（原容器原地停止保留、
+    /// **`squash=false`（快速重建）**：引擎原生端点原子流程，见 [`Self::rebuild_quick`]。
+    ///
+    /// **`squash=true`（扁平重建）**：宿主侧安全流程（原容器原地停止保留、
     /// 全程不改名；失败只需删 tmp + start 原容器即回滚）：
     /// 0. 清理残留 `<name>_tmp`（上次中断重建的遗留；仅 easytidy 管理的
     ///    容器才删，避免误删用户自建同名容器）
     /// 1. `stop` 原容器（停止态 commit 快照一致、无需运行期 pause）
-    /// 2. libpod `commit` 当前容器层为镜像 `localhost/easytidy-rebuild:<tag>`
-    ///    （仅容器层；bind mount 不入 commit —— 正是所需）——**数据保险**；
-    ///    `squash=true` → `commit --squash` 单层扁平（慢、更占盘，仅宜做可转移
-    ///    快照）；`false` → 普通 commit（只写增量、亚秒级、更省盘，推荐）
+    /// 2. libpod `commit --squash` 当前容器层为单层扁平镜像
+    ///    `localhost/easytidy-rebuild:<tag>`（仅容器层；bind mount 不入
+    ///    commit —— 正是所需）——**数据保险**；全层合并重写（慢、更占盘，
+    ///    仅宜做可转移快照）
     /// 3. `create_with_config_named` 创建 tmp 容器 `<name>_tmp`（身份 = 正式名：
     ///    hostname / `easytidy.name` 标签 / socket 目录全用 `<name>`；正式名
     ///    被原容器占用，故先以 tmp 名创建）
@@ -1004,7 +1167,7 @@ impl Podman {
     /// 5. **确认就绪** → `remove` 原容器 → `rename` `<name>_tmp` → `<name>`
     /// 6. 返回新容器 ID
     ///
-    /// 错误处理：任一步失败 → **回滚**（删 tmp，start 原容器恢复运行——原
+    /// 扁平路径错误处理：任一步失败 → **回滚**（删 tmp，start 原容器恢复运行——原
     /// 容器从未改名，回滚只需一个 start）；数据始终有 commit 镜像兜底。
     /// 调用方负责在成功后把 `config` 回写 configfile（GUI apply / CLI rebuild 均执行）。
     async fn rebuild_with_commit(
@@ -1032,50 +1195,84 @@ impl Podman {
         }
 
         // 2. commit 当前容器层（bind mount 不入镜像）→ 数据保险
+        let rebuild_started = std::time::Instant::now();
         let tag = Self::rebuild_image_tag(name);
         let image_ref = format!("localhost/easytidy-rebuild:{tag}");
-        let message = if squash {
-            "easytidy rebuild snapshot via commit --squash"
-        } else {
-            "easytidy rebuild snapshot via commit"
-        };
+
+        // ── 快速重建（fast）：引擎原生 rebuild 端点（docs/22-23 方案链路）───
+        // 服务端原子完成「stop → commit RW 层 → create 替代容器（复用本函数
+        // 构造的 create body，映射/hostname/全部配置一次成型）→ start → 删旧
+        // → rename」。不再由宿主侧拼接 commit+create 两步（跨请求时序曾导致
+        // 中间层跳过——docs/23 事故根源）。
+        if !squash {
+            // 端点失败时不在此自动清理 tmp：删除旧容器之后的失败（rename 等）
+            // 新容器正以 tmp 名运行，误删会丢掉唯一活副本；恢复指引由端点错误
+            // 信息携带（未删旧容器前的失败已被端点自动重启旧容器）。
+            let id = match self
+                .create_with_config_named(name, &tmp_name, &image_ref, bins, config, true, true)
+                .await
+            {
+                Ok(id) => id,
+                Err(e) => {
+                    return Err(Error::Connect(format!(
+                        "快速重建（原生端点）失败（环境 {name}，残留状态见引擎错误详情；\n \
+                         检查：podman ps -a | grep {tmp_name}）：{e}"
+                    )));
+                }
+            };
+            // 端点已 start tmp 并 rename 为正式名——旧容器已删，无论就绪与否都
+            // 无法回滚，只能确认并记录（dock bootstrap 慢时可能误报，重启容器可恢复）。
+            if let Err(e) = self.start_and_confirm(name).await {
+                tracing::warn!(
+                    "快速重建后就绪确认未通过（旧容器已删除，无法自动回滚；如确实异常，\n                     重启容器 {name} 重新拉起 bootstrap）：{e}"
+                );
+            }
+            let new_socket_dir = crate::socket_dir_for(name)?;
+            for legacy in &legacy_socket_dirs {
+                if *legacy != new_socket_dir {
+                    tracing::debug!("重建后清理旧代 socket 目录：{}", legacy.display());
+                    let _ = std::fs::remove_dir_all(&legacy);
+                }
+            }
+            tracing::info!(
+                "环境 {name} 快速重建（原生端点）完成，新 ID: {id}，总耗时 {:.1}s",
+                rebuild_started.elapsed().as_secs_f64()
+            );
+            return Ok(id);
+        }
+
+        // 2.（扁平重建慢路径）commit 当前容器层为单层扁平镜像（数据保险）。
+        //    快速重建不走这里——commit 已由引擎端点在服务端完成。
+        //    squash 需把所有层合并重写成单个新层，耗时/体积与镜像总大小成正比
+        //    （大镜像分钟级）；仅当需要自包含单层镜像时才选它。
         let libpod = crate::libpod::Libpod::new().await?;
-        // commit 形态明确入日志：squash=全量重写所有层（体积/耗时与镜像大小成正比，
-        // 大镜像可达分钟级）；plain=只写 upperdir 增量（复用 base 共享层，亚秒级）。
-        // 便于区分「重建」（squash）与「快速重建」（plain）到底走了哪条路径。
-        let commit_kind = if squash { "squash" } else { "plain" };
-        // fast = fork 语义（魔改 podman 的 easytidy_fast 参数）：plain 快速重建
-        // 走同映射直通——commit 跳 pause/squash 残余慢操作、create 跳全树 chown。
-        // 前提成立：commit 镜像源自同 uidmap 容器，新容器期望形态 = 磁盘形态。
-        // fork 未接管时系统 podman IgnoreUnknownKeys 安全忽略（慢但正确）。
-        let fast = !squash;
-        tracing::info!("环境 {name} 重建 commit（{commit_kind}，fast={fast}）开始 → {image_ref}");
+        tracing::info!("环境 {name} 扁平重建 commit（squash）开始 → {image_ref}");
         let commit_started = std::time::Instant::now();
         if let Err(e) = libpod
             .commit(
                 name,
                 "localhost/easytidy-rebuild",
                 Some(&tag),
-                squash,
-                message,
+                true,
+                "easytidy rebuild snapshot via commit --squash",
                 &[],
-                fast,
+                false,
             )
             .await
         {
             self.restore_original(name).await;
             return Err(Error::Connect(format!(
-                "重建失败：原容器 commit 未成功（已回滚，原容器已恢复运行）：{e}"
+                "扁平重建失败：原容器 commit 未成功（已回滚，原容器已恢复运行）：{e}"
             )));
         }
         tracing::info!(
-            "环境 {name} 重建 commit（{commit_kind}）完成，耗时 {:.3}s → {image_ref}",
+            "环境 {name} 扁平重建 commit（squash）完成，耗时 {:.3}s → {image_ref}",
             commit_started.elapsed().as_secs_f64()
         );
 
         // 3. 创建 tmp 容器（身份 = 正式名；失败 → 恢复原容器运行）
         let id = match self
-            .create_with_config_named(name, &tmp_name, &image_ref, bins, config, fast)
+            .create_with_config_named(name, &tmp_name, &image_ref, bins, config, false, false)
             .await
         {
             Ok(id) => id,
@@ -1255,8 +1452,16 @@ impl Podman {
                     continue;
                 }
                 mounts.push(MountConfig {
-                    host_path: m.get("Source").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    container_path: m.get("Destination").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                    host_path: m
+                        .get("Source")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    container_path: m
+                        .get("Destination")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string(),
                     read_only: !m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
                 });
             }
@@ -1276,8 +1481,12 @@ impl Podman {
             .cloned()
         {
             for (key, bindings) in port_map {
-                let Some((port, protocol)) = key.split_once('/') else { continue };
-                let Ok(container_port) = port.parse::<u16>() else { continue };
+                let Some((port, protocol)) = key.split_once('/') else {
+                    continue;
+                };
+                let Ok(container_port) = port.parse::<u16>() else {
+                    continue;
+                };
                 let host_port = bindings
                     .as_array()
                     .and_then(|b| b.first())
@@ -1298,15 +1507,31 @@ impl Podman {
             .get("Config")
             .and_then(|c| c.get("Env"))
             .and_then(|e| e.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default();
-        let user = info.get("Config").and_then(|c| c.get("User")).and_then(|u| u.as_str()).map(str::to_string);
-        let userns_mode = info.get("HostConfig").and_then(|h| h.get("UsernsMode")).and_then(|u| u.as_str()).map(str::to_string);
+        let user = info
+            .get("Config")
+            .and_then(|c| c.get("User"))
+            .and_then(|u| u.as_str())
+            .map(str::to_string);
+        let userns_mode = info
+            .get("HostConfig")
+            .and_then(|h| h.get("UsernsMode"))
+            .and_then(|u| u.as_str())
+            .map(str::to_string);
 
         Ok(ContainerConfigView {
             mounts,
             network: NetworkConfig {
-                mode: if host_network { NetworkMode::Host } else { NetworkMode::Mapped },
+                mode: if host_network {
+                    NetworkMode::Host
+                } else {
+                    NetworkMode::Mapped
+                },
                 ports,
             },
             env,
@@ -1314,9 +1539,6 @@ impl Podman {
             userns_mode,
         })
     }
-
-
-
 
     /// compat inspect（GET /containers/{name}/json）。不存在 → Ok(None)。
     async fn inspect_compat(&self, name: &str) -> Result<Option<Value>> {
@@ -1376,7 +1598,11 @@ impl Podman {
             .http
             .json_ok(
                 "POST",
-                &format!("/containers/{}/rename?name={}", Self::urlquery_encode(old), Self::urlquery_encode(new)),
+                &format!(
+                    "/containers/{}/rename?name={}",
+                    Self::urlquery_encode(old),
+                    Self::urlquery_encode(new)
+                ),
                 None,
             )
             .await
@@ -1432,7 +1658,10 @@ impl Podman {
             .to_string();
 
         Ok(Some(crate::models::ContainerStateView {
-            running: state.get("Running").and_then(|r| r.as_bool()).unwrap_or(false),
+            running: state
+                .get("Running")
+                .and_then(|r| r.as_bool())
+                .unwrap_or(false),
             status: status_str,
             exit_code: state.get("ExitCode").and_then(|c| c.as_i64()),
             error: state
@@ -1525,7 +1754,10 @@ impl Podman {
             .http
             .json_ok(
                 "POST",
-                &format!("/containers/{}/stop?t=10", Self::urlquery_encode(name_or_id)),
+                &format!(
+                    "/containers/{}/stop?t=10",
+                    Self::urlquery_encode(name_or_id)
+                ),
                 None,
             )
             .await
@@ -1729,10 +1961,7 @@ impl Podman {
             .http
             .open_stream(
                 "POST",
-                &format!(
-                    "/images/create?fromImage={}",
-                    Self::urlquery_encode(image)
-                ),
+                &format!("/images/create?fromImage={}", Self::urlquery_encode(image)),
             )
             .await
             .map_err(|e| Error::Connect(format!("拉取镜像失败：{e}")))?;
@@ -1989,7 +2218,11 @@ fn map_system_info(info: &Value) -> crate::models::EngineInfo {
     let security_options: Vec<String> = info
         .get("SecurityOptions")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default();
     EngineInfo {
         version: opt_s("ServerVersion"),
@@ -2002,10 +2235,7 @@ fn map_system_info(info: &Value) -> crate::models::EngineInfo {
                     .filter_map(|pair| {
                         let p = pair.as_array()?;
                         if p.len() == 2 {
-                            Some((
-                                p[0].as_str()?.to_string(),
-                                p[1].as_str()?.to_string(),
-                            ))
+                            Some((p[0].as_str()?.to_string(), p[1].as_str()?.to_string()))
                         } else {
                             None
                         }
