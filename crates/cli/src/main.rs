@@ -204,7 +204,7 @@ enum Commands {
         cmd: EnvCmd,
     },
 
-    /// 配置 flavor：按模板创建预配置容器（镜像 + setup 安装 + entry 应用）
+    /// 配置 flavor：按模板创建预配置容器（镜像 + setup 安装 + 透传意图）
     Flavor {
         #[command(subcommand)]
         cmd: FlavorCmd,
@@ -442,7 +442,6 @@ async fn cmd_create(
             ..Default::default()
         },
         silent_boot: false,
-        persistent: true,
         ..Default::default()
     };
 
@@ -806,21 +805,15 @@ async fn cmd_flavor_apply(
         }
     }
 
-    // 注册配置（entry 应用 + GUI 透传 env/mounts 落盘，供后续 run/passthrough 使用；
+    // 注册配置（GUI 透传 env/mounts 落盘，供后续 run/passthrough 使用；
     // --config-dir 覆盖）
     let config_file = config_file_for(&config_dir)?;
     config_file.register_container(config)?;
 
+    // entry/entry_args 已从模型拔除（2026-10-02）：应用启动改由
+    // passthrough auto-start / `easytidy run --` 驱动，不再有“默认 entry 应用”。
     println!("✅ flavor {flavor_name} 已应用。启动容器内应用：");
-    println!(
-        "   easytidy run --container {name} -- {entry}{args}",
-        entry = flavor
-            .params
-            .entry
-            .clone()
-            .unwrap_or_else(|| "（无 entry，可指定任意命令）".into()),
-        args = flavor.params.entry_args.join(" ")
-    );
+    println!("   easytidy run --container {name} -- <容器内命令>");
 
     Ok(())
 }

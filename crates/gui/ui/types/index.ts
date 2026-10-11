@@ -134,11 +134,7 @@ export interface ContainerNetworkConfig {
 export interface ContainerConfig {
   name: string;
   image: string;
-  entry: string | null;
-  /// entry 应用参数（空格拼接到 entry 后，server 经 shell 执行）
-  entry_args: string[];
   silent_boot: boolean;
-  persistent: boolean;
   mounts: MountConfig[];
   network: ContainerNetworkConfig;
   /// 容器入口图标（宿主图片路径，可选）：入口 .desktop 导出时经内置品牌工具加工。
@@ -202,7 +198,7 @@ export interface ContainerFailureInfo {
 }
 
 /// Podman inspect 投影：当前生效状态（不复用 ContainerConfig——view 本无
-/// entry/silent_boot/persistent；env 含系统注入，对比需过滤后子集比较）
+/// silent_boot；env 含系统注入，对比需过滤后子集比较）
 export interface ContainerConfigView {
   mounts: MountConfig[];
   network: ContainerNetworkConfig;

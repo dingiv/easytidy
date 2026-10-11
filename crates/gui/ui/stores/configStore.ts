@@ -83,10 +83,8 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     if (!edit) return;
     set({ applying: true, error: null });
     try {
-      const payload: ContainerConfig = {
-        ...edit,
-        entry: edit.entry && edit.entry.trim() ? edit.entry.trim() : null,
-      };
+      // entry/entry_args 已从模型拔除（2026-10-02）：payload 即编辑态配置原样提交
+      const payload: ContainerConfig = { ...edit };
       const newId = await invoke<string>('apply_container_config', {
         name,
         config: payload,

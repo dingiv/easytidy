@@ -1,8 +1,9 @@
-// 容器面板：基本信息（名称/镜像，按模式可编辑）+ 静默启动 + 持久化 + 血缘。
+// 容器面板：基本信息（名称/镜像，按模式可编辑）+ 静默启动 + 图标 + GUI/GPU 直通。
 // 统一编辑器（ContainerConfigEditor）的「容器」页。
 //
-// 入口应用（entry/entry_args）已移入容器内由 server 管理（见 docs），
-// 不再作为宿主侧容器配置暴露，故此处不再渲染 entry 字段。
+// entry/entry_args（入口应用）与 persistent（常驻开关）是已拔除的死字段
+// （2026-10-02）：应用启动走 passthrough auto-start，生命周期由 catatonit +
+// server 托管——不再作为宿主侧容器配置暴露。
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -22,7 +23,6 @@ interface ContainerPaneProps {
   /** 容器入口图标（宿主图片路径；null = 清除，回退内置品牌图标） */
   onIconChange(v: string | null): void;
   onSilentBootChange(v: boolean): void;
-  onPersistentChange(v: boolean): void;
   /** GUI 直通 X11 半开关（存意图，展开/重建时按宿主实时注入 DISPLAY + X11 socket + XAUTHORITY） */
   onGuiX11Change(v: boolean): void;
   /** GUI 直通 Wayland 半开关（存意图，展开/重建时注入 WAYLAND_DISPLAY；socket 经 $XDG_RUNTIME_DIR） */
@@ -35,7 +35,7 @@ interface ContainerPaneProps {
 
 export function ContainerPane({
   edit, mode, nameLocked = false, onNameChange, onImageChange,
-  onIconChange, onSilentBootChange, onPersistentChange,
+  onIconChange, onSilentBootChange,
   onGuiX11Change, onGuiWaylandChange,
   onGpuNvidiaChange, onGpuAmdChange,
 }: ContainerPaneProps) {
@@ -131,18 +131,6 @@ export function ContainerPane({
         <span className="section-hint">
           容器入口桌面快捷方式图标：导出时经内置品牌工具加工（渐变边框 + 水印，256×256）
         </span>
-      </div>
-      <div className="config-field">
-        <label>持久化</label>
-        <Space>
-          <Switch
-            checked={edit.persistent}
-            onChange={onPersistentChange}
-            checkedChildren="常驻"
-            unCheckedChildren="非常驻"
-          />
-          <Typography.Text type="secondary">catatonit + server 生命周期托管</Typography.Text>
-        </Space>
       </div>
       <div className="config-field">
         <label>GUI 直通 · X11</label>

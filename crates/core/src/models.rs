@@ -193,8 +193,7 @@ pub struct NetworkConfig {
 // 序列化器自动把表类字段排到末尾，flatten 无值后置表问题——2026-08-18 实测）。
 ///
 /// 模板仅作**创建期预填**：展开为实例快照后，容器与模板彻底解耦（无血缘
-/// 字段、无同步、无漂移检测）。`env` / `name` / `silent_boot` / `persistent`
-/// 属于实例侧。
+/// 字段、无同步、无漂移检测）。`env` / `name` / `silent_boot` 属于实例侧。
 ///
 /// **手动 `Serialize` / `Deserialize`（impl 在结构体下方）**：保留 `user_home`
 /// 作为 `keep_id` 别名；GPU 字段无迁移（程序未发布）。
@@ -202,11 +201,6 @@ pub struct NetworkConfig {
 pub struct ContainerParams {
     /// 基础镜像
     pub image: String,
-    /// entry 应用（容器启动时 server 经 `--entry` 链式拉起；类 Docker
-    /// ENTRYPOINT。shell 执行（`su -c`），参数经 `entry_args` 追加）
-    pub entry: Option<String>,
-    /// entry 应用参数（拼接在 entry 后空格分隔；含空格的参数需引号）
-    pub entry_args: Vec<String>,
     /// 路径映射（bind mount）
     pub mounts: Vec<MountConfig>,
     /// 网络配置（默认 Host 模式）
@@ -278,8 +272,6 @@ impl Default for ContainerParams {
     fn default() -> Self {
         Self {
             image: String::new(),
-            entry: None,
-            entry_args: Vec::new(),
             mounts: Vec::new(),
             network: NetworkConfig::default(),
             keep_id: true,
@@ -303,10 +295,8 @@ impl Default for ContainerParams {
 /// 行为对齐；旧字段名 `gpu` / `user_home` / `security_opts` 不再写出——避免下一轮 round-trip 时污染）。
 impl Serialize for ContainerParams {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("ContainerParams", 17)?;
+        let mut st = s.serialize_struct("ContainerParams", 15)?;
         st.serialize_field("image", &self.image)?;
-        st.serialize_field("entry", &self.entry)?;
-        st.serialize_field("entry_args", &self.entry_args)?;
         st.serialize_field("mounts", &self.mounts)?;
         st.serialize_field("network", &self.network)?;
         st.serialize_field("keep_id", &self.keep_id)?;
@@ -384,8 +374,6 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 #[derive(Default)]
                 struct Seen {
                     image: bool,
-                    entry: bool,
-                    entry_args: bool,
                     mounts: bool,
                     network: bool,
                     keep_id: bool,
@@ -406,8 +394,6 @@ impl<'de> Deserialize<'de> for ContainerParams {
 
                 // None = 字段缺失（回落到 Default）；Some(_) = 已读入
                 let mut image: Option<String> = None;
-                let mut entry: Option<Option<String>> = None;
-                let mut entry_args: Option<Vec<String>> = None;
                 let mut mounts: Option<Vec<MountConfig>> = None;
                 let mut network: Option<NetworkConfig> = None;
                 let mut keep_id: Option<bool> = None;
@@ -433,19 +419,10 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             image = Some(map.next_value()?);
                             seen.image = true;
                         }
-                        "entry" => {
-                            if seen.entry {
-                                return Err(de::Error::duplicate_field("entry"));
-                            }
-                            entry = Some(map.next_value()?);
-                            seen.entry = true;
-                        }
-                        "entry_args" => {
-                            if seen.entry_args {
-                                return Err(de::Error::duplicate_field("entry_args"));
-                            }
-                            entry_args = Some(null_to_empty_vec(&mut map)?);
-                            seen.entry_args = true;
+                        "entry" | "entry_args" => {
+                            // 已拔除的死字段（server 忽略 legacy --entry）：
+                            // 旧磁盘文件残留键容忍跳过，保持前向兼容
+                            let _: serde::de::IgnoredAny = map.next_value()?;
                         }
                         "mounts" => {
                             if seen.mounts {
@@ -564,12 +541,6 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 let image = image.ok_or_else(|| de::Error::missing_field("image"))?;
                 let mut p = ContainerParams::default();
                 p.image = image;
-                if let Some(v) = entry {
-                    p.entry = v;
-                }
-                if let Some(v) = entry_args {
-                    p.entry_args = v;
-                }
                 if let Some(v) = mounts {
                     p.mounts = v;
                 }
@@ -640,8 +611,6 @@ pub struct ContainerConfig {
     pub env: Vec<String>,
     /// 静默启动标志（宿主开机自启）
     pub silent_boot: bool,
-    /// 是否常驻（catatonit + server 生命周期）
-    pub persistent: bool,
     /// 容器入口图标源（**宿主**图片路径，主来源）：用户设置的图标路径（宿主或容器路径，
     /// 导出时经 server/宿主读取）。容器内 config.json 的 `entry_icon` 是它的镜像（供 worker
     /// GUI 经 server 查询）。
@@ -657,7 +626,6 @@ impl Default for ContainerConfig {
             params: ContainerParams::default(),
             env: Vec::new(),
             silent_boot: false,
-            persistent: false,
             icon: None,
         }
     }
@@ -665,8 +633,8 @@ impl Default for ContainerConfig {
 
 /// 容器配置视图（`Podman::inspect_config` 投影：当前生效的 mounts / 网络 / env）。
 ///
-/// 与 [`ContainerConfig`] 同形状（不含 entry/silent_boot/persistent——这些无
-/// "生效"概念），但来自 podman inspect 的实际状态，供 GUI "当前生效" 面板与
+/// 与 [`ContainerConfig`] 同形状（不含 silent_boot——无"生效"概念），
+/// 但来自 podman inspect 的实际状态，供 GUI "当前生效" 面板与
 /// configfile 期望配置对比。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContainerConfigView {
@@ -729,7 +697,7 @@ persistent = true
         assert!(config.params.user_name.is_none());
         // flatten 形状：基座字段平铺在外层（旧文件直接兼容）
         assert_eq!(config.params.image, "alpine:latest");
-        assert_eq!(config.params.entry.as_deref(), Some("/bin/sh"));
+        // entry / persistent 为已拔除的死字段：旧文件残留键被 serde 跳过、解析不报错
         // 设备/安全/PID/GUI/GPU 新字段：旧配置无 → 缺省（None/空/false）
         assert!(!config.params.gui_x11);
         assert!(!config.params.gui_wayland);
@@ -917,8 +885,6 @@ user_name = "tidy"
             name: "app".to_string(),
             params: ContainerParams {
                 image: "alpine:latest".to_string(),
-                entry: Some("/bin/sh".to_string()),
-                entry_args: vec!["--verbose".to_string()],
                 mounts: vec![MountConfig {
                     host_path: "/tmp".to_string(),
                     container_path: "/data".to_string(),
@@ -955,7 +921,6 @@ user_name = "tidy"
             },
             env: vec!["DISPLAY=:0".to_string()],
             silent_boot: true,
-            persistent: true,
             icon: None,
         };
 

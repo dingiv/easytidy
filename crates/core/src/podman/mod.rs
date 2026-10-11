@@ -639,39 +639,19 @@ impl Podman {
         }
         host_config["PortBindings"] = port_bindings.clone().unwrap_or(serde_json::Value::Null);
 
-        // server Cmd：entry 链式拉起接通（此前 `entry` 字段存而不用——server
-        // 支持 --entry 但创建时从未传入）。有 entry 才追加；entry + args
-        // 拼为一条命令串（server 经 su -c shell 执行，含空格参数需引号）
-        //
-        // --log-file 把 server 的 tracing + eprintln 都写到 bind-mount 的
+        // server Cmd（--log-file 把 server 的 tracing + eprintln 都写到 bind-mount 的
         // /run/easytidy 下的日志文件，方便开发期 `tail` 容器外看 server
         // 内部报错（不依赖 `podman logs`，且容器重启不丢历史）。
-        let mut server_cmd = vec![
+        //
+        // entry/entry_args 已拔除（2026-10-02）：server 忽略 legacy --entry，
+        // 应用启动由容器内 passthrough auto-start 驱动——不再传 `--entry`。
+        let server_cmd = vec![
             Self::SERVER_TARGET.to_string(),
             "--socket".to_string(),
             "/run/easytidy/server.sock".to_string(),
             "--log-file".to_string(),
             "/run/easytidy/server.log".to_string(),
         ];
-        if let Some(entry) = config
-            .params
-            .entry
-            .as_ref()
-            .filter(|e| !e.trim().is_empty())
-        {
-            let mut entry_cmd = entry.trim().to_string();
-            for arg in config
-                .params
-                .entry_args
-                .iter()
-                .filter(|a| !a.trim().is_empty())
-            {
-                entry_cmd.push(' ');
-                entry_cmd.push_str(arg.trim());
-            }
-            server_cmd.push("--entry".to_string());
-            server_cmd.push(entry_cmd);
-        }
 
         // 容器默认用户（新模型）：User = <uid>:<gid>，server 直接以该用户运行
         // （无 root、无 su）。keep-id 时宿主登录 uid ↔ 容器同 uid 锁死（docs/12）。

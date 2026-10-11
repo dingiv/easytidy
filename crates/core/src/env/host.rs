@@ -440,7 +440,6 @@ mod tests {
             },
             env: vec![],
             silent_boot: false,
-            persistent: true,
             icon: None,
         };
         inject_passthrough(&mut cfg);
@@ -517,7 +516,6 @@ mod tests {
                 },
                 env: vec![],
                 silent_boot: false,
-                persistent: true,
                 icon: None,
             }
         }
@@ -596,7 +594,6 @@ mod tests {
             },
             env,
             silent_boot: false,
-            persistent: true,
             icon: None,
         };
 
@@ -644,7 +641,6 @@ mod tests {
                 "WAYLAND_DISPLAY=wayland-9".to_string(),
             ],
             silent_boot: false,
-            persistent: true,
             icon: None,
         };
         inject_passthrough(&mut cfg);

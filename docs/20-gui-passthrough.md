@@ -124,7 +124,7 @@ Wayland 连接**——labwc 本身是宿主合成器（Mutter/Sway）的一个�
 
 ### 实现落点
 
-1. **flavor 模板 `labwc`**（已加 `crates/gui/assets/labwc.eg.yaml`）：
+1. **flavor 模板 `labwc`**（已加 `crates/gui/assets/conf/labwc.yaml`）：
    `gui_wayland: true` + `gui_x11: false` + entry=labwc + GPU + XDG_RUNTIME_DIR；
    setup 段预留 wlroots/labwc 构建与 autostart 安装（补丁未固化前可挂载
    宿主预构建产物）；

@@ -132,7 +132,7 @@ impl Flavor {
 
     /// 展开为容器配置（模板 → 实例快照）。
     ///
-    /// 基座（`params`）整体继承（含 `entry_args`——曾在此处丢失）；GUI 直通
+    /// 基座（`params`）整体继承；GUI 直通
     /// （`gui_x11`/`gui_wayland` 任一开启）按 [`gui_passthrough`](crate::gui_passthrough)
     /// 规则追加推导产物（shared 基建 + 各半显示 env + X11 socket/XDG_RUNTIME_DIR/
     /// 字体图标挂载 + 恒开 keep-id）。具体映射表外置到资源文件
@@ -147,7 +147,6 @@ impl Flavor {
             params: self.params.clone(),
             env: Vec::new(),
             silent_boot: false,
-            persistent: true,
             icon: None,
         };
         // 不在此处注入透传：注入统一由创建入口 `create_with_config_named` 内部

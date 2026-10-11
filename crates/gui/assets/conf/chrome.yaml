@@ -1,0 +1,50 @@
+# 容器配置示例 —— 经典 Chrome 容器模板（GUI 透传）
+#
+# conf 模板 = 静态意图；宿主耦合的运行时数据（DISPLAY/WAYLAND/XAUTHORITY/
+# XDG_RUNTIME_DIR/XDG_DATA_DIRS 等）在创建时由 Rust 端按宿主 env 实时注入
+# （见 core::env::inject_gui_passthrough + assets/gui-passthrough.yaml 规则）。
+# 模板仅作创建期预填——容器创建后即自包含、与模板解耦(无血缘/同步/漂移)。
+#
+# 应用启动：entry/entry_args 已废弃（server 忽略 legacy --entry，应用启动改由
+# passthrough auto-start 驱动）——Chrome 的自启在「应用」面板设 auto_start
+# （或容器内 .desktop autostart）。Chrome 走 Wayland 时启动命令可带
+# --ozone-platform=wayland：Wayland 会话下避免 X11 链路的 XAUTHORITY 不可达 /
+# dbus 系统总线缺失导致的初始化失败。
+#
+# 加载路径：MasterView「配置编辑器」→ 顶部模板选 "chrome" → 预填表单 →
+# 提交创建容器（env 在创建时由 Rust 注入，模板里不写死）。
+
+name: chrome
+image: docker.io/library/ubuntu:24.04
+
+# GUI 直通（双开关）：X11 半注入 DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径；
+# Wayland 半注入 WAYLAND_DISPLAY。共享基建（keep-id / 字体图标挂 /mnt/host /
+# XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）任一半开启即注入——挂载无需在模板里
+# 重复声明（旧 `gui: true` 键已被 serde 忽略，必须写这两个开关）。
+gui_x11: true
+gui_wayland: true
+
+silent_boot: false
+keep_id: true
+
+# GPU 透传（NVIDIA Container Toolkit）：注入 nvidia.com/gpu=all CDI + NVIDIA_* env
+gpu_nvidia: true
+extra_opts:
+  - label=disable
+  - apparmor=unconfined
+
+# 手动补充挂载：gui_* 开启时 /tmp/.X11-unix、$XDG_RUNTIME_DIR、字体/图标
+# （/mnt/host，fontconfig local.conf 接入）已由规则注入。旧模板的
+# /usr/share/fonts、/usr/share/icons 只读直挂已删——会挡住 dpkg postinst
+# 写入（gui-passthrough.yaml 注），且与 /mnt/host 接入方式重复。
+mounts: []
+
+network:
+  mode: host
+  ports: []
+
+# DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/XDG_RUNTIME_DIR/XDG_DATA_DIRS 开 gui_*
+# 时由引擎注入，模板里不写。
+env: []
+
+setup: []

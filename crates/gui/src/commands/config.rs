@@ -22,7 +22,9 @@ use crate::state::GuiSession;
 ///
 /// 返回（前端契约）：
 /// ```json
-/// { "config": { "name","image","entry","entry_args","silent_boot","persistent",
+/// { "config": { "name","image","silent_boot",
+///                "keep_id":true,"gui_x11":false,"gui_wayland":false,
+///                "gpu_nvidia":false,"gpu_amd":false,
 ///                "mounts":[{"host_path","container_path","read_only"}],
 ///                "network":{"mode":"host"|"mapped","ports":[...]},
 ///                "env":["K=V"], "user_home":true },
@@ -115,8 +117,9 @@ pub async fn apply_container_config(
 // conf 模板管理（GUI 全面切 YAML 后取代 flavor TOML 模板）
 // ============================================================================
 
-/// conf 模板目录（双轨制）：dev = `crates/gui/conf`（种子目录，GUI 改动即改
-/// 源文件）；prod = `~/.easytidy/conf`（用户配置目录，首跑播种不覆盖）。
+/// conf 模板目录（双轨制）：dev = `crates/gui/assets/conf`（**单源**模板目录，
+/// 不播种，GUI 改动即改源文件）；prod = `~/.easytidy/conf`（用户配置目录，
+/// 首跑播种不覆盖）。
 /// 路径变量已收归 core（`CONF_DIR` namespace 在 core/Cargo.toml，与
 /// SERVER_BIN 等同一事实源），此处仅委托 [`easytidy_core::conf_template::conf_dir`]。
 fn conf_dir() -> Result<std::path::PathBuf, String> {
@@ -133,7 +136,8 @@ fn template_stem(p: &std::path::Path) -> &str {
 /// 简易 IO 句柄：读写 conf 模板文件（YAML 文本存取，解析在本命令层）。
 ///
 /// 目录走 [`conf_dir`]（双轨制）。从 core 迁入（2026-08-26）：conf 域 GUI 独占
-/// ——种子在 `crates/gui/conf`、命令在 GUI，core 不再持有该路径。
+/// ——模板文件在 `crates/gui/assets/conf`（单源，同一批文件兼作 prod 种子）、
+/// 命令在 GUI，core 不再持有该路径。
 struct ConfTemplateStore;
 
 impl ConfTemplateStore {
@@ -228,8 +232,8 @@ impl ConfTemplateStore {
 
 /// 列出全部 conf 模板（解析为 ConfTemplate + 磁盘路径）。
 ///
-/// 双目录语义：先 ensure_conf_examples()（首跑播种内置示例），再读
-/// 「conf 目录」（双轨制：dev = `crates/gui/conf`，prod = `~/.easytidy/conf`）下的
+/// 双目录语义：先 ensure_conf_examples()（prod 首跑播种；dev 单源不播种），再读
+/// 「conf 目录」（双轨制：dev = `crates/gui/assets/conf`，prod = `~/.easytidy/conf`）下的
 /// `*.yaml` —— 用户新增/修改的模板一并出现（播种不覆盖用户改动）。
 ///
 /// 返回 [`ConfTemplateInfo`]（模板字段 + `path`），GUI 据此展示每个模板的文件位置。
@@ -443,13 +447,12 @@ pub struct ExampleConf {
     pub yaml: String,
 }
 
-/// 内置示例模板 —— `crates/gui/assets/*.eg.yaml`，`include_str!` 编译期打进
-/// 二进制（免 tauri bundle resources 配置与安装路径问题）。**仅作播种来源**：
-/// 首跑写入运行时 conf 目录（dev = `crates/gui/conf`，prod = `~/.easytidy/conf`），
-/// 播种时**去掉 `.eg` 标志**（`chrome.eg.yaml` → `chrome.yaml`），此后运行时
-/// 目录为权威（用户可改/增，播种不覆盖）。
+/// 内置示例模板 —— `crates/gui/assets/conf/*.yaml`，`include_str!` 编译期打进
+/// 二进制（免 tauri bundle resources 配置与安装路径问题）。**单源**：与 dev
+/// 运行时目录是同一批文件——dev 直接读写它们且不播种；prod 首跑写入
+/// `~/.easytidy/conf`（此后运行时目录为权威，用户可改/增，播种不覆盖）。
 struct ConfSeed {
-    /// 播种后的文件名 stem（= 模板身份；不含 `.eg`）
+    /// 播种后的文件名 stem（= 模板身份）
     name: &'static str,
     yaml: &'static str,
 }
@@ -457,17 +460,17 @@ struct ConfSeed {
 const CONF_SEEDS: [ConfSeed; 3] = [
     ConfSeed {
         name: "full",
-        yaml: include_str!("../../assets/full.eg.yaml"),
+        yaml: include_str!("../../assets/conf/full.yaml"),
     },
     // 经典 Chrome 容器模板示例（展开自内置 flavor chrome）
     ConfSeed {
         name: "chrome",
-        yaml: include_str!("../../assets/chrome.eg.yaml"),
+        yaml: include_str!("../../assets/conf/chrome.yaml"),
     },
     // labwc 嵌套桌面模板（容器内 Wayland 合成器；docs/20-gui-passthrough.md §3）
     ConfSeed {
         name: "labwc",
-        yaml: include_str!("../../assets/labwc.eg.yaml"),
+        yaml: include_str!("../../assets/conf/labwc.yaml"),
     },
 ];
 
@@ -485,9 +488,18 @@ fn seed_conf_examples_to(dir: &std::path::Path) {
     }
 }
 
-/// 播种到运行时目录（`~/.easytidy/conf`）——读列表命令惰性调用
-/// （同 `flavor_list` 调 `ensure_presets` 的模式）。
+/// 播种门闩：**仅 prod**（dev 的 conf 目录就是模板源目录——单源，文件齐全，
+/// 播种会往源码树回写）。抽出来锁 dev 跳过语义。
+fn should_seed_conf() -> bool {
+    !easytidy_shared::is_dev()
+}
+
+/// 播种到运行时目录——读列表命令惰性调用（同 `flavor_list` 调 `ensure_presets`
+/// 的模式）。
 fn ensure_conf_examples() {
+    if !should_seed_conf() {
+        return;
+    }
     let Ok(dir) = conf_dir() else {
         return;
     };
@@ -534,8 +546,8 @@ pub fn conf_parse(text: String) -> Result<serde_json::Value, String> {
 
 /// 「加载 YAML」：rfd 打开对话框 → 读盘 → 解析 → 返回表单预填数据。
 ///
-/// 对话框默认定位到运行时模板目录（`~/.easytidy/conf`，双目录语义的 UI 落点），
-/// 用户可自由跳转到其他位置（含源码侧 `crates/gui/conf/`）。
+/// 对话框默认定位到运行时模板目录（dev = `crates/gui/assets/conf`，prod =
+/// `~/.easytidy/conf`，双目录语义的 UI 落点），用户可自由跳转到其他位置。
 #[tauri::command]
 pub async fn conf_load_dialog() -> Result<LoadConfResp, String> {
     // 打开对话框（阻塞；spawn_blocking 避免卡 async runtime）
@@ -731,9 +743,8 @@ pub async fn list_user_resource_dirs() -> Result<Vec<easytidy_core::desktop::Xdg
 
 /// 内置示例模板列表（「示例模板」下拉数据源）。
 ///
-/// 双目录语义：先播种内置示例到「conf 目录」（双轨制：dev = `crates/gui/conf`，
-/// prod = `~/.easytidy/conf`），再列出该目录下所有 *.yaml——用户新增/修改的
-/// 模板一并出现（播种不覆盖用户改动）。
+/// 双目录语义：prod 先播种内置示例到 `~/.easytidy/conf`（dev 单源不播种），
+/// 再列出该目录下所有 *.yaml——用户新增/修改的模板一并出现（播种不覆盖用户改动）。
 #[tauri::command]
 pub fn conf_examples() -> Result<Vec<ExampleConf>, String> {
     ensure_conf_examples();
@@ -763,7 +774,7 @@ mod tests {
             "name": "t", "image": "alpine", "gui_x11": true,
             "mounts": [{"host_path":"/tmp/.X11-unix","container_path":"/tmp/.X11-unix","read_only":false}],
             "network": {"mode":"host","ports":[]},
-            "silent_boot": false, "persistent": true
+            "silent_boot": false
         }))
         .unwrap();
         let p = passthrough_preview(declared).unwrap();
@@ -785,7 +796,7 @@ mod tests {
         let bare: ContainerConfig = serde_json::from_value(serde_json::json!({
             "name": "t2", "image": "alpine", "gui_x11": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
-            "silent_boot": false, "persistent": true
+            "silent_boot": false
         }))
         .unwrap();
         let p2 = passthrough_preview(bare).unwrap();
@@ -807,7 +818,7 @@ mod tests {
         let gpu_cfg: ContainerConfig = serde_json::from_value(serde_json::json!({
             "name": "t3", "image": "alpine", "gpu_nvidia": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
-            "silent_boot": false, "persistent": true
+            "silent_boot": false
         }))
         .unwrap();
         let p3 = passthrough_preview(gpu_cfg).unwrap();
@@ -822,7 +833,7 @@ mod tests {
         let both: ContainerConfig = serde_json::from_value(serde_json::json!({
             "name": "t4", "image": "alpine", "gui_x11": true, "gpu_nvidia": true,
             "mounts": [], "network": {"mode":"host","ports":[]},
-            "silent_boot": false, "persistent": true
+            "silent_boot": false
         }))
         .unwrap();
         let p4 = passthrough_preview(both).unwrap();
@@ -838,7 +849,7 @@ mod tests {
             "name": "t5", "image": "alpine", "gui_x11": true,
             "env": ["DISPLAY=:99"],
             "mounts": [], "network": {"mode":"host","ports":[]},
-            "silent_boot": false, "persistent": true
+            "silent_boot": false
         }))
         .unwrap();
         let p5 = passthrough_preview(user_display).unwrap();
@@ -857,14 +868,22 @@ mod tests {
     #[test]
     fn test_conf_dir_dual_track_dev() {
         // 测试运行期 CARGO_MANIFEST_DIR 在 env → is_dev() true → dev 根：
-        // conf 目录 = core manifest 的 ../gui/conf（种子留在 GUI，变量归 core）。
+        // conf 目录 = core manifest 的 ../gui/assets/conf（单源：同一批 yaml
+        // 兼作 dev 运行时目录与 prod 种子，dev 不播种）。
         // 编译期（实测 tauri dev）也成立；安装二进制无该 env → prod ~/.easytidy/conf。
         let dir = conf_dir().unwrap();
         assert!(
-            dir.ends_with("gui/conf"),
-            "dev 下 conf 目录应指向工作区种子目录 crates/gui/conf，得到 {}",
+            dir.ends_with("gui/assets/conf"),
+            "dev 下 conf 目录应指向工作区模板目录 crates/gui/assets/conf，得到 {}",
             dir.display()
         );
+        // dev 不播种的前提：种子文件本来就齐全（否则模板列表为空）
+        for seed in CONF_SEEDS.iter() {
+            let p = dir.join(format!("{}.yaml", seed.name));
+            assert!(p.exists(), "dev 模板目录缺少种子文件 {}", p.display());
+        }
+        // 播种门闩：dev 必须跳过（不往源码树回写种子）
+        assert!(!should_seed_conf(), "dev 下不应播种");
     }
 
     #[test]
@@ -896,6 +915,31 @@ mod tests {
                     "{} 的 env 项应是 KEY=VALUE（得到「{env}」）",
                     seed.name
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn test_conf_seeds_have_no_dead_keys() {
+        // 回归锁（2026-10-02 死字段拔除）：种子模板不得再写死键——它们会被
+        // serde 静默忽略，留着只会误导（chrome/labwc 曾用 gui: true 导致
+        // GUI 直通意图实际为关）。逐行匹配，避免误伤 gui_x11 等合法键与注释。
+        let dead_keys = ["entry:", "entry_args:", "persistent:", "gui:", "flavor:"];
+        for seed in CONF_SEEDS.iter() {
+            for line in seed.yaml.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with('#') {
+                    continue;
+                }
+                for dead in dead_keys {
+                    assert!(
+                        !trimmed.starts_with(dead),
+                        "种子 {} 含已拔除的死键 {}：{}",
+                        seed.name,
+                        dead,
+                        line
+                    );
+                }
             }
         }
     }
@@ -945,7 +989,7 @@ mod tests {
 
         // 篡改一份 → 再播种 → 不被覆盖
         let dev_path = temp.path().join("dev.yaml");
-        let custom = "name: my-dev\nimage: alpine\nsilent_boot: true\npersistent: false\n";
+        let custom = "name: my-dev\nimage: alpine\nsilent_boot: true\n";
         std::fs::write(&dev_path, custom).unwrap();
         seed_conf_examples_to(temp.path());
         assert_eq!(
@@ -1003,11 +1047,11 @@ mod tests {
         let temp = TempDir::new().unwrap();
         // 模拟历史缺陷产物：两个文件内部 name 都是 chrome（复制逐字节拷贝）
         let chrome_yaml =
-            "name: chrome\nimage: alpine\nsilent_boot: true\npersistent: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n";
+            "name: chrome\nimage: alpine\nsilent_boot: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n";
         std::fs::write(temp.path().join("chrome.yaml"), chrome_yaml).unwrap();
         std::fs::write(
             temp.path().join("chrome-copy.yaml"),
-            "name: chrome\nimage: alpine\nsilent_boot: true\npersistent: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n",
+            "name: chrome\nimage: alpine\nsilent_boot: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n",
         )
         .unwrap();
 
@@ -1034,7 +1078,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         std::fs::write(
             temp.path().join("chrome.yaml"),
-            "name: chrome\nimage: alpine\nsilent_boot: true\npersistent: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n",
+            "name: chrome\nimage: alpine\nsilent_boot: true\nmounts: []\nnetwork: { mode: host, ports: [] }\n",
         )
         .unwrap();
 

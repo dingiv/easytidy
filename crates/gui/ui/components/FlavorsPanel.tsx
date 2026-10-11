@@ -1,8 +1,8 @@
 // 模板管理（主 GUI 浏览器式面板之一）：conf YAML 启动配置模板。
 //
 // conf 模板 = 容器关键参数(镜像/entry/挂载/网络/用户映射)+ 可选 setup 安装命令。
-// 存放:`~/.easytidy/conf/<name>.yaml`（运行时权威；源码 crates/gui/conf/*.yaml
-// 编译期打进首跑播种）。本面板数据源全部从 conf 目录读取，模板 tab 不再展示
+// 存放:`~/.easytidy/conf/<name>.yaml`（prod 运行时权威；源码 crates/gui/assets/conf/*.yaml
+// 单源——dev 直接读写源码目录不播种，同一批文件编译期打进二进制作 prod 首跑种子）。本面板数据源全部从 conf 目录读取，模板 tab 不再展示
 // TOML flavor 预设（已退役，CLI flavor apply 仍可访问 ~/.easytidy/flavors/）。
 //
 // 模板仅作「创建期预填」：容器一旦创建即自包含、与模板彻底解耦（无血缘、

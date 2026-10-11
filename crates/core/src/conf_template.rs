@@ -2,10 +2,11 @@
 //!
 //! 数据域拆分后,模板的管理由 flavor(TOML) 收敛到 conf(YAML):
 //! - **conf 模板** = 容器关键参数(意图)+ 可选 `setup` 安装命令(本轮只存不执行)
-//! - 存放:双轨制目录(dev = `crates/gui/conf` 源码目录,prod = `~/.easytidy/conf`,
-//!   经 core 的 `CONF_DIR` namespace 解析,[`conf_dir`] 统一出口)——目录解析 +
-//!   文件 IO 的 `ConfTemplateStore` 在 GUI 命令层(conf 域 GUI 独占:种子在
-//!   gui/conf、命令在 gui)
+//! - 存放:双轨制目录(dev = `crates/gui/assets/conf` 源码目录,**单源**:dev
+//!   直接读写该目录且不播种;prod = `~/.easytidy/conf`,首跑从同一批文件的
+//!   编译期内嵌副本播种——经 core 的 `CONF_DIR` namespace 解析,[`conf_dir`]
+//!   统一出口)——目录解析 + 文件 IO 的 `ConfTemplateStore` 在 GUI 命令层
+//!   (conf 域 GUI 独占:模板文件在 gui/assets/conf、命令在 gui)
 //!
 //! 与 [`Flavor`](crate::flavor::Flavor) 的关系:
 //! - flavor 偏 CLI(创建时执行 setup 安装、带 gui 展开逻辑),GUI 模板 tab 不再使用
@@ -16,8 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{deserialize_null_to_empty_vec, ContainerConfig};
 
-/// conf 模板目录（双轨制）：dev = 源码种子目录 `crates/gui/conf`，prod =
-/// 用户配置目录 `~/.easytidy/conf`（首跑播种不覆盖）。路径由 core 的
+/// conf 模板目录（双轨制）：dev = 源码模板目录 `crates/gui/assets/conf`（单源，
+/// 不播种），prod = 用户配置目录 `~/.easytidy/conf`（首跑播种不覆盖）。路径由 core 的
 /// `CONF_DIR` namespace（core/Cargo.toml `[package.metadata.shared]`）声明，
 /// 本函数是唯一出口——GUI/CLI 不自持该 namespace（与 `SERVER_BIN` 等同
 /// 「变量归 core」模式）。
@@ -38,7 +39,7 @@ pub fn conf_dir() -> Result<std::path::PathBuf, String> {
 /// (见 `crate::models::ContainerParams`)——模板与实例共用同一份意图字段,
 /// 故模板与实例的「容器」配置区都能编辑这两个开关。
 ///
-/// 设计意图:YAML 存静态意图(镜像/entry/挂载/网络/用户映射 + gui/gpu + 可选 setup),
+/// 设计意图:YAML 存静态意图(镜像/挂载/网络/用户映射 + gui/gpu + 可选 setup),
 /// 宿主耦合的运行时数据(DISPLAY/WAYLAND/XAUTHORITY/XDG_RUNTIME_DIR)留到
 /// [`ConfTemplate::build_config`] 实时探测注入——避免模板硬编 session 特有值。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,9 +104,7 @@ mod tests {
         let yaml = r#"
 name: labwc
 image: docker.io/library/ubuntu:24.04
-entry: dbus-run-session
 silent_boot: false
-persistent: true
 mounts:
 setup:
 env:
@@ -124,12 +123,11 @@ ports:
     fn test_conf_template_serde_default_setup() {
         // serde 反序列化旧文件(无 setup 字段)时 setup 默认空——通过
         // JSON 平铺形状验证（与 YAML 同走 serde 数据模型）。
-        // ContainerConfig 的 silent_boot/persistent 无 serde default，需显式给。
+        // ContainerConfig 的 silent_boot 无 serde default，需显式给。
         let json = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
-            "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
-            "env":[],"silent_boot":false,"persistent":true
+            "env":[],"silent_boot":false
         }"#;
         let t: ConfTemplate = serde_json::from_str(json).unwrap();
         assert!(t.setup.is_empty());
@@ -171,9 +169,8 @@ ports:
         // 两半均默认 false；新文件含 gui_x11/gui_wayland 字段 → 按设定值
         let json_old = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
-            "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
-            "env":[],"silent_boot":false,"persistent":true,
+            "env":[],"silent_boot":false,
             "gui":true
         }"#;
         let t_old: ConfTemplate = serde_json::from_str(json_old).unwrap();
@@ -184,9 +181,8 @@ ports:
 
         let json_new = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
-            "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
-            "env":[],"silent_boot":false,"persistent":true,
+            "env":[],"silent_boot":false,
             "gui_x11":true,"gui_wayland":true
         }"#;
         let t_new: ConfTemplate = serde_json::from_str(json_new).unwrap();
@@ -202,9 +198,8 @@ ports:
         // gpu_nvidia: true → params.gpu_nvidia + 注入 NVIDIA_* env
         let json = r#"{
             "name":"chrome","image":"docker.io/library/ubuntu:24.04",
-            "entry":"google-chrome-stable","entry_args":[],
             "mounts":[],"network":{"mode":"host","ports":[]},"keep_id":true,
-            "env":[],"silent_boot":false,"persistent":true,
+            "env":[],"silent_boot":false,
             "gpu_nvidia":true
         }"#;
         let t: ConfTemplate = serde_json::from_str(json).unwrap();
@@ -228,9 +223,9 @@ ports:
 
         // gpu_amd: true → params.gpu_amd，无 NVIDIA_* env
         let json_a = r#"{
-            "name":"c4","image":"alpine","entry_args":[],
+            "name":"c4","image":"alpine",
             "mounts":[],"network":{"mode":"host","ports":[]},
-            "env":[],"silent_boot":false,"persistent":true,
+            "env":[],"silent_boot":false,
             "gpu_amd":true
         }"#;
         let ta: ConfTemplate = serde_json::from_str(json_a).unwrap();
@@ -243,9 +238,9 @@ ports:
 
         // 双开 → NVIDIA env + 两个 vendor 标志
         let json_both = r#"{
-            "name":"c5","image":"alpine","entry_args":[],
+            "name":"c5","image":"alpine",
             "mounts":[],"network":{"mode":"host","ports":[]},
-            "env":[],"silent_boot":false,"persistent":true,
+            "env":[],"silent_boot":false,
             "gpu_nvidia":true,"gpu_amd":true
         }"#;
         let tb: ConfTemplate = serde_json::from_str(json_both).unwrap();
@@ -264,9 +259,9 @@ ports:
 
         // 未设 gpu_* → 不透传
         let json2 = r#"{
-            "name":"c2","image":"alpine","entry_args":[],
+            "name":"c2","image":"alpine",
             "mounts":[],"network":{"mode":"host","ports":[]},
-            "env":[],"silent_boot":false,"persistent":true
+            "env":[],"silent_boot":false
         }"#;
         let t2: ConfTemplate = serde_json::from_str(json2).unwrap();
         assert!(!t2.config.params.gpu_nvidia);

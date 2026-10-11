@@ -1,0 +1,96 @@
+# 容器配置全量 YAML —— 配置编辑器「导出 YAML」示例 + 字段参考
+#
+# 字段对齐 core `models.rs`（ContainerConfig + ContainerParams 手动 serde +
+# ConfTemplate.setup）——当前**全部受支持字段**均在此出现，作为「代码生成器」
+# 的模板样例。
+#
+# 已拔除的死字段（2026-10-02 核对，勿再写回）：
+#   - entry / entry_args：server 忽略（legacy --entry），应用启动改由
+#     passthrough auto-start 驱动；
+#   - persistent：无任何运行时消费（纯落盘）；
+#   - 旧键 gui / flavor：serde 未知字段，静默忽略。
+#
+# 加载路径：MasterView 「配置编辑器」→ ContainerConfigEditor 顶部 "加载
+# YAML" → 选此文件 → 表单预填 → 提交 env_new(config) 或 apply_container_config。
+#
+# 导出路径：填好表单 → "导出 YAML" → rfd 保存对话框 → 一份可分享、可复用的 YAML。
+#
+# 字段命名严格与 ContainerConfig 一致（snake_case）—— 序列化/反序列化直接走
+# serde（ContainerParams 为手动 serde，未知字段跳过保持前向兼容）。
+
+name: full                               # 必填：容器名（registry 唯一）；= 文件名 stem（模板身份）
+image: docker.io/library/ubuntu:24.04    # 必填：镜像（需已拉取，未拉取请到「镜像」面板）
+
+# 容器入口图标（宿主图片路径，可选；缺省 = 按容器名生成 identicon）
+icon:
+
+# 静默启动（宿主开机 systemd 静默拉起容器；CLI open 也不弹 Worker GUI）
+silent_boot: false
+
+# 用户一致性映射（keep-id：容器内 uid 与宿主对齐，应用以该 uid 运行；
+# 关闭后 uid 不对齐，GUI 应用将无法访问宿主显示 socket）。
+# 旧字段名 user_home 仍被接受（别名），序列化只写 keep_id。
+keep_id: true
+
+# 显式 UID/GID 重映射（podman --uidmap / --gidmap）：与 keep_id 互斥，
+# 非空时覆盖 keep-id（无 idmap 支持存储 / AMD rootless 解法，docs/17）
+uidmaps: []
+gidmaps: []
+
+# 容器默认用户（缺省 = 创建时取宿主登录 uid/gid）
+user_uid: 1000
+user_gid: 1000
+# 容器内用户名（可选）：有值时创建/重建经宿主 root exec 幂等 useradd 建号，
+# 保证 passwd 条目存在（缺省仅按 uid/gid 运行）
+user_name: ubuntu
+
+# GUI 直通双开关（意图字段）：任一半开启即注入共享基建（keep-id / 字体图标
+# /mnt/host / XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）——规则外置在
+# assets/gui-passthrough.yaml，session 耦合值（DISPLAY/WAYLAND_DISPLAY/
+# XDG_RUNTIME_DIR）创建时按宿主实时探测注入，模板里不要写死。
+gui_x11: true          # X11 半：DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径
+gui_wayland: true      # Wayland 半：WAYLAND_DISPLAY（socket 经 $XDG_RUNTIME_DIR 挂载接入）
+
+# GPU 直通（意图字段，可双开）
+gpu_nvidia: false      # 注入 nvidia.com/gpu=all CDI + NVIDIA_DRIVER_CAPABILITIES=all
+                       # （需宿主 NVIDIA 驱动 + NVIDIA Container Toolkit CDI spec）
+gpu_amd: false         # create 期探测 /dev/kfd + AMD render 节点（裸设备，无 CDI 依赖）
+
+# 设备直通（podman --device 列表："host[:container[:perms]]" 或 CDI 引用）
+devices: []
+
+# 额外 podman 选项（原始串透传，解析进 SpecGenerator 对应字段）
+extra_opts:
+  - label=disable
+  - apparmor=unconfined
+
+# PID 命名空间模式（缺省 private；"host" 时与 init 互斥——不注入 catatonit）
+pid:
+
+# 路径映射（bind mount，每条 = 宿主路径 → 容器路径 → 是否只读）
+mounts:
+  - host_path: /home/user/workspace
+    container_path: /workspace
+    read_only: false
+
+# 网络配置：mode = "host"（端口映射无效）或 "mapped"（bridge + 端口转发）
+network:
+  mode: mapped
+  ports:
+    - host_port: 8080
+      container_port: 80
+      protocol: tcp
+    - host_port: 9090
+      container_port: 9090
+      protocol: udp
+
+# 容器环境变量（"KEY=VALUE" 列表；EASYTIDY_USER_* 由引擎保留注入，手动
+# 写入会被覆盖）。session 耦合值（DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/
+# XDG_RUNTIME_DIR/XDG_DATA_DIRS）不要写死——开 gui_* 由引擎按宿主实时注入。
+env:
+  - LANG=en_US.UTF-8
+  - HTTP_PROXY=http://127.0.0.1:7890
+
+# 创建后执行的安装命令（模板字段；当前 GUI 创建链路只存不执行——
+# CLI `easytidy flavor apply` 的 flavor 清单才会经 server 执行 setup）
+setup: []

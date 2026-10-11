@@ -46,14 +46,11 @@ import { NetworkPane } from './NetworkPane';
 import { UserPane } from './UserPane';
 
 /** 新建默认值（与 core ContainerConfig::default + 产品语义对齐：
- * Host 网络 + 用户一致性映射 + 常驻） */
+ * Host 网络 + 用户一致性映射。entry/entry_args/persistent 为已拔除的死字段） */
 export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   name: '',
   image: '',
-  entry: null,
-  entry_args: [],
   silent_boot: false,
-  persistent: true,
   mounts: [],
   network: { mode: 'host', ports: [] },
   icon: null,
@@ -284,7 +281,6 @@ export function ContainerConfigEditor({
           onImageChange={(image) => update({ image })}
           onIconChange={(icon) => update({ icon })}
           onSilentBootChange={(silent_boot) => update({ silent_boot })}
-          onPersistentChange={(persistent) => update({ persistent })}
           onGuiX11Change={(gui_x11) => update({ gui_x11 })}
           onGuiWaylandChange={(gui_wayland) => update({ gui_wayland })}
           onGpuNvidiaChange={(gpu_nvidia) => update({ gpu_nvidia })}

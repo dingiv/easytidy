@@ -96,12 +96,6 @@ struct Args {
     #[arg(long)]
     socket: PathBuf,
 
-    /// Legacy entry command (host 侧已不再需要；此处保留仅为 CLI 兼容——
-    /// 旧容器创建时仍传 `--entry`，直接拒绝会启动失败。server 现在忽略它，
-    /// 启动应用改由容器内 passthrough auto-start 配置驱动)
-    #[arg(long)]
-    entry: Option<String>,
-
     /// Optional log file path. When set, all tracing output AND stderr
     /// (含 eprintln!) 都重定向到该文件;stdout 不动。
     ///
@@ -327,7 +321,8 @@ async fn run_server(socket_path: PathBuf, state: Arc<ServerState>) -> Result<()>
     info!("Listening on {}", socket_path.display());
 
     // 容器内 auto-start 应用：server 自读配置并拉起（容器自包含，不依赖宿主推送）。
-    // entry/entry_args（旧 --entry）已弃用：启动应用改由 passthrough auto-start 驱动。
+    // entry/entry_args 已从模型拔除（2026-10-02，legacy `--entry` 参数一并移除）：
+    // 启动应用由 passthrough auto-start 驱动。
     // 先刷新一次应用登记表（.desktop 扫描 → apps.toml）：launch_app 优先读
     // 登记表，启动期建好避免首次点桌面图标回退扫盘。
     services::apps::refresh_registry();

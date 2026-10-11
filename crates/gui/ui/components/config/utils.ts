@@ -3,12 +3,10 @@
 
 import type { ContainerConfig, ContainerConfigView } from '../../types';
 
-/** 归一化：entry 转空字符串、深拷贝可变字段，便于受控编辑与比较 */
+/** 归一化：深拷贝可变字段，便于受控编辑与比较（entry/entry_args 已拔除） */
 export function normalizeConfig(cfg: ContainerConfig): ContainerConfig {
   return {
     ...cfg,
-    entry: cfg.entry ?? '',
-    entry_args: [...(cfg.entry_args ?? [])],
     mounts: cfg.mounts.map((m) => ({ ...m })),
     network: {
       mode: cfg.network.mode,
