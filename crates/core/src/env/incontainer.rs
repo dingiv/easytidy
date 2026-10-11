@@ -393,6 +393,10 @@ pub fn prepare_in_container(
         fontconf_dir: PathBuf::from(FONTCONF_DIR),
     };
     apply_plan(&plan, &paths)?;
+    // 容器私有 $XDG_RUNTIME_DIR（bypass/旁路模型）：/run 挂 tmpfs 后无人创建
+    // （runc 只建挂载点，它不是挂载点）。详见函数注释。
+    ensure_xdg_runtime_dir(plan.uid, plan.gid);
+    ensure_x11_socket_dir();
     // 首次创建专属：家目录内 root 属主条目归位（pull 压平修复）。纯净镜像
     // rootless pull 时 blob 属主统一压平为 puller，用户家目录里的骨架文件
     // （.bashrc 等，blob 属 ubuntu）落成 root——仅首次创建执行一次归位，
@@ -533,6 +537,74 @@ fn atomic_write(path: &Path, content: &str) -> Result<()> {
 
 /// 家目录补齐：缺失则创建，属主/权限纠正为 uid:gid / 0750（覆盖
 /// 「镜像自带目录属主 root」形态）。
+/// 容器私有 `$XDG_RUNTIME_DIR`（bypass/旁路模型）：值从容器 env 取（prepare
+/// 的 exec env = 容器 Config.Env）。
+///
+/// **bypass 信号 = `HOST_XDG_RUNTIME_DIR`**（core 注入；direct 容器无此键）：
+/// - **direct**：该目录是宿主 runtime dir 的整目录挂载点——**绝不碰**（对其
+///   chown/chmod 会打碎宿主会话权限）；或无透传（不存在）→ 不建。
+/// - **bypass**：目录必为容器自有（引擎专用 tmpfs / runc 挂载目标 / 镜像残留）
+///   → **存在也纠正**（P-1：runc 预建的挂载目标是 root 0755，旧逻辑 `exists`
+///   即跳过 → 容器用户在自己 runtime dir 里建不了 socket）。统一为 0700 +
+///   属主 = 容器用户（XDG 规范）；幂等，每次启动跑。
+///
+/// **安全阀**：只认 `/run/user/*` 路径——env 误指别处不乱建目录。
+fn ensure_xdg_runtime_dir(uid: u32, gid: u32) {
+    let dir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_default();
+    if dir.is_empty() {
+        return;
+    }
+    let path = PathBuf::from(&dir);
+    if !path.starts_with("/run/user/") {
+        tracing::warn!("XDG_RUNTIME_DIR={dir} 非 /run/user/*，跳过");
+        return;
+    }
+    // bypass 信号（安全阀：direct 不碰宿主挂载点）
+    let bypass = std::env::var("HOST_XDG_RUNTIME_DIR").map(|v| !v.is_empty()).unwrap_or(false);
+    if !bypass {
+        return;
+    }
+    if !path.exists() {
+        if let Err(e) = fs::create_dir_all(&path) {
+            tracing::warn!("创建 $XDG_RUNTIME_DIR {dir} 失败：{e}");
+            return;
+        }
+    }
+    let Ok(cpath) = CString::new(dir.clone()) else {
+        return;
+    };
+    if let Err(e) = chown(&cpath, uid, gid) {
+        tracing::warn!("$XDG_RUNTIME_DIR {dir} 属主设置失败：{e}");
+    }
+    if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o700)) {
+        tracing::warn!("$XDG_RUNTIME_DIR {dir} 权限设置失败：{e}");
+    }
+}
+
+/// P-2：bypass 下 `/tmp/.X11-unix` 常是 runc 为 `X0→X100` 单文件 bind 预建的
+/// root 0755 → 容器自己的 X server（Xtigervnc :0）建不了 socket（X11 报错还
+/// 会误导成 "server already running"——X100 文件已在）。建目录 + 恒 chmod 1777
+///（bypass 下它在容器私有 /tmp 下，chmod 安全）；direct 下是宿主 bind（宿主
+/// 本就 1777）→ 不碰。幂等，每次启动跑（tmpfs /tmp 重启后会重新预建 root 755）。
+fn ensure_x11_socket_dir() {
+    let Ok(host_xdg) = std::env::var("HOST_XDG_RUNTIME_DIR") else {
+        return; // direct：不碰
+    };
+    if host_xdg.is_empty() {
+        return;
+    }
+    let path = Path::new("/tmp/.X11-unix");
+    if !path.exists() {
+        if let Err(e) = fs::create_dir_all(path) {
+            tracing::warn!("创建 /tmp/.X11-unix 失败：{e}");
+            return;
+        }
+    }
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o1777)) {
+        tracing::warn!("/tmp/.X11-unix chmod 1777 失败：{e}");
+    }
+}
+
 fn ensure_home(home: &str, uid: u32, gid: u32) -> Result<()> {
     // 兜底：容器根不得作家目录（resolve_identity 已保证不产生，
     // 双保险防把 / 整个 chown 掉）

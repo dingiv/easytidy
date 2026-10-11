@@ -46,7 +46,8 @@ import { NetworkPane } from './NetworkPane';
 import { UserPane } from './UserPane';
 
 /** 新建默认值（与 core ContainerConfig::default + 产品语义对齐：
- * Host 网络 + 用户一致性映射。entry/entry_args/persistent 为已拔除的死字段） */
+ * Host 网络 + 用户一致性映射。entry/entry_args/persistent 为已拔除的死字段；
+ * gui 双半默认 none（三态），tmpfs 两开关默认关） */
 export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   name: '',
   image: '',
@@ -61,10 +62,12 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   user_uid: null,
   user_gid: null,
   user_name: null,
-  gui_x11: false,
-  gui_wayland: false,
+  gui_x11: 'none',
+  gui_wayland: 'none',
   gpu_nvidia: false,
   gpu_amd: false,
+  tmpfs_tmp: false,
+  tmpfs_run: false,
 };
 
 export interface ContainerConfigEditorProps {
@@ -119,7 +122,9 @@ export function ContainerConfigEditor({
   // 变化 → 增量随之变化，需重算）。gui 双开关/gpu_* 是 ContainerConfig 一等字段，随
   // value 传入，故预览入参只传 config。
   useEffect(() => {
-    if (!value.gui_x11 && !value.gui_wayland && !value.gpu_nvidia && !value.gpu_amd) {
+    const guiActive =
+      (value.gui_x11 ?? 'none') !== 'none' || (value.gui_wayland ?? 'none') !== 'none';
+    if (!guiActive && !value.gpu_nvidia && !value.gpu_amd) {
       setPreview(null);
       return;
     }
@@ -285,6 +290,8 @@ export function ContainerConfigEditor({
           onGuiWaylandChange={(gui_wayland) => update({ gui_wayland })}
           onGpuNvidiaChange={(gpu_nvidia) => update({ gpu_nvidia })}
           onGpuAmdChange={(gpu_amd) => update({ gpu_amd })}
+          onTmpfsTmpChange={(tmpfs_tmp) => update({ tmpfs_tmp })}
+          onTmpfsRunChange={(tmpfs_run) => update({ tmpfs_run })}
         />
       </section>
 

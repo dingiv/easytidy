@@ -7,9 +7,9 @@
 
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { App as AntApp, Button, Input, Space, Switch, Typography } from 'antd';
+import { App as AntApp, Button, Input, Segmented, Space, Switch, Typography } from 'antd';
 import { PictureOutlined } from '@ant-design/icons';
-import type { ContainerConfig, ImageSummary } from '../../types';
+import type { ContainerConfig, GuiMode, ImageSummary } from '../../types';
 import { ImageSelect } from './ImageSelect';
 
 interface ContainerPaneProps {
@@ -23,14 +23,18 @@ interface ContainerPaneProps {
   /** 容器入口图标（宿主图片路径；null = 清除，回退内置品牌图标） */
   onIconChange(v: string | null): void;
   onSilentBootChange(v: boolean): void;
-  /** GUI 直通 X11 半开关（存意图，展开/重建时按宿主实时注入 DISPLAY + X11 socket + XAUTHORITY） */
-  onGuiX11Change(v: boolean): void;
-  /** GUI 直通 Wayland 半开关（存意图，展开/重建时注入 WAYLAND_DISPLAY；socket 经 $XDG_RUNTIME_DIR） */
-  onGuiWaylandChange(v: boolean): void;
+  /** GUI 直通 X11 半（三态）：none 不注入 / direct 宿主直通 / bypass 旁路 */
+  onGuiX11Change(v: GuiMode): void;
+  /** GUI 直通 Wayland 半（三态，同上） */
+  onGuiWaylandChange(v: GuiMode): void;
   /** NVIDIA GPU 透传开关（注入 NVIDIA_* env + nvidia.com/gpu=all CDI） */
   onGpuNvidiaChange(v: boolean): void;
   /** AMD GPU 透传开关（探测注入 /dev/kfd + AMD render 节点；ROCm 容器内自检） */
   onGpuAmdChange(v: boolean): void;
+  /** tmpfs 快捷开关：/tmp 挂 tmpfs（mode=1777，开机即净） */
+  onTmpfsTmpChange(v: boolean): void;
+  /** tmpfs 快捷开关：/run 挂 tmpfs（noexec mode=0755，开机即净） */
+  onTmpfsRunChange(v: boolean): void;
 }
 
 export function ContainerPane({
@@ -38,6 +42,7 @@ export function ContainerPane({
   onIconChange, onSilentBootChange,
   onGuiX11Change, onGuiWaylandChange,
   onGpuNvidiaChange, onGpuAmdChange,
+  onTmpfsTmpChange, onTmpfsRunChange,
 }: ContainerPaneProps) {
   const { message } = AntApp.useApp();
   // 镜像下拉数据：仅 create 模式需要拉（edit 模式镜像只读，渲染 Typography.Text）。
@@ -135,35 +140,62 @@ export function ContainerPane({
       <div className="config-field">
         <label>GUI 直通 · X11</label>
         <Space>
-          <Switch
-            checked={!!edit.gui_x11}
-            onChange={onGuiX11Change}
-            checkedChildren="开"
-            unCheckedChildren="关"
+          <Segmented
+            value={edit.gui_x11 ?? 'none'}
+            onChange={(v) => onGuiX11Change(v as GuiMode)}
+            options={[
+              { label: '关', value: 'none' },
+              { label: '直通', value: 'direct' },
+              { label: '旁路', value: 'bypass' },
+            ]}
           />
           <Typography.Text type="secondary">
-            按宿主实时 env 注入 DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径（X11 应用）
+            直通=注入宿主 DISPLAY + /tmp/.X11-unix + XAUTHORITY（画到宿主屏）；
+            旁路=容器自有 X（:0）+ 宿主 X0→X100 单文件旁路（HOST_DISPLAY/HOST_XAUTHORITY）
           </Typography.Text>
         </Space>
       </div>
       <div className="config-field">
         <label>GUI 直通 · Wayland</label>
         <Space>
-          <Switch
-            checked={!!edit.gui_wayland}
-            onChange={onGuiWaylandChange}
-            checkedChildren="开"
-            unCheckedChildren="关"
+          <Segmented
+            value={edit.gui_wayland ?? 'none'}
+            onChange={(v) => onGuiWaylandChange(v as GuiMode)}
+            options={[
+              { label: '关', value: 'none' },
+              { label: '直通', value: 'direct' },
+              { label: '旁路', value: 'bypass' },
+            ]}
           />
           <Typography.Text type="secondary">
-            按宿主实时 env 注入 WAYLAND_DISPLAY（socket 经 $XDG_RUNTIME_DIR 挂载；Wayland 原生应用）
+            直通=注入宿主 WAYLAND_DISPLAY；旁路=容器 wayland-0 悬空（GTK/Qt 回落 X）+ HOST_WAYLAND_DISPLAY 旁路
           </Typography.Text>
         </Space>
       </div>
       <div className="config-field">
         <Typography.Text type="secondary">
-          GUI 直通任一半开启时共享基建随之注入：keep_id + 字体/图标挂载 + XDG_DATA_DIRS + $XDG_RUNTIME_DIR 挂载
+          任一半非 none 即注入该模型的共享基建：keep_id + 字体/图标挂载 + XDG_DATA_DIRS +
+          runtime dir（直通=宿主目录直挂；旁路=容器私有目录 + HOST_XDG_RUNTIME_DIR 改名挂载）
         </Typography.Text>
+      </div>
+      <div className="config-field">
+        <label>tmpfs（开机即净，不攒垃圾）</label>
+        <Space>
+          <Switch
+            checked={!!edit.tmpfs_tmp}
+            onChange={onTmpfsTmpChange}
+            checkedChildren="/tmp"
+            unCheckedChildren="/tmp"
+          />
+          <Typography.Text type="secondary">mode=1777，容器用户可写</Typography.Text>
+          <Switch
+            checked={!!edit.tmpfs_run}
+            onChange={onTmpfsRunChange}
+            checkedChildren="/run"
+            unCheckedChildren="/run"
+          />
+          <Typography.Text type="secondary">noexec mode=0755，私有 XDG_RUNTIME_DIR 在其上</Typography.Text>
+        </Space>
       </div>
       <div className="config-field">
         <label>NVIDIA GPU 透传</label>

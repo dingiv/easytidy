@@ -268,6 +268,23 @@ pub fn keep_id_create_body(
                 .and_then(|v| v.as_str())
                 .unwrap_or("bind")
                 .to_lowercase();
+            // tmpfs（ContainerParams::tmpfs_tmp/tmpfs_run 快捷开关）：OCI
+            // spec.Mount type:tmpfs，与 podman CLI --tmpfs 同款（source="tmpfs"，
+            // options 直传 runc——mode=/noexec/size= 等）；bind 的 Source/ReadOnly
+            // 语义不适用（条目由 podman::tmpfs_mount 构造，带 Options）。
+            if typ == "tmpfs" {
+                let target = m.get("Target").cloned().unwrap_or(Value::Null);
+                let options = m
+                    .get("Options")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!([]));
+                return serde_json::json!({
+                    "type": "tmpfs",
+                    "source": "tmpfs",
+                    "destination": target,
+                    "options": options,
+                });
+            }
             let source = m.get("Source").cloned().unwrap_or(Value::Null);
             let target = m.get("Target").cloned().unwrap_or(Value::Null);
             let ro = m.get("ReadOnly").and_then(|v| v.as_bool()).unwrap_or(false);

@@ -130,6 +130,9 @@ export interface ContainerNetworkConfig {
   ports: PortMapping[];
 }
 
+/// GUI 直通模式三态（对应后端 `GuiMode`；旧 bool 已迁移： true→direct）
+export type GuiMode = 'none' | 'direct' | 'bypass';
+
 /// Container configuration from get_container_config / apply_container_config
 export interface ContainerConfig {
   name: string;
@@ -155,11 +158,11 @@ export interface ContainerConfig {
   user_gid?: number | null;
   /// 容器内用户名（可选；有值时首次创建经 root exec useradd 建号）
   user_name?: string | null;
-  /// GUI 直通双开关（意图）：任一半开启 → 引擎展开/重建时注入共享基建（keep_id /
-  /// 字体图标 / XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）；X11 半另注入 DISPLAY +
-  /// /tmp/.X11-unix + XAUTHORITY 稳定路径；Wayland 半注入 WAYLAND_DISPLAY
-  gui_x11?: boolean;
-  gui_wayland?: boolean;
+  /// GUI 直通（每半独立三态）：`none` 不注入 / `direct` 宿主直通（GUI 画到宿主屏）/
+  /// `bypass` 旁路（容器自有 X + `HOST_*` 改名旁路，xtiger 边界设计）。任一半非
+  /// none → 该模型的共享基建（keep_id / 字体图标 / XDG_DATA_DIRS / runtime dir）注入。
+  gui_x11?: GuiMode;
+  gui_wayland?: GuiMode;
   /// NVIDIA GPU 直通（意图）：开启时注入 `NVIDIA_DRIVER_CAPABILITIES=all` env +
   /// `nvidia.com/gpu=all` CDI 设备节点（不注 NVIDIA_VISIBLE_DEVICES——与 nvidia hook
   /// 的 void 冲突，GPU 走 CDI 设备节点）。需宿主 NVIDIA 驱动 + Container Toolkit CDI spec。
@@ -169,6 +172,12 @@ export interface ContainerConfig {
   /// （/dev/kfd + /dev/dri 下 PCI vendor 0x1002 的 render 节点）；无 vendor
   /// 专属 env（ROCm 容器内自检即可）。无 AMD CDI 依赖。
   gpu_amd?: boolean;
+  /// tmpfs 快捷开关：/tmp 挂 tmpfs（mode=1777；容器内临时文件开机即净，
+  /// 不落 overlay 不攒垃圾）
+  tmpfs_tmp?: boolean;
+  /// tmpfs 快捷开关：/run 挂 tmpfs（noexec mode=0755；私有 $XDG_RUNTIME_DIR、
+  /// lock/socket 都在其上，开机即净）
+  tmpfs_run?: boolean;
 }
 
 /// 宿主用户信息（uid 映射语义对照表数据源；null = 探测失败，

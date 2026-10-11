@@ -17,7 +17,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use crate::models::{ContainerConfig, ContainerParams};
+use crate::models::{ContainerConfig, ContainerParams, GuiMode};
 
 /// 透传注入总入口：按配置内的 `gui_x11` / `gui_wayland` / `gpu_nvidia` / `gpu_amd`
 /// 意图，调用对应的
@@ -35,11 +35,11 @@ pub fn inject_passthrough(config: &mut ContainerConfig) {
         .iter()
         .filter_map(|kv| kv.split_once('=').map(|(k, _)| k.to_string()))
         .collect();
-    // 至少一半开启才调：apply 内部按意图**覆盖** GUI 意图 env（开→宿主值，关→置空），
-    // 故关一半（如 x11 关 wayland 开）时仍会覆盖清空镜像里烘焙的旧 X11 值（commit
-    // 快照把容器 env 烘进镜像、重建继承）。两半均关 = 非 GUI 容器，不调 apply（避免给
-    // 纯 headless 容器写空 env）；此场景下镜像若残留旧 X11 env 不再主动清除（边缘情况）。
-    if x11 || wayland {
+    // 至少一半非 none 才调：apply 内部按意图**覆盖** GUI 意图 env（direct→宿主值、
+    // bypass→容器自有值、none→置空），故关一半时仍会覆盖清空镜像里烘焙的旧值
+    //（commit 快照把容器 env 烘进镜像、重建继承）。两半均 none = 非 GUI 容器，
+    // 不调 apply（避免给纯 headless 容器写空 env）。
+    if x11.is_active() || wayland.is_active() {
         inject_gui_passthrough(
             &mut config.params,
             &mut config.env,
@@ -73,8 +73,8 @@ pub fn inject_passthrough(config: &mut ContainerConfig) {
 pub fn inject_gui_passthrough(
     params: &mut ContainerParams,
     env: &mut Vec<String>,
-    x11: bool,
-    wayland: bool,
+    x11: GuiMode,
+    wayland: GuiMode,
     declared_env_keys: &HashSet<String>,
 ) {
     crate::env::gui::apply(params, env, x11, wayland, declared_env_keys);
@@ -432,8 +432,8 @@ mod tests {
             name: "t".into(),
             params: ContainerParams {
                 image: "alpine".into(),
-                gui_x11: false,
-                gui_wayland: false,
+                gui_x11: GuiMode::None,
+                gui_wayland: GuiMode::None,
                 gpu_nvidia: true,
                 gpu_amd: false,
                 ..ContainerParams::default()
@@ -510,8 +510,12 @@ mod tests {
                 params: ContainerParams {
                     image: "alpine".into(),
                     keep_id: false,
-                    gui_x11: x11,
-                    gui_wayland: wayland,
+                    gui_x11: if x11 { GuiMode::Direct } else { GuiMode::None },
+                    gui_wayland: if wayland {
+                        GuiMode::Direct
+                    } else {
+                        GuiMode::None
+                    },
                     ..ContainerParams::default()
                 },
                 env: vec![],
@@ -588,8 +592,8 @@ mod tests {
             name: "t".into(),
             params: ContainerParams {
                 image: "alpine".into(),
-                gui_x11: true,
-                gui_wayland: false,
+                gui_x11: GuiMode::Direct,
+                gui_wayland: GuiMode::None,
                 ..ContainerParams::default()
             },
             env,
@@ -631,7 +635,7 @@ mod tests {
             name: "t".into(),
             params: ContainerParams {
                 image: "alpine".into(),
-                gui_x11: true,
+                gui_x11: GuiMode::Direct,
                 ..ContainerParams::default()
             },
             // 用户显式声明全部三个意图 env → 注入后 env 应与用户声明完全一致

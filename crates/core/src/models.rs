@@ -185,6 +185,82 @@ pub struct NetworkConfig {
     pub ports: Vec<PortMapping>,
 }
 
+/// GUI 直通模式（`gui_x11` / `gui_wayland` 每半独立取值，三态）。
+///
+/// - [`None`](GuiMode::None)：不注入（旧 bool `false`）
+/// - [`Direct`](GuiMode::Direct)：宿主直通——`ASSETS_DIR::gui-passthrough.yaml`
+///   对应段 + 其 shared（旧 bool `true` 的语义；容器 GUI 画到宿主屏幕）
+/// - [`Bypass`](GuiMode::Bypass)：旁路——`ASSETS_DIR::gui-bypass.yaml` 对应段 +
+///   其 shared（容器自有 X/runtime dir，宿主资源只经 `HOST_*` 改名旁路，
+///   见 xtiger 边界设计稿 `crates/core/data/xtiger_container.md`）
+///
+/// 反序列化兼容旧 bool：`true → Direct`、`false → None`（存量配置/模板不炸）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GuiMode {
+    #[default]
+    None,
+    Direct,
+    Bypass,
+}
+
+impl GuiMode {
+    /// 非 none（任一模型激活，触发 shared 注入与意图覆盖清空）。
+    pub fn is_active(self) -> bool {
+        !matches!(self, GuiMode::None)
+    }
+    /// direct 半激活（宿主直通）。
+    pub fn is_direct(self) -> bool {
+        matches!(self, GuiMode::Direct)
+    }
+    /// bypass 半激活（旁路模型）。
+    pub fn is_bypass(self) -> bool {
+        matches!(self, GuiMode::Bypass)
+    }
+    /// 规范字符串（序列化用）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GuiMode::None => "none",
+            GuiMode::Direct => "direct",
+            GuiMode::Bypass => "bypass",
+        }
+    }
+}
+
+impl Serialize for GuiMode {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+/// 接受 `"none" | "direct" | "bypass"`（大小写不敏感）或旧 bool
+/// （`true → direct`，`false → none`）。其它类型 → 可读错误。
+impl<'de> Deserialize<'de> for GuiMode {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct ModeVisitor;
+        impl<'de> Visitor<'de> for ModeVisitor {
+            type Value = GuiMode;
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("none / direct / bypass（或旧版 bool）")
+            }
+            fn visit_bool<E: de::Error>(self, v: bool) -> Result<GuiMode, E> {
+                Ok(if v { GuiMode::Direct } else { GuiMode::None })
+            }
+            fn visit_str<E: de::Error>(self, v: &str) -> Result<GuiMode, E> {
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "none" | "" => Ok(GuiMode::None),
+                    "direct" => Ok(GuiMode::Direct),
+                    "bypass" => Ok(GuiMode::Bypass),
+                    other => Err(E::invalid_value(
+                        de::Unexpected::Str(other),
+                        &"none / direct / bypass",
+                    )),
+                }
+            }
+        }
+        d.deserialize_any(ModeVisitor)
+    }
+}
+
 /// 容器核心参数——模板与实例共享的基座。
 ///
 /// [`Flavor`](crate::flavor::Flavor)（模板，存意图）与 [`ContainerConfig`]
@@ -223,14 +299,16 @@ pub struct ContainerParams {
     /// 容器内用户名（可选；设置后创建/重建时经宿主 root exec 幂等 useradd
     /// 建号，否则容器仅按 uid/gid 运行、可能无 passwd 条目）
     pub user_name: Option<String>,
-    /// GUI 直通——**X11 应用半**（意图字段）。开启时展开/重建注入：
-    /// `DISPLAY` env + `/tmp/.X11-unix` 挂载 + `XAUTHORITY` 稳定路径（server 维护软链）。
-    /// 与 gui_wayland 独立；任一半开启则共享基建（keep_id / 字体图标 /
-    /// XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）随之开启（见 `inject_gui_passthrough`）。
-    pub gui_x11: bool,
-    /// GUI 直通——**Wayland 应用半**（意图字段）。开启时注入 `WAYLAND_DISPLAY` env
-    /// （Wayland socket 本身在 $XDG_RUNTIME_DIR，经共享挂载接入）。
-    pub gui_wayland: bool,
+    /// GUI 直通——**X11 应用半**（意图字段，三态 [`GuiMode`]）：
+    /// `direct` 注入 `DISPLAY` 宿主值 + `/tmp/.X11-unix` 目录挂载 + `XAUTHORITY`
+    /// 稳定路径；`bypass` 注入容器自有 `DISPLAY=:0` + 宿主 `X0→X100` 单文件旁路
+    /// 与 `HOST_DISPLAY`/`HOST_XAUTHORITY`；`none` 不注入。
+    /// 与 gui_wayland 独立；任一半非 none 则本模型的共享基建随之开启。
+    pub gui_x11: GuiMode,
+    /// GUI 直通——**Wayland 应用半**（意图字段，三态 [`GuiMode`]）：
+    /// `direct` 注入宿主 `WAYLAND_DISPLAY`；`bypass` 只留 `HOST_WAYLAND_DISPLAY`
+    /// 旁路（容器内 wayland-0 悬空 → GTK/Qt 回落 X）；`none` 不注入。
+    pub gui_wayland: GuiMode,
     /// NVIDIA GPU 透传（意图字段）。开启时展开/重建注入：
     /// - `NVIDIA_DRIVER_CAPABILITIES=all` env（**不注** `NVIDIA_VISIBLE_DEVICES`——
     ///   GPU 设备经 CDI `nvidia.com/gpu=all` 注入，该 legacy env 与 nvidia hook 的
@@ -257,13 +335,18 @@ pub struct ContainerParams {
     /// PID 命名空间模式（如 "host"；默认 private。与 init 互斥——设为非 private
     /// 时不注入 init/catatonit）
     pub pid: Option<String>,
+    /// tmpfs 快捷开关：`/tmp` 挂 tmpfs（`mode=1777`）——容器内临时文件
+    /// 开机即净，不落 overlay（不随开关机残留垃圾）。
+    pub tmpfs_tmp: bool,
+    /// tmpfs 快捷开关：`/run` 挂 tmpfs（`noexec mode=0755`）——私有
+    /// `$XDG_RUNTIME_DIR`、lock/socket 等开机即净。
+    pub tmpfs_run: bool,
 }
 
 impl ContainerParams {
-    /// 任一半 GUI 直通开启（共享基建 keep_id / 字体图标 / XDG_DATA_DIRS /
-    /// $XDG_RUNTIME_DIR 挂载随之开启，见 `inject_gui_passthrough`）。
+    /// 任一半非 none（本模型的共享基建随之开启，见 `inject_gui_passthrough`）。
     pub fn gui_enabled(&self) -> bool {
-        self.gui_x11 || self.gui_wayland
+        self.gui_x11.is_active() || self.gui_wayland.is_active()
     }
 }
 
@@ -280,13 +363,15 @@ impl Default for ContainerParams {
             user_uid: None,
             user_gid: None,
             user_name: None,
-            gui_x11: false,
-            gui_wayland: false,
+            gui_x11: GuiMode::None,
+            gui_wayland: GuiMode::None,
             gpu_nvidia: false,
             gpu_amd: false,
             devices: Vec::new(),
             extra_opts: Vec::new(),
             pid: None,
+            tmpfs_tmp: false,
+            tmpfs_run: false,
         }
     }
 }
@@ -295,7 +380,7 @@ impl Default for ContainerParams {
 /// 行为对齐；旧字段名 `gpu` / `user_home` / `security_opts` 不再写出——避免下一轮 round-trip 时污染）。
 impl Serialize for ContainerParams {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("ContainerParams", 15)?;
+        let mut st = s.serialize_struct("ContainerParams", 17)?;
         st.serialize_field("image", &self.image)?;
         st.serialize_field("mounts", &self.mounts)?;
         st.serialize_field("network", &self.network)?;
@@ -315,10 +400,10 @@ impl Serialize for ContainerParams {
         if self.user_name.is_some() {
             st.serialize_field("user_name", &self.user_name)?;
         }
-        if self.gui_x11 {
+        if self.gui_x11 != GuiMode::None {
             st.serialize_field("gui_x11", &self.gui_x11)?;
         }
-        if self.gui_wayland {
+        if self.gui_wayland != GuiMode::None {
             st.serialize_field("gui_wayland", &self.gui_wayland)?;
         }
         if self.gpu_nvidia {
@@ -331,6 +416,12 @@ impl Serialize for ContainerParams {
         st.serialize_field("extra_opts", &self.extra_opts)?;
         if self.pid.is_some() {
             st.serialize_field("pid", &self.pid)?;
+        }
+        if self.tmpfs_tmp {
+            st.serialize_field("tmpfs_tmp", &self.tmpfs_tmp)?;
+        }
+        if self.tmpfs_run {
+            st.serialize_field("tmpfs_run", &self.tmpfs_run)?;
         }
         st.end()
     }
@@ -384,6 +475,8 @@ impl<'de> Deserialize<'de> for ContainerParams {
                     user_name: bool,
                     gui_x11: bool,
                     gui_wayland: bool,
+                    tmpfs_tmp: bool,
+                    tmpfs_run: bool,
                     gpu_nvidia: bool,
                     gpu_amd: bool,
                     devices: bool,
@@ -402,13 +495,15 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 let mut user_uid: Option<Option<u32>> = None;
                 let mut user_gid: Option<Option<u32>> = None;
                 let mut user_name: Option<Option<String>> = None;
-                let mut gui_x11: Option<bool> = None;
-                let mut gui_wayland: Option<bool> = None;
+                let mut gui_x11: Option<GuiMode> = None;
+                let mut gui_wayland: Option<GuiMode> = None;
                 let mut gpu_nvidia: Option<bool> = None;
                 let mut gpu_amd: Option<bool> = None;
                 let mut devices: Option<Vec<String>> = None;
                 let mut extra_opts: Option<Vec<String>> = None;
                 let mut pid: Option<Option<String>> = None;
+                let mut tmpfs_tmp: Option<bool> = None;
+                let mut tmpfs_run: Option<bool> = None;
 
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -531,6 +626,20 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             pid = Some(map.next_value()?);
                             seen.pid = true;
                         }
+                        "tmpfs_tmp" => {
+                            if seen.tmpfs_tmp {
+                                return Err(de::Error::duplicate_field("tmpfs_tmp"));
+                            }
+                            tmpfs_tmp = Some(map.next_value()?);
+                            seen.tmpfs_tmp = true;
+                        }
+                        "tmpfs_run" => {
+                            if seen.tmpfs_run {
+                                return Err(de::Error::duplicate_field("tmpfs_run"));
+                            }
+                            tmpfs_run = Some(map.next_value()?);
+                            seen.tmpfs_run = true;
+                        }
                         _ => {
                             // 未知字段跳过（保持前向兼容）
                             let _: serde::de::IgnoredAny = map.next_value()?;
@@ -585,6 +694,12 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 }
                 if let Some(v) = pid {
                     p.pid = v;
+                }
+                if let Some(v) = tmpfs_tmp {
+                    p.tmpfs_tmp = v;
+                }
+                if let Some(v) = tmpfs_run {
+                    p.tmpfs_run = v;
                 }
 
                 Ok(p)
@@ -699,8 +814,8 @@ persistent = true
         assert_eq!(config.params.image, "alpine:latest");
         // entry / persistent 为已拔除的死字段：旧文件残留键被 serde 跳过、解析不报错
         // 设备/安全/PID/GUI/GPU 新字段：旧配置无 → 缺省（None/空/false）
-        assert!(!config.params.gui_x11);
-        assert!(!config.params.gui_wayland);
+        assert!(!config.params.gui_x11.is_active());
+        assert!(!config.params.gui_wayland.is_active());
         assert!(!config.params.gpu_nvidia);
         assert!(!config.params.gpu_amd);
         assert!(config.params.devices.is_empty());
@@ -724,8 +839,8 @@ silent_boot = false
 persistent = true
 "#;
         let config: ContainerConfig = toml::from_str(toml_str).unwrap();
-        assert!(config.params.gui_x11);
-        assert!(config.params.gui_wayland);
+        assert_eq!(config.params.gui_x11, GuiMode::Direct, "旧 bool true 应读为 direct");
+        assert_eq!(config.params.gui_wayland, GuiMode::Direct);
         assert!(config.params.gpu_nvidia);
         assert!(!config.params.gpu_amd);
         assert_eq!(
@@ -744,8 +859,8 @@ persistent = true
         // 序列化形状：pid None 时省略；gpu_* true 时写出；devices/security 始终保留
         let v = serde_json::to_value(&config).unwrap();
         assert_eq!(v["gpu_nvidia"], true);
-        assert_eq!(v["gui_x11"], true);
-        assert_eq!(v["gui_wayland"], true);
+        assert_eq!(v["gui_x11"], "direct");
+        assert_eq!(v["gui_wayland"], "direct");
         assert_eq!(v["pid"], "host");
         assert_eq!(v["devices"][0], "/dev/uinput:/dev/uinput");
         assert_eq!(v["extra_opts"][1], "apparmor=unconfined");
@@ -879,6 +994,61 @@ user_name = "tidy"
         assert!(!toml_str.contains("user_name"));
     }
 
+    /// GuiMode serde：字符串三态（大小写不敏感）+ 旧 bool 别名 + 非法值可读报错；
+    /// 序列化恒为规范小写串（旧 `gui_x11: true` 配置/模板读为 direct、写出为字符串）。
+    #[test]
+    fn test_gui_mode_serde() {
+        assert_eq!(
+            serde_json::from_str::<GuiMode>("\"bypass\"").unwrap(),
+            GuiMode::Bypass
+        );
+        assert_eq!(
+            serde_yaml::from_str::<GuiMode>("DIRECT").unwrap(),
+            GuiMode::Direct,
+            "大小写不敏感"
+        );
+        assert_eq!(
+            serde_json::from_str::<GuiMode>("true").unwrap(),
+            GuiMode::Direct,
+            "旧 bool true → direct"
+        );
+        assert_eq!(
+            serde_json::from_str::<GuiMode>("false").unwrap(),
+            GuiMode::None,
+            "旧 bool false → none"
+        );
+        assert!(serde_json::from_str::<GuiMode>("\"sideways\"").is_err());
+        assert_eq!(serde_json::to_string(&GuiMode::Bypass).unwrap(), "\"bypass\"");
+        assert_eq!(serde_json::to_string(&GuiMode::None).unwrap(), "\"none\"");
+        assert!(!GuiMode::None.is_active());
+        assert!(GuiMode::Direct.is_direct() && !GuiMode::Direct.is_bypass());
+        assert!(GuiMode::Bypass.is_bypass() && !GuiMode::Bypass.is_direct());
+    }
+
+    /// tmpfs 双快捷开关 serde：默认 skip-if-false 不写出、开了往返不丢、
+    /// 老配置无字段 → 关。
+    #[test]
+    fn test_tmpfs_flags_serde() {
+        let p = ContainerParams::default();
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("tmpfs_tmp").is_none(), "默认不写出 tmpfs_tmp");
+        assert!(v.get("tmpfs_run").is_none(), "默认不写出 tmpfs_run");
+
+        let p = ContainerParams {
+            tmpfs_tmp: true,
+            tmpfs_run: true,
+            ..ContainerParams::default()
+        };
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["tmpfs_tmp"], true);
+        assert_eq!(json["tmpfs_run"], true);
+        let back: ContainerParams = serde_json::from_value(json).unwrap();
+        assert!(back.tmpfs_tmp && back.tmpfs_run);
+
+        let old: ContainerParams = serde_json::from_str(r#"{"image":"alpine"}"#).unwrap();
+        assert!(!old.tmpfs_tmp && !old.tmpfs_run, "老配置默认关");
+    }
+
     #[test]
     fn test_container_config_roundtrip() {
         let config = ContainerConfig {
@@ -908,8 +1078,8 @@ user_name = "tidy"
                 user_uid: Some(1000),
                 user_gid: Some(1000),
                 user_name: Some("tidy".to_string()),
-                gui_x11: true,
-                gui_wayland: true,
+                gui_x11: GuiMode::Direct,
+                gui_wayland: GuiMode::Direct,
                 gpu_nvidia: true,
                 gpu_amd: false,
                 devices: vec!["/dev/uinput:/dev/uinput".to_string()],
@@ -918,6 +1088,8 @@ user_name = "tidy"
                     "apparmor=unconfined".to_string(),
                 ],
                 pid: Some("host".to_string()),
+                tmpfs_tmp: false,
+                tmpfs_run: false,
             },
             env: vec!["DISPLAY=:0".to_string()],
             silent_boot: true,

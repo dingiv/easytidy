@@ -1,0 +1,53 @@
+# 容器配置示例 —— agent 容器（旁路模型 / xtiger 边界设计）
+#
+# 形态：容器**默认拥有自己的世界**——自己的 X（容器内 Xtigervnc 监听 **:99**，
+# 与 gui-bypass.yaml 的 DISPLAY 一致）、自己的私有 runtime dir（D-Bus/portal/
+# IME/keyring 默认寻址全部落空）、/tmp 与 /run 挂 tmpfs（开机即净）。宿主资源
+# 只经 `HOST_*` 显式旁路：
+#   HOST_DISPLAY=:0             宿主 X 原名（vncviewer 中转件专用，可 grep 审计；
+#                               ⚠️ 惯用名 :0 归宿主，见规则文件 P1 注）
+#   HOST_XAUTHORITY             宿主 X cookie = 稳定软链 /run/easytidy/xauthority
+#                               （server 维护 + 30s 重探跟轮换）
+#   HOST_XDG_RUNTIME_DIR        宿主 runtime dir 整目录挂载点（/run/user/999）
+#   HOST_PIPEWIRE / HOST_PULSE_SERVER   宿主音频（规则文件中暂注释，方案未定）
+# 设计依据：crates/core/data/xtiger_container.md（P1 默认安全 / P2 显式可选 /
+# P3 凭据最小）。
+#
+# 容器侧配套（不归 easytidy，见设计稿 §4.1）：
+# - agent-desktop.sh 起 Xtigervnc **:99**（与规则 DISPLAY 一致——设计稿 §4.2
+#   的 :0/:100 命名已被现场规则取代：宿主 X 保持 :0 原名）+ 净化 session bus
+# - vncviewer：DISPLAY=$HOST_DISPLAY XAUTHORITY=$HOST_XAUTHORITY
+# - scout / 音频消费者：PIPEWIRE_REMOTE=$HOST_PIPEWIRE（绝对路径可用性见 §8.6）
+# - 应用自启走 passthrough auto-start（entry/entry_args 已废弃）
+
+name: agent
+image: docker.io/library/ubuntu:24.04
+
+# 三态：bypass = 旁路（容器自有 X :99 + 宿主 X 同名单文件旁路 + HOST_*；
+# bypass shared 同时提供 runtime dir 整目录改名挂载与音频旁路）；none = 不注入。
+# 注意：bypass 任一半激活时，direct 的宿主 runtime dir 整目录挂载被抑制
+#（否则盖掉容器私有目录——D-Bus 洗环境的机制 B 复活）。
+gui_x11: bypass
+gui_wayland: none
+
+# tmpfs 快捷开关：/tmp（X11 socket、应用临时文件）与 /run（私有 runtime dir、
+# lock）都易失，重启即净不攒垃圾
+tmpfs_tmp: true
+tmpfs_run: true
+
+silent_boot: false
+keep_id: true
+
+# GPU 照常（与旁路正交）
+gpu_nvidia: false
+extra_opts: []
+
+mounts: []
+
+network:
+  mode: host
+  ports: []
+
+env: []
+
+setup: []

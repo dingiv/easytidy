@@ -457,7 +457,7 @@ struct ConfSeed {
     yaml: &'static str,
 }
 
-const CONF_SEEDS: [ConfSeed; 3] = [
+const CONF_SEEDS: [ConfSeed; 4] = [
     ConfSeed {
         name: "full",
         yaml: include_str!("../../assets/conf/full.yaml"),
@@ -471,6 +471,11 @@ const CONF_SEEDS: [ConfSeed; 3] = [
     ConfSeed {
         name: "labwc",
         yaml: include_str!("../../assets/conf/labwc.yaml"),
+    },
+    // agent 容器（旁路模型：容器自有世界 + HOST_* 改名旁路；xtiger 设计稿）
+    ConfSeed {
+        name: "agent",
+        yaml: include_str!("../../assets/conf/agent.yaml"),
     },
 ];
 

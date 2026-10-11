@@ -264,8 +264,16 @@ function FlavorsPanelInner({ onLaunch, onEditTemplate, refreshTick }: FlavorsPan
                 <div className="flavor-main">
                   <div className="flavor-title">
                     <span className="flavor-name">{id}</span>
-                    {t.gui_x11 && <Tag color="blue">X11 直通</Tag>}
-                    {t.gui_wayland && <Tag color="geekblue">Wayland 直通</Tag>}
+                    {(t.gui_x11 ?? 'none') !== 'none' && (
+                      <Tag color={t.gui_x11 === 'bypass' ? 'purple' : 'blue'}>
+                        X11 {t.gui_x11 === 'bypass' ? '旁路' : '直通'}
+                      </Tag>
+                    )}
+                    {(t.gui_wayland ?? 'none') !== 'none' && (
+                      <Tag color={t.gui_wayland === 'bypass' ? 'purple' : 'geekblue'}>
+                        Wayland {t.gui_wayland === 'bypass' ? '旁路' : '直通'}
+                      </Tag>
+                    )}
                     {t.setup.length > 0 && <Tag color="purple">setup ×{t.setup.length}</Tag>}
                     {t.mounts.length > 0 && (
                       <Tag>mounts ×{t.mounts.length}</Tag>

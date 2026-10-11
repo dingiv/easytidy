@@ -17,12 +17,12 @@
 name: chrome
 image: docker.io/library/ubuntu:24.04
 
-# GUI 直通（双开关）：X11 半注入 DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径；
+# GUI 直通（三态：direct 宿主直通 / bypass 旁路 / none 关）：
 # Wayland 半注入 WAYLAND_DISPLAY。共享基建（keep-id / 字体图标挂 /mnt/host /
 # XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）任一半开启即注入——挂载无需在模板里
 # 重复声明（旧 `gui: true` 键已被 serde 忽略，必须写这两个开关）。
-gui_x11: true
-gui_wayland: true
+gui_x11: direct
+gui_wayland: direct
 
 silent_boot: false
 keep_id: true

@@ -44,12 +44,13 @@ user_gid: 1000
 # 保证 passwd 条目存在（缺省仅按 uid/gid 运行）
 user_name: ubuntu
 
-# GUI 直通双开关（意图字段）：任一半开启即注入共享基建（keep-id / 字体图标
-# /mnt/host / XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）——规则外置在
-# assets/gui-passthrough.yaml，session 耦合值（DISPLAY/WAYLAND_DISPLAY/
-# XDG_RUNTIME_DIR）创建时按宿主实时探测注入，模板里不要写死。
-gui_x11: true          # X11 半：DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径
-gui_wayland: true      # Wayland 半：WAYLAND_DISPLAY（socket 经 $XDG_RUNTIME_DIR 挂载接入）
+# GUI 直通（三态意图字段：`none` 不注入 / `direct` 宿主直通 / `bypass` 旁路）：
+# 任一半非 none 即注入该模型的共享基建（keep-id / 字体图标 /mnt/host /
+# XDG_DATA_DIRS / runtime dir）——规则外置在 assets/gui-passthrough.yaml（direct）
+# 与 assets/gui-bypass.yaml（bypass）；session 耦合值（DISPLAY/WAYLAND_DISPLAY/
+# XDG_RUNTIME_DIR）创建时实时取值，模板里不要写死。
+gui_x11: direct        # X11 半：DISPLAY + /tmp/.X11-unix + XAUTHORITY 稳定路径
+gui_wayland: direct    # Wayland 半：WAYLAND_DISPLAY（socket 经 $XDG_RUNTIME_DIR 挂载接入）
 
 # GPU 直通（意图字段，可双开）
 gpu_nvidia: false      # 注入 nvidia.com/gpu=all CDI + NVIDIA_DRIVER_CAPABILITIES=all
@@ -66,6 +67,12 @@ extra_opts:
 
 # PID 命名空间模式（缺省 private；"host" 时与 init 互斥——不注入 catatonit）
 pid:
+
+# tmpfs 快捷开关（容器内目录挂 tmpfs，重启即净、不落 overlay 不攒垃圾）：
+# /tmp → mode=1777（容器用户可写，允许 exec）；/run → noexec mode=0755
+# （私有 $XDG_RUNTIME_DIR、lock/socket 都在其上）
+tmpfs_tmp: false
+tmpfs_run: false
 
 # 路径映射（bind mount，每条 = 宿主路径 → 容器路径 → 是否只读）
 mounts:

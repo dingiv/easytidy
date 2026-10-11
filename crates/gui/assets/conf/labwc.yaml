@@ -5,7 +5,7 @@
 # 宿主桌面只看到一个 labwc 大窗口；容器内应用由 labwc 管理窗口。
 #
 # 场景约束（设计见 docs/20-gui-passthrough.md §3）：
-# - 只传 Wayland（gui_wayland=true，gui_x11=false）：宿主 X11 socket 不挂，
+# - 只传 Wayland（gui_wayland=direct，gui_x11=none）：宿主 X11 socket 不挂，
 #   容器内 X11 应用由容器内 XWayland 服务；
 # - 标题栏：宿主不给嵌套 toplevel 画 SSD → wlroots 需 libdecor CSD 补丁
 #   （container-gui-docs/patches/wlroots-0.18.2-libdecor-csd.patch）；
@@ -27,11 +27,11 @@
 name: labwc
 image: docker.io/library/ubuntu:24.04
 
-# 只开 Wayland 半（X11 半关）：注入 WAYLAND_DISPLAY + 共享基建
-# （keep-id / 字体图标 / XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）。
-# 旧 `gui: true` 键已被 serde 忽略，必须写这两个开关。
-gui_wayland: true
-gui_x11: false
+# 三态开关：direct = 宿主直通；bypass = 旁路（容器自有 X + HOST_*）；none = 关。
+# 只开 Wayland 半 direct：注入 WAYLAND_DISPLAY + 共享基建（keep-id / 字体图标 /
+# XDG_DATA_DIRS / $XDG_RUNTIME_DIR 挂载）。旧 `gui: true` 键已被 serde 忽略。
+gui_wayland: direct
+gui_x11: none
 
 silent_boot: false
 keep_id: true
@@ -58,6 +58,6 @@ env:
   - WLR_RENDERER=pixman
   # wlroots/labwc 用户级安装的库路径（构建产物不在系统目录时必需）
   - LD_LIBRARY_PATH=/home/ubuntu/labwc-install/lib/x86_64-linux-gnu
-# XDG_DATA_DIRS 由共享基建注入（gui_wayland 开），无需在此声明。
+# XDG_DATA_DIRS 由共享基建注入（gui_wayland=direct），无需在此声明。
 
 setup: []

@@ -1,0 +1,105 @@
+# GUI 旁路直通规则 —— gui_x11 / gui_wayland = bypass 时生效
+#
+# 与 gui-passthrough.yaml（direct 直通）结构完全对称（shared / x11 / wayland 三段），
+# 语义相反：**容器默认拥有自己的世界**，宿主资源只经 `HOST_*` 改名旁路
+# （设计依据：crates/core/data/xtiger_container.md —— 默认安全 P1 / 显式可选 P2 /
+# 凭据最小 P3）。
+#
+# ── 占位符视角（与 direct 的关键差异，env/gui.rs 执行）─────────────────────────
+#   - host_path：按**宿主 env** 展开（${XDG_RUNTIME_DIR} = 宿主的 /run/user/<uid>）
+#   - container_path 与 env 值：按**容器 env 字典**展开（本文件 env 段写进 podman
+#     Config.Env 的那套：XDG_RUNTIME_DIR / HOST_XDG_RUNTIME_DIR / …），
+#     字典优先、宿主兜底；env 段边展开边入字典（后续段可引用前面定义的键）
+#
+# ── 空值语义（两套，别混）───────────────────────────────────────────────────
+#   - **意图键**（DISPLAY / XAUTHORITY / HOST_XAUTHORITY / WAYLAND_DISPLAY）
+#     由 core 覆盖单点写入：**配空值允许**——`KEY=` = 显式置空（容器 env 收
+#     空值，清掉镜像烘焙旧值；WAYLAND_DISPLAY 配空 = 不要 Wayland，GTK/Qt
+#     连空名必失败 → 回落 X，与悬空 wayland-0 等效但更直白）。
+#   - **其它 env**：展开后为空 → 跳过不注入（${宿主变量} 未设时不注空值）。
+#   - **删行 ≠ 配空**：删行时 WAYLAND_DISPLAY 回退 `wayland-0` 悬空名、
+#     DISPLAY 回退 `:0`、HOST_XAUTHORITY 回退稳定软链路径。
+#
+# ── 不注入（与 direct 的差异，由 core 保证）────────────────────────────────────
+#   - 宿主 $XDG_RUNTIME_DIR → $XDG_RUNTIME_DIR 的整目录挂载（容器私有，
+#     D-Bus 洗环境的机制 B 从根上断）
+#   - 全局 XAUTHORITY=/run/easytidy/xauthority（改为 HOST_XAUTHORITY，
+#     文件名由 core 在 create 时探测——带随机后缀，不在本文件写死）
+#   - /tmp/.X11-unix 宿主整目录挂载（容器 /tmp 自有；只挂宿主 X 的单文件，
+#     同名进来——容器自有 X 挪到 :99 避让，见 x11 段）
+
+shared:
+  env:
+    # 容器自有 runtime dir（/run tmpfs 之上，开机即净；keep-id 恒开，容器 uid ==
+    # 宿主 uid，故用宿主 ${UID} 展开）。自己的 bus / pipewire / lock 都在这里。
+    - XDG_RUNTIME_DIR=/run/user/${UID}
+    # 宿主 runtime dir 在容器里的改名地址（必须先于其它 ${HOST_XDG_RUNTIME_DIR}
+    # 引用定义——字典按本段顺序构建）。整目录挂载落点，下面的
+    # pipewire-0 / pulse/ / wayland-0 / bus / cookie 全部原名可见。
+    - HOST_XDG_RUNTIME_DIR=/run/user/999
+    # 音频旁路（A 方案：容器不自产 PipeWire，显式走宿主那套——行为与旧“碰巧共享”
+    # 一致，只是归属显式）。消费者自己拼：PIPEWIRE_REMOTE=$HOST_PIPEWIRE /
+    # PULSE_SERVER=$HOST_PULSE_SERVER（绝对路径可用性见 xtiger §8.6 实测清单）。
+    # - HOST_PIPEWIRE=${HOST_XDG_RUNTIME_DIR}/pipewire-0
+    # - HOST_PULSE_SERVER=unix:${HOST_XDG_RUNTIME_DIR}/pulse/native
+    # 字体图标接入（非显示通道，与 direct 相同；gdk-pixbuf loader cache 需要）
+    - XDG_DATA_DIRS=/mnt/host:/usr/local/share:/usr/share
+    - DBUS_SESSION_BUS_ADDRESS=unix:path=${XDG_RUNTIME_DIR}/bus
+  mounts:
+    # ★核心旁路：宿主 runtime dir 整目录改名挂入（宿主视角 → 容器视角）
+    - host_path: ${XDG_RUNTIME_DIR}
+      container_path: ${HOST_XDG_RUNTIME_DIR}
+      read_only: true
+    # 宿主字体/图标（只读；宿主路径须存在）
+    - host_path: /usr/share/fonts
+      container_path: /mnt/host/fonts
+      read_only: true
+      require_exists: true
+    - host_path: /usr/share/icons
+      container_path: /mnt/host/icons
+      read_only: true
+      require_exists: true
+    - host_path: ${HOME}/.local/share/fonts
+      container_path: /mnt/host/.local/share/fonts
+      read_only: true
+      require_exists: true
+    - host_path: ${HOME}/.local/share/icons
+      container_path: /mnt/host/.local/share/icons
+      read_only: true
+      require_exists: true
+  # 旁路模型恒开 keep-id（与 direct 相同：字体/挂载目录需宿主身份读写）
+  keep_id: true
+
+# ── X11 应用半（gui_x11=bypass）────────────────────────────────────────────────
+x11:
+  env:
+    # 容器自己的 X（Xtigervnc 必须监听 :99——与本值一致；X0 已被宿主 X 的
+    # 单文件旁路占用，vnc 回 :0 会撞 "server already running"）。core 意图
+    # 覆盖用本值（随规则，非代码常量）。
+    - DISPLAY=:99
+    # 宿主 X 在容器里的名字（原名 X0→X0，不改名）——唯一合法消费者是
+    # vncviewer（中转件），可 grep 审计。
+    # ⚠️ P1 取舍：宿主 X 占用惯用名 :0 → 容器内**硬编码 DISPLAY=:0 的进程
+    # 会打到宿主屏**。常规路径靠 env 恒注 DISPLAY=:99 覆盖；容器侧脚本勿
+    # 写死 :0；镜像里烘焙的旧 DISPLAY 由 core 覆盖清除。
+    - HOST_DISPLAY=:0
+    - XAUTHORITY=${XDG_RUNTIME_DIR}/.Xauthority
+    - HOST_XAUTHORITY=/run/easytidy/xauthority
+  mounts:
+    # X 协议把 :N 硬编码成 /tmp/.X11-unix/XN —— 单文件旁路：宿主 X0 → 容器
+    # **同名 X0**（不改名）；容器自有 X 挪到 :99 避让，私有 /tmp 下宿主
+    # 看不见它。
+    - host_path: /tmp/.X11-unix/X0
+      container_path: /tmp/.X11-unix/X0
+      require_exists: true
+
+# ── Wayland 应用半（gui_wayland=bypass）────────────────────────────────────────
+wayland:
+  env:
+    # 容器内 wayland-0 悬空（无 socket）→ GTK/Qt 连不上自动回落 X →
+    # DISPLAY=:99 容器自己的 X。core 意图覆盖用本值（当前配空 = 显式
+    # 不要 Wayland，与悬空等效但更直白——见文件头「空值语义」）。
+    - WAYLAND_DISPLAY=
+    # 宿主 Wayland（整目录旁路下原名 wayland-0，绝对路径引用；留口，当前无消费者）
+    # - HOST_WAYLAND_DISPLAY=wayland-0
+  mounts: []

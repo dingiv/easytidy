@@ -36,6 +36,21 @@ pub struct Podman {
     pub(super) http: HttpClient,
 }
 
+/// tmpfs 挂载条目（Docker-compat PascalCase 形状，经
+/// [`crate::libpod::keep_id_create_body`] 转 OCI `spec.Mount {type: tmpfs}`，
+/// 与 podman CLI `--tmpfs` 同款：`source="tmpfs"`，options 直传 runc）。
+///
+/// `options` 里的 `mode=` 必须显式给——tmpfs 默认 mode 0755，`/tmp` 不给
+/// 1777 容器用户写不了（tmpfs 最常见的坑）。调用方负责把条目**排在数组最前**
+/// （runc 按序挂载，后续 bind 落点在 tmpfs 之上）。
+fn tmpfs_mount(dest: &str, options: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "Type": "tmpfs",
+        "Target": dest,
+        "Options": options,
+    })
+}
+
 impl Podman {
     /// 共享 HTTP 客户端（events 等模块使用）。
     pub(crate) fn http(&self) -> &HttpClient {
@@ -473,29 +488,61 @@ impl Podman {
             })
         };
 
-        // 构建挂载：server 二进制 + dock 二进制 + socket 目录 + 用户配置的
-        // bind mounts
-        let mut mounts = vec![
-            // Server 二进制（只读）
-            bind(
-                bins.server.to_string_lossy().to_string(),
-                Self::SERVER_TARGET,
-                true,
-            ),
-            // dock 二进制（只读）：容器内 root 工具（prepare 容器准备 + root
-            // 终端通道 daemon/client；musl 静态，零容器内命令依赖）
-            bind(
-                bins.dock.to_string_lossy().to_string(),
-                Self::DOCK_TARGET,
-                true,
-            ),
-            // Socket 目录（可写）
-            bind(
-                socket_host_dir.to_string_lossy().to_string(),
-                "/run/easytidy",
-                false,
-            ),
-        ];
+        // 构建挂载：**tmpfs 快捷开关最前**（runc 按数组序挂载——后面的 bind
+        // 落点 /run/easytidy、/run/easytidy-bin、/tmp/.X11-unix 都在 tmpfs 之上），
+        // 再 server 二进制 + dock 二进制 + socket 目录 + 用户配置的 bind mounts
+        let mut mounts: Vec<serde_json::Value> = Vec::new();
+        if config.params.tmpfs_tmp {
+            // mode=1777 必须显式：tmpfs 默认 mode 0755，不给 1777 容器用户写不了
+            // /tmp（tmpfs 最常见的坑）。允许 exec（安装器/脚本从 /tmp 跑）。
+            mounts.push(tmpfs_mount(
+                "/tmp",
+                // 注意：relatime 不在 podman tmpfs 选项白名单内（实测 500
+                // "unknown mount option"），只能给 rw/nosuid/nodev/mode
+                &["rw", "nosuid", "nodev", "mode=1777"],
+            ));
+        }
+        if config.params.tmpfs_run {
+            // /run 只放 socket/pid/lock → noexec；0755 容器内进程可读
+            mounts.push(tmpfs_mount(
+                "/run",
+                &["rw", "nosuid", "nodev", "noexec", "mode=0755"],
+            ));
+        }
+        // P-1（bypass）：容器自有 $XDG_RUNTIME_DIR 专用 tmpfs——易失（开关机不
+        // 攒垃圾），且每次启动都是全新 root 0700，由 start 收口的 prepare
+        // chown 成容器用户（podman tmpfs 白名单拒收 uid=/gid=，实测——只能
+        // mount 后 chown）。安全阀：只认 /run/user/*；direct 模型不挂（宿主
+        // runtime dir 是 bind）。
+        if config.params.gui_x11.is_bypass() || config.params.gui_wayland.is_bypass() {
+            if let Some(xdg) = config
+                .env
+                .iter()
+                .find_map(|kv| kv.strip_prefix("XDG_RUNTIME_DIR="))
+                .filter(|v| v.starts_with("/run/user/"))
+            {
+                mounts.push(tmpfs_mount(xdg, &["rw", "nosuid", "nodev", "mode=0700"]));
+            }
+        }
+        // Server 二进制（只读）
+        mounts.push(bind(
+            bins.server.to_string_lossy().to_string(),
+            Self::SERVER_TARGET,
+            true,
+        ));
+        // dock 二进制（只读）：容器内 root 工具（prepare 容器准备 + root
+        // 终端通道 daemon/client；musl 静态，零容器内命令依赖）
+        mounts.push(bind(
+            bins.dock.to_string_lossy().to_string(),
+            Self::DOCK_TARGET,
+            true,
+        ));
+        // Socket 目录（可写）
+        mounts.push(bind(
+            socket_host_dir.to_string_lossy().to_string(),
+            "/run/easytidy",
+            false,
+        ));
         // ets 二进制（只读，可选）：宿主未安装时跳过（容器内无 ets 命令，
         // prepare 不建软链）
         if let Some(ets) = &bins.ets {
@@ -1724,7 +1771,36 @@ impl Podman {
             .map_err(|e| Error::Connect(format!("启动容器失败：{e}")))?;
 
         tracing::info!("容器 {} 启动成功", name_or_id);
+        // bypass 容器：私有 $XDG_RUNTIME_DIR 专用 tmpfs 每次启动都是新挂的
+        // root 0700（P-1）、runc 预建的 /tmp/.X11-unix 是 root 0755（P-2）——
+        // GUI start/restart/env_start、CLI start/boot/open/run、systemd boot
+        // 全部收口本函数，此处补跑 prepare 纠正/重建。门闩 = **bypass 即付**
+        //（P-1/P-2 纠正每次启动都要跑，不依赖 tmpfs_run）；direct 容器零成本。
+        // 限：裸 `podman restart`（不经 easytidy）不补——下次经 easytidy 启动
+        // 自会补齐。best-effort：失败只落日志，不阻断启动。
+        self.start_prepare_if_needed(name_or_id).await;
         Ok(())
+    }
+
+    /// [`start`](Self::start) 的收口准备：仅 GUI `bypass` 容器需要每启动补
+    /// prepare（私有 $XDG_RUNTIME_DIR 属主/权限纠正 + /tmp/.X11-unix 1777，
+    /// 见 `env::incontainer::ensure_xdg_runtime_dir`）。注册表无配置（首次
+    /// create 流程尚未 register，其后有显式 prepare；或裸创建的容器）→ 跳过。
+    /// 注意：按默认注册表查（CLI `--config-dir` 覆盖的目录查不到 → 跳过，
+    /// 该场景下由 create/rebuild 的显式 prepare 兑底）。
+    async fn start_prepare_if_needed(&self, name: &str) {
+        let cfg = crate::configfile::ConfigFile::default_instance()
+            .ok()
+            .and_then(|cf| cf.get_container(name).ok().flatten());
+        let Some(cfg) = cfg else {
+            return;
+        };
+        if !(cfg.params.gui_x11.is_bypass() || cfg.params.gui_wayland.is_bypass()) {
+            return;
+        }
+        if let Err(e) = self.prepare_container(name, &cfg.params, false).await {
+            tracing::warn!("启动后容器内准备失败（不阻断启动，下次启动补齐）：{e}");
+        }
     }
 
     /// 停止容器（按名或 ID）。
@@ -2386,6 +2462,53 @@ mod tests {
         let err = resolve_container_user(&params, None).unwrap_err();
         assert!(matches!(err, Error::Config(_)));
         assert!(err.to_string().contains("无法确定容器默认用户"));
+    }
+
+    #[test]
+    fn test_libpod_body_tmpfs() {
+        // tmpfs 条目（ContainerParams::tmpfs_tmp/tmpfs_run 快捷开关）→ OCI
+        // spec.Mount type:tmpfs（source="tmpfs"、options 直传 runc），与 bind
+        // 同数组共存；条目顺序（tmpfs 前置）由 create 路径保证，此处锁 mapper 分派。
+        let mounts = vec![
+            tmpfs_mount("/tmp", &["rw", "nosuid", "nodev", "relatime", "mode=1777"]),
+            serde_json::json!({
+                "Type": "bind",
+                "Source": "/host/x",
+                "Target": "/run/easytidy",
+                "ReadOnly": false,
+            }),
+        ];
+        let body = crate::libpod::keep_id_create_body(
+            "c1",
+            "c1",
+            "alpine:latest",
+            vec!["/bin/sh".into()],
+            Vec::new(),
+            std::collections::HashMap::new(),
+            mounts,
+            None,
+            None,
+            None,
+            None,
+            Some("1000:1000"),
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        let m = body["mounts"].as_array().expect("mounts 应为数组");
+        assert_eq!(m[0]["type"], "tmpfs");
+        assert_eq!(m[0]["source"], "tmpfs");
+        assert_eq!(m[0]["destination"], "/tmp");
+        assert_eq!(m[0]["options"][4], "mode=1777", "mode= 必须原样直传 runc");
+        assert_eq!(m[1]["type"], "bind");
+        assert_eq!(m[1]["source"], "/host/x");
+        assert_eq!(m[1]["destination"], "/run/easytidy");
+        assert!(m[1]["options"].as_array().unwrap().is_empty(), "非 ro bind 无 options");
     }
 
     #[test]

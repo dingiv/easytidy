@@ -175,8 +175,9 @@ ports:
         }"#;
         let t_old: ConfTemplate = serde_json::from_str(json_old).unwrap();
         assert!(
-            !t_old.config.params.gui_x11 && !t_old.config.params.gui_wayland,
-            "旧文件（无新字段，残留旧 gui 键被忽略）应默认两半均 false"
+            !t_old.config.params.gui_x11.is_active()
+                && !t_old.config.params.gui_wayland.is_active(),
+            "旧文件（无新字段，残留旧 gui 键被忽略）应默认两半均 none"
         );
 
         let json_new = r#"{
@@ -186,10 +187,23 @@ ports:
             "gui_x11":true,"gui_wayland":true
         }"#;
         let t_new: ConfTemplate = serde_json::from_str(json_new).unwrap();
-        assert!(t_new.config.params.gui_x11, "新文件含 gui_x11:true 应生效");
         assert!(
-            t_new.config.params.gui_wayland,
-            "新文件含 gui_wayland:true 应生效"
+            t_new.config.params.gui_x11.is_active(),
+            "新文件含 gui_x11:true 应读为 direct（bool 别名）"
+        );
+        assert!(
+            t_new.config.params.gui_wayland.is_active(),
+            "新文件含 gui_wayland:true 应读为 direct"
+        );
+        // 新形态：字符串三态
+        let t_mode: ConfTemplate = serde_json::from_str(
+            r#"{"name":"m","image":"alpine","silent_boot":false,"gui_x11":"bypass","gui_wayland":"none"}"#,
+        )
+        .unwrap();
+        assert!(t_mode.config.params.gui_x11.is_bypass(), "bypass 字符串应生效");
+        assert!(
+            !t_mode.config.params.gui_wayland.is_active(),
+            "none 字符串应不激活"
         );
     }
 

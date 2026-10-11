@@ -159,23 +159,39 @@ pub(crate) fn fixup_xdg_data_dirs() -> Option<String> {
 /// `auth_dir` = XAUTHORITY 稳定路径所在目录（server 的 socket 目录，容器内
 /// 即 `/run/easytidy`，bind-mount rw）。
 pub(crate) fn ensure_xauthority(auth_dir: &std::path::Path) -> Option<String> {
+    // ── bypass（P-3）：HOST_XAUTHORITY = core 注入的稳定软链路径——只维护
+    // 这条链（探 [容器自有, HOST_XDG] 双目录），**不碰 XAUTHORITY**：它指向
+    // 容器自己 X 的 .Xauthority（归 Xtigervnc，server 动它会覆盖容器 X 的
+    // auth 文件）。env 已是 spec 值，无需 set_var、不申报注入。
+    if let Some(hv) = std::env::var("HOST_XAUTHORITY").ok().filter(|v| !v.is_empty()) {
+        let Some(path) = probe_xauthority_any() else {
+            tracing::warn!(
+                "bypass：容器自有与 HOST_XDG runtime dir 均未找到 X11 auth 文件\
+                 （headless 容器或 host 未挂 cookie 时正常）——监视窗口暂不可用"
+            );
+            return None;
+        };
+        let link = std::path::PathBuf::from(&hv);
+        if link != path {
+            write_xauthority_link(&link, &path);
+            tracing::info!("HOST_XAUTHORITY 软链 {hv} → 真实文件 {}", path.display());
+        }
+        return None;
+    }
+    // ── direct（原三态模式 1/2/3；探测目录扩为双候选，direct 下 HOST 未设
+    // 等价原样）──
     // 三态门控：spec env（= 进程初始 env）的 XAUTHORITY 空/未设 → 模式 1：
     // gui_x11 关或用户显式声明空值（用户声明空 = 不要 X11 auth）——不注入、
     // 不做感知。
     let env_value = std::env::var("XAUTHORITY").ok().filter(|v| !v.is_empty())?;
-    let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
-        tracing::debug!("未设 XDG_RUNTIME_DIR,跳过 XAUTHORITY 自动注入");
-        return None;
-    };
-    let Some(path_str) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime))
-    else {
+    let Some(path) = probe_xauthority_any() else {
         tracing::warn!(
-            "未在 {runtime} 找到 X11 auth 文件([.]mutter-Xwaylandauth.* 或 xauth_*);\
-             X GUI 透传可能受限——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
+            "未在容器自有/HOST_XDG runtime dir 找到 X11 auth 文件\
+             （[.]mutter-Xwaylandauth.* 或 xauth_*）；X GUI 透传可能受限\
+             ——headless 容器或 host 未挂载 XDG_RUNTIME_DIR 时正常"
         );
         return None;
     };
-    let path = std::path::PathBuf::from(path_str);
     let stable = auth_dir.join(XAUTHORITY_STABLE_FILE);
     // 模式 3（用户显式指定非稳定路径）→ 用户配置优先：软链位用用户路径，
     // 进程 env 保持用户值不覆盖；模式 2（core 稳定路径）→ 间接路径模型。
@@ -237,6 +253,23 @@ fn write_xauthority_link(link_path: &std::path::Path, target: &std::path::Path) 
 /// `XAUTHORITY=/run/easytidy/xauthority` 尾段一致）。
 pub(crate) const XAUTHORITY_STABLE_FILE: &str = "xauthority";
 
+/// cookie 探测目录：容器自有 `$XDG_RUNTIME_DIR`（direct：宿主 runtime dir；
+/// bypass：私有空目录）+ `HOST_XDG_RUNTIME_DIR`（bypass：宿主改名挂载点，
+/// cookie 实际在这）。逐个探测，首个命中返回。
+fn probe_xauthority_any() -> Option<std::path::PathBuf> {
+    let mut dirs: Vec<String> = Vec::new();
+    for key in ["XDG_RUNTIME_DIR", "HOST_XDG_RUNTIME_DIR"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() && !dirs.contains(&v) {
+                dirs.push(v);
+            }
+        }
+    }
+    dirs.iter()
+        .find_map(|d| easytidy_core::env::probe_xauthority(std::path::Path::new(d)))
+        .map(std::path::PathBuf::from)
+}
+
 /// XAUTHORITY 重探任务：每 [`XAUTHORITY_WATCH_INTERVAL`] 重探一次 auth 文件，
 /// 变化（会话轮换 / 注销后重登换了随机名）则重链稳定路径。
 ///
@@ -248,23 +281,20 @@ pub(crate) async fn xauthority_watch_task() {
     let mut last_target: Option<std::path::PathBuf> = None;
     loop {
         tokio::time::sleep(interval).await;
-        // 软链位 = 当前进程 env 的 XAUTHORITY（core 稳定路径或用户显式指定
-        // 的路径——三态模式 2/3 统一：env 值恒定不变，只换链目标）。
-        let Some(link) = std::env::var("XAUTHORITY")
+        // 链位按模式取：bypass → HOST_XAUTHORITY（XAUTHORITY 归容器自有 X，
+        // server 不碰）；否则 XAUTHORITY（core 稳定路径 / 用户指定路径——
+        // 三态模式 2/3 统一：env 值恒定不变，只换链目标）。
+        let link = std::env::var("HOST_XAUTHORITY")
             .ok()
             .filter(|v| !v.is_empty())
-            .map(std::path::PathBuf::from)
-        else {
-            continue; // 模式 1（空/未设）：无 X11 auth 透传，不感知
+            .or_else(|| std::env::var("XAUTHORITY").ok().filter(|v| !v.is_empty()))
+            .map(std::path::PathBuf::from);
+        let Some(link) = link else {
+            continue; // 模式 1（两键都空）：无 X11 auth 透传，不感知
         };
-        let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") else {
-            continue;
-        };
-        let Some(path_str) = easytidy_core::env::probe_xauthority(std::path::Path::new(&runtime))
-        else {
+        let Some(path) = probe_xauthority_any() else {
             continue; // 探不到：保留旧链
         };
-        let path = std::path::PathBuf::from(path_str);
         if link == path {
             // 用户路径即真实文件本身：无需软链
             last_target = Some(path);
