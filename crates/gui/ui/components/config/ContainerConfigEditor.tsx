@@ -1,8 +1,8 @@
 // ContainerConfig 统一编辑器 —— 主 GUI 创建（ContainerCreateForm）与
 // 单实例 GUI 配置管理（ConfigManager）共用的页内表单。
 //
-// 受控组件（value/onChange）。单页布局：从上到下分为 容器 / 挂载 / 网络 /
-// 环境变量 / 用户 五个 section,各自带标题 + 内边距卡片,不再嵌套 antd Tabs。
+// 受控组件（value/onChange）。单页布局：从上到下分为 容器 / 挂载 / 数据卷 /
+// 网络 / 环境变量 / 用户 六个 section,各自带标题 + 内边距卡片,不再嵌套 antd Tabs。
 //
 // - mode='create'：名称/镜像可编辑（容器 section）——flavor 展开
 //   预填后任何字段可继续改
@@ -38,12 +38,14 @@ import type {
   PassthroughPreview,
   PortMapping,
   ServerEnvItem,
+  VolumeMount,
 } from '../../types';
 import { ContainerPane } from './ContainerPane';
 import { EnvPane } from './EnvPane';
 import { MountsPane } from './MountsPane';
 import { NetworkPane } from './NetworkPane';
 import { UserPane } from './UserPane';
+import { VolumesPane } from './VolumesPane';
 
 /** 新建默认值（与 core ContainerConfig::default + 产品语义对齐：
  * Host 网络 + 用户一致性映射。entry/entry_args/persistent 为已拔除的死字段；
@@ -53,6 +55,7 @@ export const BLANK_CONTAINER_CONFIG: ContainerConfig = {
   image: '',
   silent_boot: false,
   mounts: [],
+  volumes: [],
   network: { mode: 'host', ports: [] },
   icon: null,
   env: [],
@@ -96,7 +99,7 @@ interface ExampleConf {
   yaml: string;
 }
 
-/** 单页容器配置编辑器：自上而下 section（容器 / 挂载 / 网络 / 环境变量 / 用户） */
+/** 单页容器配置编辑器：自上而下 section（容器 / 挂载 / 数据卷 / 网络 / 环境变量 / 用户） */
 export function ContainerConfigEditor({
   value, onChange, mode, nameLocked = false, effective = null, hostUser = null,
 }: ContainerConfigEditorProps) {
@@ -303,9 +306,32 @@ export function ContainerConfigEditor({
           mounts={value.mounts}
           readonlyMounts={preview?.mounts ?? []}
           shadowedMountTargets={preview?.shadowed_mount_targets ?? []}
+          effectiveMounts={mode === 'edit' && effective ? effective.mounts : null}
+          volumeTargets={(value.volumes ?? []).map((v) => v.container_path)}
           onAdd={(m: MountConfig) => update({ mounts: [...value.mounts, m] })}
           onRemove={(idx: number) =>
             update({ mounts: value.mounts.filter((_, i) => i !== idx) })
+          }
+        />
+      </section>
+
+      <section className="config-section">
+        <h3 className="config-section-title">
+          <DatabaseOutlined /> 数据卷
+        </h3>
+        <VolumesPane
+          volumes={value.volumes ?? []}
+          mountTargets={value.mounts.map((m) => m.container_path)}
+          effectiveVolumes={
+            mode === 'edit' && effective ? (effective.volumes ?? []) : null
+          }
+          onAdd={(v: VolumeMount) =>
+            update({ volumes: [...(value.volumes ?? []), v] })
+          }
+          onRemove={(idx: number) =>
+            update({
+              volumes: (value.volumes ?? []).filter((_, i) => i !== idx),
+            })
           }
         />
       </section>

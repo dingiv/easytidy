@@ -74,7 +74,19 @@ function ContainerCreateFormInner({
       const manual = (config.mounts ?? []).filter(
         (m) => !expandedTargets.has(m.container_path),
       );
-      setConfig({ ...expanded, mounts: [...(expanded.mounts ?? []), ...manual] });
+      // 数据卷同款合并（同挂载的 2026-09-02 坑）：按 卷名+容器路径 去重，
+      // 模板已声明的以模板为准，其余保留用户手动加的卷——不静默抹掉。
+      const expandedVols = new Set(
+        (expanded.volumes ?? []).map((v) => `${v.name}::${v.container_path}`),
+      );
+      const manualVols = (config.volumes ?? []).filter(
+        (v) => !expandedVols.has(`${v.name}::${v.container_path}`),
+      );
+      setConfig({
+        ...expanded,
+        mounts: [...(expanded.mounts ?? []), ...manual],
+        volumes: [...(expanded.volumes ?? []), ...manualVols],
+      });
       setSelectedTemplate(name);
     } catch (err: any) {
       message.error(errMsg(err, `展开模板 ${name} 失败`));

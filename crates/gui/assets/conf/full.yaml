@@ -80,6 +80,18 @@ mounts:
     container_path: /workspace
     read_only: false
 
+# 数据卷（named volume）：卷独立于容器——删容器/重建/快照不丢数据（与 bind
+# 互补，bind 依赖宿主路径）。卷名不存在时创建容器由引擎自动建（打
+# manager=easytidy label，幂等）；删除去 GUI「数据卷」面板或 CLI
+# `easytidy volume rm`（**挂载中被 podman 拒 409**）。
+volumes:
+  - name: app-data
+    container_path: /srv/data
+    read_only: false
+  - name: app-cache
+    container_path: /var/cache
+    read_only: true
+
 # 网络配置：mode = "host"（端口映射无效）或 "mapped"（bridge + 端口转发）
 network:
   mode: mapped

@@ -104,6 +104,28 @@ export interface MountConfig {
   read_only: boolean;
 }
 
+/// 数据卷挂载条目（named volume；对应后端 `VolumeMount`）。
+/// 卷独立于容器（podman volume）：删容器/重建/快照不丢数据，与 bind 互补。
+/// 不存在的卷名在创建容器时由引擎自动创建（带 manager=easytidy label）。
+export interface VolumeMount {
+  name: string;
+  container_path: string;
+  read_only: boolean;
+}
+
+/// 数据卷概要（`volume_list`；对应后端 `VolumeInfo`，snake 序列化）。
+/// `labels.manager === 'easytidy'` 为 easytidy 创建；`mount_count > 0` = 使用中。
+export interface VolumeInfo {
+  name: string;
+  driver: string;
+  /** 宿主数据目录（仅展示/排查） */
+  mountpoint: string;
+  created_at: string;
+  labels: Record<string, string>;
+  scope: string;
+  mount_count: number;
+}
+
 /// UID/GID 重映射条目（对应 podman `--uidmap container:host:length` /
 /// `--gidmap`）。显式映射与 `keep_id` **互斥**——非空时覆盖 keep-id，
 /// 由显式映射精确决定容器 uid/gid 落位。
@@ -139,6 +161,8 @@ export interface ContainerConfig {
   image: string;
   silent_boot: boolean;
   mounts: MountConfig[];
+  /** 数据卷挂载（named volume；可缺省=无） */
+  volumes?: VolumeMount[];
   network: ContainerNetworkConfig;
   /// 容器入口图标（宿主图片路径，可选）：入口 .desktop 导出时经内置品牌工具加工。
   /// 未设置 = 内置品牌图标。
@@ -210,6 +234,8 @@ export interface ContainerFailureInfo {
 /// silent_boot；env 含系统注入，对比需过滤后子集比较）
 export interface ContainerConfigView {
   mounts: MountConfig[];
+  /** 当前生效的数据卷挂载（named volume；老后端无此字段 → 可缺省） */
+  volumes?: VolumeMount[];
   network: ContainerNetworkConfig;
   /// 当前生效环境变量（含 EASYTIDY_USER_NAME 系统注入与
   /// podman 默认 PATH/HOSTNAME 等）

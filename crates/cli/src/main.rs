@@ -209,6 +209,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: FlavorCmd,
     },
+
+    /// 数据卷（named volume）：独立存储，删容器/重建/快照不丢数据
+    Volume {
+        #[command(subcommand)]
+        cmd: VolumeCmd,
+    },
 }
 
 /// 环境语义子命令
@@ -262,6 +268,26 @@ enum FlavorCmd {
         /// 容器名（默认 = flavor 名）
         #[arg(long)]
         container: Option<String>,
+    },
+}
+
+/// 数据卷子命令（named volume；全量列出定案：不分谁建的）
+#[derive(Subcommand)]
+enum VolumeCmd {
+    /// 列出宿主全部数据卷（easytidy 创建的打标）
+    Ls,
+    /// 创建数据卷（带 manager=easytidy label；同名存在 → podman 500 already exists）
+    Create {
+        /// 卷名
+        name: String,
+    },
+    /// 删除数据卷（**挂载中 → podman 409 is in use**，错误透传）
+    Rm {
+        /// 卷名
+        name: String,
+        /// 强制删除（对应 podman rm -f）
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -359,6 +385,11 @@ async fn main() -> Result<()> {
                     FlavorCmd::Apply { flavor, container } => {
                         cmd_flavor_apply(podman, flavor, container, cli.config_dir.clone()).await
                     }
+                },
+                Commands::Volume { cmd } => match cmd {
+                    VolumeCmd::Ls => cmd_volume_ls(podman).await,
+                    VolumeCmd::Create { name } => cmd_volume_create(podman, name).await,
+                    VolumeCmd::Rm { name, force } => cmd_volume_rm(podman, name, force).await,
                 },
                 // 外层已处理的变体（Run/Open/DockLogs/Unexport/Flavor::List）——
                 // 运行时不可达（它们在 podman 连接前就返回了），仅满足 match 穷尽
@@ -639,6 +670,11 @@ async fn cmd_rm(
         error!("注销容器配置失败：{}", e);
     }
 
+    // 卸载桌面图标 + 清理 socket 目录（对齐 env rm；漏清会在宿主 runtime 下
+    // 留垃圾目录，2026-10-12 探针实测踩到）
+    let _ = easytidy_core::desktop::remove_entry_desktops(&container);
+    let _ = easytidy_core::remove_socket_dirs(&container);
+
     Ok(())
 }
 
@@ -732,6 +768,53 @@ async fn cmd_env_stop(podman: Podman, name: String) -> Result<()> {
 /// 环境列表。
 async fn cmd_env_list(podman: Podman) -> Result<()> {
     cmd_list(podman).await
+}
+
+/// 列出宿主全部数据卷（**全量**：不分谁建的；easytidy 创建的打标）。
+async fn cmd_volume_ls(podman: Podman) -> Result<()> {
+    let vols = podman.volume_list().await?;
+    if vols.is_empty() {
+        println!("没有找到数据卷（在容器配置的「数据卷」区挂载，创建容器时自动建）");
+        return Ok(());
+    }
+    println!(
+        "{:<28} {:<12} {:<10} {:<20} MOUNTPOINT",
+        "NAME", "STATUS", "ORIGIN", "CREATED"
+    );
+    println!("{}", "-".repeat(110));
+    for v in vols {
+        let status = if v.mount_count > 0 {
+            format!("使用中×{}", v.mount_count)
+        } else {
+            "空闲".to_string()
+        };
+        let origin = if v.labels.get("manager").map(String::as_str) == Some("easytidy") {
+            "easytidy"
+        } else {
+            "外部"
+        };
+        // RFC3339（2026-08-15T06:05:51+08:00）→ "2026-08-15 06:05"（免 chrono）
+        let created: String = v.created_at.replace('T', " ").chars().take(16).collect();
+        println!(
+            "{:<28} {:<12} {:<10} {:<20} {}",
+            v.name, status, origin, created, v.mountpoint
+        );
+    }
+    Ok(())
+}
+
+/// 创建数据卷（带 manager=easytidy label；同名存在 → podman 500 already exists，原文透传）。
+async fn cmd_volume_create(podman: Podman, name: String) -> Result<()> {
+    let v = podman.volume_create(&name).await?;
+    println!("✅ 数据卷已创建：{}（驱动 {}，宿主 {}）", v.name, v.driver, v.mountpoint);
+    Ok(())
+}
+
+/// 删除数据卷（**挂载中 → podman 409 is in use**，错误透传展示）。
+async fn cmd_volume_rm(podman: Podman, name: String, force: bool) -> Result<()> {
+    podman.volume_remove(&name, force).await?;
+    println!("✅ 数据卷已删除：{name}");
+    Ok(())
 }
 
 /// 列出可用 flavor。

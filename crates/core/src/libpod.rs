@@ -259,48 +259,78 @@ pub fn keep_id_create_body(
     }
     // libpod SpecGenerator 的 mount 格式：type/source/destination/options
     // （Docker 式 Type/Source/Target/ReadOnly 会导致
-    // "container directory cannot be empty"，实测）
-    let podman_mounts: Vec<Value> = mounts
-        .iter()
-        .map(|m| {
-            let typ = m
-                .get("Type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("bind")
-                .to_lowercase();
-            // tmpfs（ContainerParams::tmpfs_tmp/tmpfs_run 快捷开关）：OCI
-            // spec.Mount type:tmpfs，与 podman CLI --tmpfs 同款（source="tmpfs"，
-            // options 直传 runc——mode=/noexec/size= 等）；bind 的 Source/ReadOnly
-            // 语义不适用（条目由 podman::tmpfs_mount 构造，带 Options）。
-            if typ == "tmpfs" {
-                let target = m.get("Target").cloned().unwrap_or(Value::Null);
-                let options = m
-                    .get("Options")
-                    .cloned()
-                    .unwrap_or_else(|| serde_json::json!([]));
-                return serde_json::json!({
-                    "type": "tmpfs",
-                    "source": "tmpfs",
-                    "destination": target,
-                    "options": options,
-                });
+    // "container directory cannot be empty"，实测）。
+    //
+    // **同一输入数组承载三类条目，按 Type 分流**（create 路径统一投喂，见
+    // podman/mod.rs）：
+    //   - bind（默认）/ tmpfs → 落 `body.mounts`
+    //   - volume（named volume：{Type:"volume", Name, Dest, Options}）→
+    //     **分流到 `body.volumes`**（specgen NamedVolume{Name,Dest,Options}，
+    //     Go 无 json tag 字段为 Pascal；2026-10-12 socket 实测：create 请求
+    //     body snake 可吃、list/inspect 响应 PascalCase）
+    let mut podman_mounts: Vec<Value> = Vec::with_capacity(mounts.len());
+    let mut podman_volumes: Vec<Value> = Vec::new();
+    for m in &mounts {
+        let typ = m
+            .get("Type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("bind")
+            .to_lowercase();
+        if typ == "volume" {
+            let name = m.get("Name").and_then(|v| v.as_str()).unwrap_or("");
+            let dest = m
+                .get("Dest")
+                .or_else(|| m.get("Target"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            if name.is_empty() || dest.is_null() {
+                tracing::warn!("named volume 条目缺 Name/Dest，跳过：{m}");
+                continue;
             }
-            let source = m.get("Source").cloned().unwrap_or(Value::Null);
+            let options = m
+                .get("Options")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            podman_volumes.push(serde_json::json!({
+                "Name": name,
+                "Dest": dest,
+                "Options": options,
+            }));
+            continue;
+        }
+        // tmpfs（ContainerParams::tmpfs_tmp/tmpfs_run 快捷开关）：OCI
+        // spec.Mount type:tmpfs，与 podman CLI --tmpfs 同款（source="tmpfs"，
+        // options 直传 runc——mode=/noexec/size= 等）；bind 的 Source/ReadOnly
+        // 语义不适用（条目由 podman::tmpfs_mount 构造，带 Options）。
+        if typ == "tmpfs" {
             let target = m.get("Target").cloned().unwrap_or(Value::Null);
-            let ro = m.get("ReadOnly").and_then(|v| v.as_bool()).unwrap_or(false);
-            let options = if ro {
-                serde_json::json!(["ro"])
-            } else {
-                serde_json::json!([])
-            };
-            serde_json::json!({
-                "type": typ,
-                "source": source,
+            let options = m
+                .get("Options")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!([]));
+            podman_mounts.push(serde_json::json!({
+                "type": "tmpfs",
+                "source": "tmpfs",
                 "destination": target,
                 "options": options,
-            })
-        })
-        .collect();
+            }));
+            continue;
+        }
+        let source = m.get("Source").cloned().unwrap_or(Value::Null);
+        let target = m.get("Target").cloned().unwrap_or(Value::Null);
+        let ro = m.get("ReadOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+        let options = if ro {
+            serde_json::json!(["ro"])
+        } else {
+            serde_json::json!([])
+        };
+        podman_mounts.push(serde_json::json!({
+            "type": typ,
+            "source": source,
+            "destination": target,
+            "options": options,
+        }));
+    }
     // libpod SpecGenerator 的端口字段是 `portmappings`（扁平 []PortMapping，
     // host_port/container_port 为**数字** uint16）；入参沿用 Docker PortBinding
     // 嵌套形状（{"PORT/PROTO": [{HostIp, HostPort}]，compat serde 标签为
@@ -389,6 +419,9 @@ pub fn keep_id_create_body(
         // catatonit = PID 1；PID 命名空间非 private 时禁用（无法注入 init）
         "init": init_enabled,
         "mounts": podman_mounts,
+        // named volume（数据卷）：与 mounts 同源分流（见上方 Type 分流注释）；
+        // 空数组 = 无卷（specgen omitempty 等价）
+        "volumes": podman_volumes,
         // libpod 原生字段 `netns.nsmode`，不是 Docker compat 的 `network_mode`
         // （后者 libpod REST API 静默忽略 → 默认走 pasta）
         "netns": match network_mode {

@@ -21,3 +21,4 @@ pub mod passthrough;
 pub mod pty;
 pub mod root;
 pub mod socket;
+pub mod volume;

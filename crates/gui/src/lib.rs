@@ -160,6 +160,10 @@ pub fn run(mode: AppMode, _config_file: Option<String>) {
             commands::config::list_host_path_suggestions,
             commands::config::list_user_resource_dirs,
             commands::config::conf_templates,
+            // 数据卷（named volume：卷名下拉 / 卷管理面板）
+            commands::volume::volume_list,
+            commands::volume::volume_create,
+            commands::volume::volume_rm,
             commands::config::conf_template_get,
             commands::config::conf_template_expand,
             commands::config::passthrough_preview,

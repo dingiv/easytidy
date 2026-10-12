@@ -124,6 +124,22 @@ pub struct MountConfig {
     pub read_only: bool,
 }
 
+/// 数据卷（named volume）挂载条目：卷名 → 容器内挂载点。
+///
+/// 卷独立于容器存在（podman volume）：**删容器/重建/快照不丢数据**，跨容器
+/// 可共享——与 bind（宿主路径耦合）互补。挂载点不存在由引擎创建；卷名非法/
+/// 挂载点冲突由 podman 校验并透传可读错误。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VolumeMount {
+    /// 卷名（podman volume；宿主全量列表见卷管理面板）
+    pub name: String,
+    /// 容器内绝对路径（挂载点）
+    pub container_path: String,
+    /// 只读
+    #[serde(default)]
+    pub read_only: bool,
+}
+
 /// UID/GID 重映射条目（对应 podman `--uidmap container:host:length` /
 /// OCI `linux.uidMappings` 的 `{containerID, hostID, size}`）。
 ///
@@ -279,6 +295,9 @@ pub struct ContainerParams {
     pub image: String,
     /// 路径映射（bind mount）
     pub mounts: Vec<MountConfig>,
+    /// 数据卷挂载（podman named volume；空 = 不挂，skip-if-empty）。与 mounts
+    /// 并存：bind = 宿主路径耦合，volume = 独立存储、删容器/重建/快照不丢。
+    pub volumes: Vec<VolumeMount>,
     /// 网络配置（默认 Host 模式）
     pub network: NetworkConfig,
     /// 用户命名空间 keep-id：开启时宿主登录 uid ↔ 容器同 uid 锁死
@@ -356,6 +375,7 @@ impl Default for ContainerParams {
         Self {
             image: String::new(),
             mounts: Vec::new(),
+            volumes: Vec::new(),
             network: NetworkConfig::default(),
             keep_id: true,
             uidmaps: Vec::new(),
@@ -380,9 +400,12 @@ impl Default for ContainerParams {
 /// 行为对齐；旧字段名 `gpu` / `user_home` / `security_opts` 不再写出——避免下一轮 round-trip 时污染）。
 impl Serialize for ContainerParams {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        let mut st = s.serialize_struct("ContainerParams", 17)?;
+        let mut st = s.serialize_struct("ContainerParams", 18)?;
         st.serialize_field("image", &self.image)?;
         st.serialize_field("mounts", &self.mounts)?;
+        if !self.volumes.is_empty() {
+            st.serialize_field("volumes", &self.volumes)?;
+        }
         st.serialize_field("network", &self.network)?;
         st.serialize_field("keep_id", &self.keep_id)?;
         if !self.uidmaps.is_empty() {
@@ -466,6 +489,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 struct Seen {
                     image: bool,
                     mounts: bool,
+                    volumes: bool,
                     network: bool,
                     keep_id: bool,
                     uidmaps: bool,
@@ -488,6 +512,7 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 // None = 字段缺失（回落到 Default）；Some(_) = 已读入
                 let mut image: Option<String> = None;
                 let mut mounts: Option<Vec<MountConfig>> = None;
+                let mut volumes: Option<Vec<VolumeMount>> = None;
                 let mut network: Option<NetworkConfig> = None;
                 let mut keep_id: Option<bool> = None;
                 let mut uidmaps: Option<Vec<IdMapping>> = None;
@@ -525,6 +550,14 @@ impl<'de> Deserialize<'de> for ContainerParams {
                             }
                             mounts = Some(null_to_empty_vec(&mut map)?);
                             seen.mounts = true;
+                        }
+                        "volumes" => {
+                            if seen.volumes {
+                                return Err(de::Error::duplicate_field("volumes"));
+                            }
+                            // 裸键 `volumes:` = null → 空（与 mounts 同宽容）
+                            volumes = Some(null_to_empty_vec(&mut map)?);
+                            seen.volumes = true;
                         }
                         "network" => {
                             if seen.network {
@@ -653,6 +686,9 @@ impl<'de> Deserialize<'de> for ContainerParams {
                 if let Some(v) = mounts {
                     p.mounts = v;
                 }
+                if let Some(v) = volumes {
+                    p.volumes = v;
+                }
                 if let Some(v) = network {
                     p.network = v;
                 }
@@ -755,6 +791,9 @@ impl Default for ContainerConfig {
 pub struct ContainerConfigView {
     /// 当前生效的 bind mounts（含 engine 内部挂载：server 二进制 + socket 目录）
     pub mounts: Vec<MountConfig>,
+    /// 当前生效的数据卷挂载（named volume；serde default 兼容旧投影）
+    #[serde(default)]
+    pub volumes: Vec<VolumeMount>,
     /// 当前生效的网络配置
     pub network: NetworkConfig,
     /// 当前生效的环境变量（含系统注入 `EASYTIDY_USER_*` 与 podman 自动
@@ -1049,6 +1088,39 @@ user_name = "tidy"
         assert!(!old.tmpfs_tmp && !old.tmpfs_run, "老配置默认关");
     }
 
+    /// volumes（数据卷）serde：空 skip-if-empty、往返不丢、裸键 null → 空、
+    /// 老配置无字段 → 空、read_only 缺省 false。
+    #[test]
+    fn test_volumes_serde() {
+        let p = ContainerParams::default();
+        let v = serde_json::to_value(&p).unwrap();
+        assert!(v.get("volumes").is_none(), "空 volumes 不写出");
+
+        let mut p = ContainerParams::default();
+        p.volumes.push(VolumeMount {
+            name: "data".to_string(),
+            container_path: "/srv/data".to_string(),
+            read_only: true,
+        });
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["volumes"][0]["name"], "data");
+        assert_eq!(json["volumes"][0]["container_path"], "/srv/data");
+        assert_eq!(json["volumes"][0]["read_only"], true);
+        let back: ContainerParams = serde_json::from_value(json).unwrap();
+        assert_eq!(back.volumes, p.volumes);
+
+        // 老配置无字段 → 空；裸键 null → 空（YAML `volumes:` 与 mounts 同宽容）
+        let old: ContainerParams = serde_json::from_str(r#"{"image":"alpine"}"#).unwrap();
+        assert!(old.volumes.is_empty());
+        let bare: ContainerParams =
+            serde_json::from_str(r#"{"image":"alpine","volumes":null}"#).unwrap();
+        assert!(bare.volumes.is_empty());
+        // read_only 缺省 false
+        let d: VolumeMount =
+            serde_json::from_str(r#"{"name":"d","container_path":"/d"}"#).unwrap();
+        assert!(!d.read_only);
+    }
+
     #[test]
     fn test_container_config_roundtrip() {
         let config = ContainerConfig {
@@ -1060,6 +1132,7 @@ user_name = "tidy"
                     container_path: "/data".to_string(),
                     read_only: true,
                 }],
+                volumes: Vec::new(),
                 network: NetworkConfig {
                     mode: NetworkMode::Mapped,
                     ports: vec![PortMapping {

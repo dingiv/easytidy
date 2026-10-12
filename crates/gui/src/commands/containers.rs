@@ -104,6 +104,9 @@ pub async fn remove_container(
     // 卸载桌面图标（新格式：菜单 + 桌面副本）+ 清理宿主图标文件（避免容器删除后残留）
     let _ = desktop::remove_entry_desktops(&name);
     let _ = desktop::remove_entry_icons(&name);
+    // 清理 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>；漏清会留垃圾，
+    // 与 GUI env rm 同款，2026-10-12 补齐）
+    let _ = easytidy_core::remove_socket_dirs(&name);
 
     podman.return_podman(p).await;
     Ok(())

@@ -156,6 +156,14 @@ impl HttpClient {
         Self::raw_request(&self.full, method, path_and_query, body).await
     }
 
+    /// libpod 端点路径：拼协商版本前缀（`/v1.44/libpod/...`）。
+    ///
+    /// **无前缀的 libpod 路由 404**（2026-10-12 实测；`json*` 族默认裸路径——
+    /// 只有 Docker compat 路由吃裸路径），libpod 调用方用本方法拼。
+    pub fn libpod_path(&self, path: &str) -> String {
+        format!("{}{}", self.api_prefix, path)
+    }
+
     /// JSON 请求：返回 (status, 解析后的 body；空 body → Value::Null)。
     pub async fn json(
         &self,

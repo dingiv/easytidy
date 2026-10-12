@@ -7,6 +7,11 @@ import { DeleteOutlined, FolderOpenOutlined, LockOutlined, PlusOutlined } from '
 import { invoke } from '@tauri-apps/api/core';
 import { errMsg } from '../../lib/errors';
 import type { MountConfig } from '../../types';
+import {
+  ENGINE_MOUNT_TARGETS,
+  mountEffectiveTag,
+  type EffectiveTag,
+} from './utils';
 
 /** 后端返回的宿主路径条目（list_host_path_suggestions） */
 interface HostEntry {
@@ -43,11 +48,25 @@ interface MountsPaneProps {
   readonlyMounts?: MountConfig[];
   /** 被用户显式配置遮蔽（失效）的注入挂载目标（container_path；用户声明优先，不生效） */
   shadowedMountTargets?: string[];
+  /** 当前生效挂载（podman inspect 实时投影；edit 模式才有，null=容器未创建）。
+   *  与配置对照展示：一致 / 已变更·未应用 / 配置外·未应用。 */
+  effectiveMounts?: MountConfig[] | null;
+  /** 已挂数据卷的容器路径（bind 与卷不能同路径——反向守卫：先加了卷再加
+   *  同路径 bind 时前置拦截，否则提交才撞 podman 英文 500 duplicate dest） */
+  volumeTargets?: string[];
   onAdd(m: MountConfig): void;
   onRemove(idx: number): void;
 }
 
-export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets = [], onAdd, onRemove }: MountsPaneProps) {
+export function MountsPane({
+  mounts,
+  readonlyMounts = [],
+  shadowedMountTargets = [],
+  effectiveMounts = null,
+  volumeTargets = [],
+  onAdd,
+  onRemove,
+}: MountsPaneProps) {
   const { message } = AntApp.useApp();
   const [newMount, setNewMount] = useState({
     host_path: '',
@@ -167,16 +186,42 @@ export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets =
       message.error('容器路径不能为空');
       return;
     }
+    if (volumeTargets.includes(target)) {
+      message.error(
+        `挂载点 ${target} 已被数据卷占用（bind 与卷不能同路径，提交会被 podman 拒）`,
+      );
+      return;
+    }
     onAdd({ host_path: host, container_path: target, read_only: newMount.read_only });
     setNewMount({ host_path: '', container_path: '', read_only: false });
   };
 
   // 合并表行：用户自定义（可删）+ GUI 透传注入（只读，含被遮蔽项）
+  // + 当前生效（inspect 投影；引擎内部挂载与注入项过滤——注入项已由 gui 行
+  //   展示，避免同路径双行）
   type MountRow = MountConfig & {
-    kind: 'user' | 'gui';
+    kind: 'user' | 'gui' | 'eff';
     /** 注入项被用户同容器路径声明遮蔽（不实际生效） */
     shadowed?: boolean;
+    /** 生效行与配置的对照状态 */
+    effTag?: EffectiveTag;
   };
+  const injectedSet = new Set(readonlyMounts.map((m) => m.container_path));
+  const effAll = effectiveMounts ?? [];
+  const skippedEngine = effAll.filter((m) =>
+    ENGINE_MOUNT_TARGETS.has(m.container_path),
+  ).length;
+  const effRows: MountRow[] = effAll
+    .filter(
+      (m) =>
+        !ENGINE_MOUNT_TARGETS.has(m.container_path) &&
+        !injectedSet.has(m.container_path),
+    )
+    .map((m) => ({
+      ...m,
+      kind: 'eff' as const,
+      effTag: mountEffectiveTag(m, mounts),
+    }));
   const rows: MountRow[] = [
     ...mounts.map((m) => ({ ...m, kind: 'user' as const })),
     ...readonlyMounts.map((m) => ({
@@ -184,6 +229,7 @@ export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets =
       kind: 'gui' as const,
       shadowed: shadowedMountTargets.includes(m.container_path),
     })),
+    ...effRows,
   ];
 
   const mountColumns: TableProps<MountRow>['columns'] = [
@@ -191,10 +237,23 @@ export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets =
       title: '类型',
       key: 'kind',
       width: 150,
-      render: (_: unknown, rec: MountRow) =>
-        rec.kind === 'user' ? (
-          <span className="env-src-user">用户自定义</span>
-        ) : (
+      render: (_: unknown, rec: MountRow) => {
+        if (rec.kind === 'user') {
+          return <span className="env-src-user">用户自定义</span>;
+        }
+        if (rec.kind === 'eff') {
+          return (
+            <Tooltip title="当前生效（podman inspect 实时投影；与上方配置对照）">
+              <span>
+                当前生效{' '}
+                {rec.effTag === 'same' && <Tag color="success">一致</Tag>}
+                {rec.effTag === 'changed' && <Tag color="warning">已变更·未应用</Tag>}
+                {rec.effTag === 'extra' && <Tag color="warning">配置外·未应用</Tag>}
+              </span>
+            </Tooltip>
+          );
+        }
+        return (
           <span className="env-src-easytidy">
             GUI 透传
             {rec.shadowed && (
@@ -205,7 +264,8 @@ export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets =
               </Tooltip>
             )}
           </span>
-        ),
+        );
+      },
     },
     {
       title: '宿主路径',
@@ -217,7 +277,7 @@ export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets =
           className="path-cell"
           style={rec.shadowed ? { textDecoration: 'line-through', opacity: 0.55 } : undefined}
         >
-          {rec.kind === 'gui' && <LockOutlined className="readonly-badge-icon" />}
+          {rec.kind !== 'user' && <LockOutlined className="readonly-badge-icon" />}
           {v}
         </span>
       ),
@@ -266,6 +326,9 @@ export function MountsPane({ mounts, readonlyMounts = [], shadowedMountTargets =
           <span className="section-hint">
             GUI 透传开启时由引擎按宿主实时环境注入（X11/Wayland socket、$XDG_RUNTIME_DIR、字体图标），只读不可删；
             标「已失效」的注入项：你已声明同容器路径的挂载，用户显式配置优先，不会生效。
+            {effectiveMounts &&
+              ' 「当前生效」= podman inspect 实时投影；标「未应用」= 配置已修改，重建应用后才生效。'}
+            {skippedEngine > 0 && ` 已省略 ${skippedEngine} 条引擎内部挂载（server/dock/ets/socket）。`}
           </span>
         )}
       />

@@ -13,7 +13,7 @@
 use crate::error::{Error, Result};
 use crate::models::{
     ContainerConfig, ContainerConfigView, ContainerParams, ContainerSummary, ImageSummary,
-    MountConfig, NetworkConfig, NetworkMode, PortMapping, RebuildImageEntry,
+    MountConfig, NetworkConfig, NetworkMode, PortMapping, RebuildImageEntry, VolumeMount,
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -29,6 +29,8 @@ pub mod scripts;
 pub use exec::{ExecOnce, ExecPty};
 /// 容器内用户准备（root 一次性 exec：useradd/fontconfig；见 user.rs）
 pub mod user;
+/// named volume 生命周期（宿主侧 libpod /volumes；见 volume.rs）
+pub mod volume;
 
 /// Podman 客户端封装。
 pub struct Podman {
@@ -47,6 +49,30 @@ fn tmpfs_mount(dest: &str, options: &[&str]) -> serde_json::Value {
     serde_json::json!({
         "Type": "tmpfs",
         "Target": dest,
+        "Options": options,
+    })
+}
+
+/// named volume 挂载条目（数据卷；Docker-compat PascalCase 输入形状——与
+/// bind/tmpfs 同数组投喂，`libpod::keep_id_create_body` 出口按
+/// `Type=volume` 分流为 specgen `NamedVolume{Name, Dest, Options}`）。
+///
+/// **Options 恒含 `U`**（podman 挂载选项：卷属主交给容器主进程用户，由
+/// podman 按容器 userns 自行翻译）——keep-id 下幂等（容器 uid = 宿主 uid），
+/// **非 keep-id 下是唯一正确解**（否则容器用户看到的属主是 nobody 写不进；
+/// 宿主侧逆推 subuid 基址不稳健，实测 UID 直传会踩 subuid 翻译坑，见
+/// AGENTS 数据卷条目）。`ro` 照常追加。卷名/挂载点由调用方先校验；与 bind
+/// 的挂载点冲突、卷名非法由 podman 拒并透传。
+fn volume_mount(name: &str, dest: &str, read_only: bool) -> serde_json::Value {
+    let mut options: Vec<serde_json::Value> = Vec::new();
+    if read_only {
+        options.push(serde_json::json!("ro"));
+    }
+    options.push(serde_json::json!("U"));
+    serde_json::json!({
+        "Type": "volume",
+        "Name": name,
+        "Dest": dest,
         "Options": options,
     })
 }
@@ -438,7 +464,77 @@ impl Podman {
     /// `fast=true`：附加 fork 扩展 `easytidy_fast=true`（跳过 RW 层全树 chown）。
     /// **仅限快速重建**（commit 镜像源自同 uidmap 容器，同映射直通安全）；常规
     /// create 一律 `false`——注册表镜像顶层归属与新容器映射不保证一致。
+    ///
+    /// 本方法是外层壳（create 失败的孤儿善后）；实际创建在 [`Self::create_inner`]。
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_with_config_named(
+        &self,
+        name: &str,
+        container_name: &str,
+        image: &str,
+        bins: &crate::ContainerBins,
+        config: &ContainerConfig,
+        fast: bool,
+        rebuild: bool,
+    ) -> Result<String> {
+        // 预扫：本次将**新造**的卷（此刻不存在 → 内层 volume_ensure 会创建）。
+        // 失败善后只删这些——用户已有的卷（哪怕带 easytidy label）绝不碰。
+        let mut created_by_us: Vec<String> = Vec::new();
+        for v in &config.params.volumes {
+            if matches!(self.volume_exists(v.name.trim()).await, Ok(false)) {
+                created_by_us.push(v.name.clone());
+            }
+        }
+        let res = self
+            .create_inner(name, container_name, image, bins, config, fast, rebuild)
+            .await;
+        if res.is_err() {
+            // 守卫：有同名或 <name>_tmp 容器（重建失败场景——目录/卷属于存活
+            // 容器）→ 一律不碰；探测失败按「有」处理（保守不删）。
+            let has_name = self.has_easytidy_container(name).await.unwrap_or(true);
+            let has_tmp = self
+                .has_easytidy_container(&format!("{name}_tmp"))
+                .await
+                .unwrap_or(true);
+            if !has_name && !has_tmp {
+                // ① 孤儿 socket 目录：create 早期就建了 bind 源目录
+                //（easytidy/<name>），失败则纯垃圾（实测 duplicate dest 留空目录）。
+                // 要求**为空**才删（非空 = 可能有存活用途）。
+                if let Ok(dir) = crate::socket_dir_for(name) {
+                    let empty = std::fs::read_dir(&dir)
+                        .map(|mut d| d.next().is_none())
+                        .unwrap_or(false);
+                    if empty {
+                        tracing::debug!("create 失败，清理孤儿 socket 目录：{}", dir.display());
+                        let _ = std::fs::remove_dir_all(&dir);
+                    }
+                }
+                // ② 本次新造的孤儿卷：带我们 label + 空闲（mount_count=0）才删
+                if !created_by_us.is_empty() {
+                    if let Ok(list) = self.volume_list().await {
+                        for vname in &created_by_us {
+                            let Some(info) = list.iter().find(|v| &v.name == vname) else {
+                                continue; // ensure 之前就失败了 → 卷不存在
+                            };
+                            if info.mount_count == 0
+                                && info.labels.get("manager").map(String::as_str)
+                                    == Some("easytidy")
+                            {
+                                tracing::debug!("create 失败，清理本次新造的孤儿卷：{vname}");
+                                let _ = self.volume_remove(vname, false).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        res
+    }
+
+    /// 实际创建（[`Self::create_with_config_named`] 外层壳的内层；失败孤儿善后
+    /// 见外层壳）。
+    #[allow(clippy::too_many_arguments)]
+    async fn create_inner(
         &self,
         name: &str,
         container_name: &str,
@@ -469,9 +565,7 @@ impl Podman {
         // 先于容器存在，按容器名寻址——纯 name 不依赖 config，避免 config 漂移分叉）
         let socket_host_dir = crate::socket_dir_for(name)?;
 
-        tokio::fs::create_dir_all(&socket_host_dir)
-            .await
-            .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
+        Self::create_socket_dir(&socket_host_dir).await?;
 
         // 构建标签
         let mut labels = HashMap::new();
@@ -524,6 +618,21 @@ impl Podman {
                 mounts.push(tmpfs_mount(xdg, &["rw", "nosuid", "nodev", "mode=0700"]));
             }
         }
+        // named volume 条目（数据卷）：与 bind/tmpfs 同数组投喂，出口分流到
+        // body.volumes（specgen NamedVolume）。前置校验给可读错误；卷名非法/
+        // 挂载点冲突由 podman 拒并透传（409/duplicate dest 等）。
+        for v in &config.params.volumes {
+            if v.name.trim().is_empty() {
+                return Err(Error::Config("数据卷名不能为空".to_string()));
+            }
+            if !v.container_path.starts_with('/') {
+                return Err(Error::Config(format!(
+                    "数据卷 {} 的挂载点须为绝对路径：{}",
+                    v.name, v.container_path
+                )));
+            }
+            mounts.push(volume_mount(&v.name, &v.container_path, v.read_only));
+        }
         // Server 二进制（只读）
         mounts.push(bind(
             bins.server.to_string_lossy().to_string(),
@@ -557,6 +666,18 @@ impl Podman {
         // 上移到挂载展开前——容器侧 ${HOME}/${USER} 展开需容器 uid/gid/user_name。
         let host = crate::userenv::host_user();
         let (user_uid, user_gid) = resolve_container_user(&config.params, host.as_ref())?;
+
+        // 数据卷 ensure（幂等）：不存在则带 `manager=easytidy` label 创建；
+        // 已存在的卷（用户/外部工具建，全量列出策略）原样挂用、不改 label/属主。
+        // 属主 = 默认（调用者本人）——keep-id 下即容器用户，可写；**不传
+        // UID/GID**（实测 podman 走 subuid 翻译会锁死双方，见 volume_ensure）。
+        // 失败阻断 create 并给可读错误——数据卷是用户数据意图，静默降级
+        // （podman 全自动建无 label）更糟。
+        for v in &config.params.volumes {
+            self.volume_ensure(v.name.trim()).await.map_err(|e| {
+                Error::Config(format!("准备数据卷 {} 失败：{e}", v.name))
+            })?;
+        }
 
         // 挂载路径变量展开（${HOME}/${USER}/${UID}/${GID}，宿主侧/容器侧上下文
         // 相关）：占位符 → 具体路径，随后 validate_mount 校验。容器侧 HOME/USER
@@ -1214,6 +1335,10 @@ impl Podman {
         if self.has_easytidy_container(&tmp_name).await? {
             tracing::warn!("清理残留 {tmp_name} 容器（上次重建中断的遗留）");
             self.remove(&tmp_name, true).await?;
+            // 连带清它的 socket 目录（start 时 ensure_socket_dir 建的空目录；
+            // bind 源是身份目录，这个纯垃圾——resolve_socket_dirs 不匹配
+            // `<name>_tmp` 前缀，不主动清会永久残留）
+            let _ = crate::remove_socket_dirs(&tmp_name);
         }
 
         // 1. 停原容器（随后 commit 停止态快照一致）
@@ -1315,6 +1440,7 @@ impl Podman {
         //    恢复原容器
         if let Err(e) = self.start_and_confirm(&tmp_name).await {
             let _ = self.remove(&tmp_name, true).await; // 清理未就绪的 tmp
+            let _ = crate::remove_socket_dirs(&tmp_name);
             self.restore_original(name).await;
             return Err(Error::Connect(format!(
                 "重建失败：新容器未能确认就绪（已回滚，原容器已恢复运行）：{e}"
@@ -1324,6 +1450,7 @@ impl Podman {
         // 5. 确认就绪 → 删原容器（删除失败 → 回滚：删新留旧，恢复原容器运行）
         if let Err(e) = self.remove(name, true).await {
             let _ = self.remove(&tmp_name, true).await;
+            let _ = crate::remove_socket_dirs(&tmp_name);
             self.restore_original(name).await;
             return Err(Error::Connect(format!(
                 "重建失败：原容器无法删除（已回滚，原容器已恢复运行）：{e}"
@@ -1340,9 +1467,11 @@ impl Podman {
             )));
         }
 
-        // 7. 清理旧代 socket 目录（新代 = easytidy/<name>，由 create 建；旧
-        //    `<name>-<hash>` 代目录清理，纯 name 目录即当前代 → 跳过，避免误删
-        //    正在使用的目录）
+        // 7. 清理 tmp socket 目录（start(tmp) 时 ensure_socket_dir 建的空目录；
+        //    bind 源是身份目录，纯垃圾）+ 旧代 socket 目录（新代 =
+        //    easytidy/<name>，由 create 建；旧 `<name>-<hash>` 代目录清理，纯
+        //    name 目录即当前代 → 跳过，避免误删正在使用的目录）
+        let _ = crate::remove_socket_dirs(&tmp_name);
         let new_socket_dir = crate::socket_dir_for(name)?;
         for legacy in legacy_socket_dirs {
             if legacy != new_socket_dir {
@@ -1473,24 +1602,55 @@ impl Podman {
             .ok_or_else(|| Error::Connect(format!("检查容器配置失败：{name} 不存在")))?;
 
         let mut mounts = Vec::new();
+        let mut volumes = Vec::new();
         if let Some(mount_list) = info.get("Mounts").and_then(|m| m.as_array()).cloned() {
             for m in mount_list {
-                if m.get("Type").and_then(|t| t.as_str()) != Some("bind") {
-                    continue;
+                match m.get("Type").and_then(|t| t.as_str()) {
+                    Some("bind") => {
+                        mounts.push(MountConfig {
+                            host_path: m
+                                .get("Source")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            container_path: m
+                                .get("Destination")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string(),
+                            read_only: !m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
+                        });
+                    }
+                    Some("volume") => {
+                        // Docker 兼容投影：Name = 卷名；缺省时从 Source
+                        //（…/volumes/<name>/_data）取上级目录名回退。
+                        let name = m
+                            .get("Name")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or_else(|| {
+                                m.get("Source").and_then(|v| v.as_str()).and_then(|s| {
+                                    std::path::Path::new(s)
+                                        .parent()?
+                                        .file_name()?
+                                        .to_str()
+                                        .map(str::to_string)
+                                })
+                            });
+                        if let Some(name) = name {
+                            volumes.push(VolumeMount {
+                                name,
+                                container_path: m
+                                    .get("Destination")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                read_only: !m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
+                            });
+                        }
+                    }
+                    _ => {}
                 }
-                mounts.push(MountConfig {
-                    host_path: m
-                        .get("Source")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    container_path: m
-                        .get("Destination")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                    read_only: !m.get("RW").and_then(|v| v.as_bool()).unwrap_or(true),
-                });
             }
         }
 
@@ -1553,6 +1713,7 @@ impl Podman {
 
         Ok(ContainerConfigView {
             mounts,
+            volumes,
             network: NetworkConfig {
                 mode: if host_network {
                     NetworkMode::Host
@@ -1746,9 +1907,27 @@ impl Podman {
         let Some(dir) = sock.parent() else {
             return Err(Error::Connect("socket 路径无父目录".to_string()));
         };
+        Self::create_socket_dir(dir).await
+    }
+
+    /// 创建/规范化 socket 目录（$XDG_RUNTIME_DIR/easytidy/<name>）：**恒 chmod
+    /// 1777**（幂等，每次 start 顺带自愈存量 755 目录）。
+    ///
+    /// 不能用 755：**非 keep-id 容器**的 server 以容器 uid 运行（宿主视角是
+    /// subuid 段，如 101000）——755 下它连 `server.sock` 都 bind 不了（实测
+    /// Permission denied，xt-probe-nokeep 2026-10-12，先于卷问题暴露）。
+    /// sticky 位防跨用户删改（与 /tmp 同款语义）；socket 文件本身 server 侧
+    /// 另设 0777（宿主 GUI/CLI 连接需写权限）。
+    async fn create_socket_dir(dir: &std::path::Path) -> Result<()> {
         tokio::fs::create_dir_all(dir)
             .await
             .map_err(|e| Error::Connect(format!("创建 socket 目录失败：{e}")))?;
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) =
+            tokio::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o1777)).await
+        {
+            tracing::warn!("socket 目录 chmod 1777 失败（{}）：{e}", dir.display());
+        }
         Ok(())
     }
 
@@ -2509,6 +2688,69 @@ mod tests {
         assert_eq!(m[1]["source"], "/host/x");
         assert_eq!(m[1]["destination"], "/run/easytidy");
         assert!(m[1]["options"].as_array().unwrap().is_empty(), "非 ro bind 无 options");
+    }
+
+    #[test]
+    fn test_libpod_body_volume_partition() {
+        // 同一输入数组三类条目按 Type 分流：bind/tmpfs → body.mounts；
+        // volume → body.volumes（specgen NamedVolume{Name,Dest,Options}）。
+        let mounts = vec![
+            serde_json::json!({
+                "Type": "bind",
+                "Source": "/host/x",
+                "Target": "/run/easytidy",
+                "ReadOnly": false,
+            }),
+            tmpfs_mount("/tmp", &["rw", "mode=1777"]),
+            volume_mount("data", "/srv/data", true),
+            volume_mount("cache", "/var/cache", false),
+        ];
+        let body = crate::libpod::keep_id_create_body(
+            "c1",
+            "c1",
+            "alpine:latest",
+            vec!["/bin/sh".into()],
+            Vec::new(),
+            std::collections::HashMap::new(),
+            mounts,
+            None,
+            None,
+            None,
+            None,
+            Some("1000:1000"),
+            true,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            Vec::new(),
+            None,
+            Vec::new(),
+        );
+        let m = body["mounts"].as_array().expect("mounts 应为数组");
+        assert_eq!(m.len(), 2, "volume 条目应分流走：{m:?}");
+        assert_eq!(m[0]["type"], "bind");
+        assert_eq!(m[1]["type"], "tmpfs");
+        let v = body["volumes"].as_array().expect("volumes 应为数组");
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0]["Name"], "data");
+        assert_eq!(v[0]["Dest"], "/srv/data");
+        assert!(
+            v[0]["Options"].as_array().unwrap().iter().any(|o| o == "ro"),
+            "read_only → 含 ro：{:?}",
+            v[0]["Options"]
+        );
+        assert_eq!(
+            v[0]["Options"].as_array().unwrap().iter().filter(|o| *o == "U").count(),
+            1,
+            "U 恒在（属主交容器用户）"
+        );
+        assert_eq!(v[1]["Name"], "cache");
+        assert_eq!(
+            v[1]["Options"],
+            serde_json::json!(["U"]),
+            "rw 卷 → 仅 U（无 ro）"
+        );
     }
 
     #[test]

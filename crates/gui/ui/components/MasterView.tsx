@@ -21,6 +21,7 @@ import {
   CloseOutlined,
   DesktopOutlined,
   DatabaseOutlined,
+  HddOutlined,
   InfoCircleOutlined,
   PictureOutlined,
   PlusOutlined,
@@ -36,11 +37,12 @@ import { SettingsPanel } from './SettingsPanel';
 import { FlavorsPanel } from './FlavorsPanel';
 import { EngineInfoPanel } from './EngineInfoPanel';
 import { ImagesPanel } from './ImagesPanel';
+import { VolumesPanel } from './VolumesPanel';
 import { TemplateEditorPane } from './TemplateEditorPane';
 import type { ConfTemplate, ContainerConfig } from '../types';
 import logo from '../assets/logo.png';
 
-type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'template-editor' | 'engine-info' | 'desktop-icons' | 'settings';
+type PaneKind = 'containers' | 'new-container' | 'flavors' | 'images' | 'volumes' | 'template-editor' | 'engine-info' | 'desktop-icons' | 'settings';
 
 interface Pane {
   id: string;
@@ -61,6 +63,7 @@ const PANE_TITLE: Record<PaneKind, string> = {
   'new-container': '新建容器',
   flavors: '模板',
   images: '镜像',
+  volumes: '数据卷',
   'template-editor': '模板配置',
   'engine-info': '环境信息',
   'desktop-icons': '桌面图标',
@@ -239,6 +242,12 @@ function MasterViewInner() {
               onClick={() => openPane('images')}
             />
             <SidebarIcon
+              label="数据卷"
+              icon={<HddOutlined />}
+              active={isActive('volumes')}
+              onClick={() => openPane('volumes')}
+            />
+            <SidebarIcon
               label="环境信息"
               icon={<InfoCircleOutlined />}
               active={isActive('engine-info')}
@@ -317,6 +326,7 @@ function MasterViewInner() {
                   />
                 )}
                 {p.kind === 'images' && <ImagesPanel />}
+                {p.kind === 'volumes' && <VolumesPanel />}
                 {p.kind === 'engine-info' && <EngineInfoPanel />}
                 {p.kind === 'desktop-icons' && <DesktopIconsPanel />}
                 {p.kind === 'settings' && <SettingsPanel />}
